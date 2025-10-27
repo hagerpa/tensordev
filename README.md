@@ -32,7 +32,7 @@ path_a = np.concatenate(
 Compute the signature:
 
 ```python
-sig_a = NumpyCore.tensor_signature(path_a, trunc=depth)
+sig_a = NumpyCore.tensor_path_signature(path_a, trunc=depth)
 len(sig_a), [lvl.shape for lvl in sig_a]
 ```
 
@@ -72,7 +72,7 @@ If you want framework-optimized code, you need to import the corresponding modul
 from tensordev.src.tensordev.core import Jax
 JaxCore = Jax()
 
-sig_a = JaxCore.tensor_signature(path_a, trunc=depth)
+sig_a = JaxCore.tensor_path_signature(path_a, trunc=depth)
 ```
 
 ```
