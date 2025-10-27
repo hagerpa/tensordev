@@ -1,0 +1,1 @@
+# Todo try to implement main tensor ops (product, sum, ..., fmexp, log) with numba + jit
