@@ -1114,3 +1114,30 @@ class Universal(Generic[Array]):
         if start_at_level_one:
             levels = levels[1:]
         return self.xp.concat(levels, axis=-1) if levels else self.xp.asarray([], dtype=levels[0].dtype)
+
+
+    def _index_add(self, target: DenseElem, source: DenseElem, index: DenseElem):
+        """
+        - Should be private class
+        """
+        pass
+
+
+    def tensor_shuffle_homogeneous(self, Ai, Bi, d):
+        """
+        sparse einsum 
+        at initialization, get d and if wanted, precomoute right away, 
+        check whether precomputed shuffle is here or not; if yes, check if dimension d matches.
+        check also if precomputed.
+        """
+        pass
+
+
+    def tensor_shuffle(self, A, B):
+        """
+        sparse einsum 
+        add optional d: if provided assert that d matches dimension of A and B; if d is not proivided, then 
+        from second level of A -> infer dimension d and truncation levels
+        if not precoputed for d and n and m then do; 
+        """
+        pass
