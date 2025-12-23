@@ -1119,6 +1119,11 @@ class Universal(Generic[Array]):
     def _index_add(self, target: DenseElem, source: DenseElem, index: DenseElem):
         """
         - Should be private class
+        - Example:
+        target = [0, 1, 3]
+        source = [1, 5, 4]
+        index = [0,2,2]
+        => Result = [0+1,1+0,3+5+4] = [1,1,12]
         """
         pass
 
