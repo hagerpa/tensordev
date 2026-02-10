@@ -1128,6 +1128,20 @@ class Universal(Generic[Array]):
         pass
 
 
+    def index_add(self, a, target_idx):
+        """
+        Accepts an 2d-array of shape (N_sample, n). For each sample the values are 
+        added up based on the indices specified in target_idx.
+
+        Example:
+
+        a = np.array([[1,2,3,4,1,4]]) # shape (1,6)
+        target_idx = np.array([1,2,2,1]) # shape (4,) with sum 6
+        >>> np.array([1,5,5,4]) # =(1,2+3,4+1,4)
+        """
+        pass
+
+
     def tensor_shuffle_homogeneous(self, Ai, Bi, d):
         """
         sparse einsum 
