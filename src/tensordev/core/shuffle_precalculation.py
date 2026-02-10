@@ -3,7 +3,7 @@ import numba as nb
 
 from typing import Tuple
 
-from shuffle_basics import get_tensor_algebra_size, factorial_nb, get_digits_of_word, shuffle_nb
+from tensordev_prototype.shuffle_basics import get_tensor_algebra_size, factorial_nb, get_digits_of_word, shuffle_nb
 
 
 @nb.njit(nb.types.Tuple((nb.int32[:], nb.int32[:]))(nb.int32[:], nb.int32[:]), fastmath=True)
@@ -102,7 +102,8 @@ def partition(k: int, n: int, m: int, d: int) -> Tuple[np.ndarray, np.ndarray]:
         row1 = np.empty(max_size, dtype=np.int32)
 
         # we need to perform a weighted sum by powers of d, since n is greater than m, the following is enough
-        pow_d = np.array([d**(n-l-1) for l in range(n)])
+        pow_d_n = np.array([d**(n-l-1) for l in range(n)])
+        pow_d_m = np.array([d**(m-l-1) for l in range(m)])
 
         # We start Gosper's Hack (http://programmingforinsomniacs.blogspot.com/2018/03/gospers-hack-explained.html)
         set = (1 << n) - 1 
@@ -113,8 +114,8 @@ def partition(k: int, n: int, m: int, d: int) -> Tuple[np.ndarray, np.ndarray]:
             binary_arr = np.array([(set >> (len_k - j - 1)) & 1 for j in range(len_k)], dtype=np.bool)
 
             # update rows; ~ converts to complementary binary number
-            row0[idx] = sum(digits[binary_arr] * pow_d)
-            row1[idx] = sum(digits[~binary_arr] * pow_d[m:])
+            row0[idx] = sum(digits[binary_arr] * pow_d_n)
+            row1[idx] = sum(digits[~binary_arr] * pow_d_m)
             idx += 1
 
             # update current binary number according to Gosper's Hack
@@ -127,10 +128,10 @@ def partition(k: int, n: int, m: int, d: int) -> Tuple[np.ndarray, np.ndarray]:
     
 
 @nb.njit(
-     nb.types.Tuple((nb.uint32[:], nb.uint32[:], nb.uint32[:], nb.float64[:]))(nb.int64, nb.int64, nb.int64),
+     nb.types.Tuple((nb.int64[:], nb.int64[:], nb.int64[:], nb.float64[:]))(nb.int64, nb.int64, nb.int64),
      fastmath=True   
 )
-def assemble_shuffle_tuple(n: int, m: int, d: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _assemble_shuffle_numba(d: int, n: int, m: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Precomputes the shuffle product from (R^d)^{otimes n} x (R^d)^{otimes m} -> (R^d)^{otimes (n+m)} for n >= m.
     We store the result into four arrays corresponding to a 3d generalization of a csr format. The first array
@@ -157,7 +158,6 @@ def assemble_shuffle_tuple(n: int, m: int, d: int) -> Tuple[np.ndarray, np.ndarr
     - This function is compiled with Numba (`@njit`).
     - Only Numba-supported features are allowed.
     """
-    
 
     # Since the shuffle product is commutative, we only want to compute it for n \geq m
     assert n >= m, f"Shuffle only needs to be computed for {n} >= {m}."
@@ -171,14 +171,14 @@ def assemble_shuffle_tuple(n: int, m: int, d: int) -> Tuple[np.ndarray, np.ndarr
 
     # if m is not zero, then n cannot be zero either by the above
     if m == 0:
-        return np.ones(N, dtype=np.uint32), np.arange(N, dtype=np.uint32), np.zeros(N, dtype=np.uint32), np.ones(N, dtype=np.float64),
+        return np.ones(N, dtype=np.int64), np.arange(N, dtype=np.int64), np.zeros(N, dtype=np.int64), np.ones(N, dtype=np.float64),
     
     # from now we can assume n >= m > 0
     else:
         # preallocate memory
-        all_size = np.empty(N, dtype=np.uint32)
-        all_rows = np.empty(max_size, dtype=np.uint32)
-        all_cols = np.empty(max_size, dtype=np.uint32)
+        all_size = np.empty(N, dtype=np.int64)
+        all_rows = np.empty(max_size, dtype=np.int64)
+        all_cols = np.empty(max_size, dtype=np.int64)
         all_data = np.empty(max_size, dtype=np.float64)
 
         idx = 0
@@ -192,7 +192,34 @@ def assemble_shuffle_tuple(n: int, m: int, d: int) -> Tuple[np.ndarray, np.ndarr
                 idx += 1
             all_size[idy] = len(p1)
             idy += 1
-        sn = np.uint32(get_tensor_algebra_size(d, n-1))
-        sm = np.uint32(get_tensor_algebra_size(d, m-1))
+        sn = get_tensor_algebra_size(d, n-1)
+        sm = get_tensor_algebra_size(d, m-1)
         return all_size, all_rows[:idx] - sn, all_cols[:idx] -  sm, all_data[:idx]
     
+
+def assemble_shuffle_tuple_homogeneous(d: int, n: int, m: int):
+    """
+    Wrapper for _assemble_shuffle_numba function. Adds meta data (d,n,m) describing Tensor Data.
+    """
+    meta = (d,n,m)
+    data = _assemble_shuffle_numba(d, n, m)
+    return meta, data
+
+
+def assemble_shuffle_tuple(d: int, N: int):
+    """
+    Assembles dictionary containing all precomputed shuffles. Maximum allowed shuffle is of to tensors of level N.
+    """
+    # Create empty dictionary
+    operators = {}
+    
+    for i in range(N + 1):
+        for j in range(i + 1):
+            operators[(i, j)] = assemble_shuffle_tuple_homogeneous(d, i, j)
+    
+    # Bundle metadata with the operators
+    shuffle_algebra = {
+        "metadata": (d, N),
+        "operators": operators
+    }
+    return shuffle_algebra   
