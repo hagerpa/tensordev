@@ -3,7 +3,7 @@ import numba as nb
 
 from typing import Tuple
 
-from tensordev_prototype.shuffle_basics import get_tensor_algebra_size, factorial_nb, get_digits_of_word, shuffle_nb
+from .shuffle_basics import get_tensor_algebra_size, factorial_nb, get_digits_of_word, shuffle_nb
 
 
 @nb.njit(nb.types.Tuple((nb.int32[:], nb.int32[:]))(nb.int32[:], nb.int32[:]), fastmath=True)
