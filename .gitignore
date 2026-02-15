@@ -4,3 +4,11 @@ __pycache__/
 
 # macOS Finder metadata
 .DS_Store
+
+# Packaging artifacts
+build/
+dist/
+*.egg
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
