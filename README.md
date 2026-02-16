@@ -4,7 +4,7 @@
 This package is currently in development. You can use it by creating core objects. Here are a few examples:
 
 ```python
-from tensordev.src.tensordev.core import Universal
+from tensordev import Universal
 import numpy as np
 
 NumpyCore = Universal(np.array(0).__array_namespace__)
@@ -66,10 +66,10 @@ for i in range(depth):
     assert np.allclose(sig_c_[i], sig_c[i][:, 1])  # second block equals sig_a ⊗ sig_b
 ```
 
-If you want framework-optimized code, you need to import the corresponding module manually, e.g., for JAX:
+If you want framework-optimized code, import the corresponding core, e.g., for JAX:
 
 ```python
-from tensordev.src.tensordev.core import Jax
+from tensordev import Jax
 JaxCore = Jax()
 
 sig_a = JaxCore.tensor_path_signature(path_a, trunc=depth)

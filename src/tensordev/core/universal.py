@@ -420,14 +420,23 @@ class Universal(Generic[Array]):
         if trunc == 0 or len(X) == 0:
             return g if output_zero_level else g[1:]
 
-        # --- degree=1 fused path (Signatory style fmexp): Y_k = g_k + (1/k) Y_{k-1} ⊗ X1
+        # --- degree=1 fused path (Signatory-style fmexp):
+        # For each k, compute  Y_k = Σ_{i=0..k} g_i ⊗ (X1^{⊗(k-i)} / (k-i)!)
+        # Horner (nested form): Y_k = (((g0 ⊗ (z/k) + g1) ⊗ (z/(k-1)) + g2) ⊗ ... ⊗ (z/1) + gk),  with z := X[0].
         if len(X) == 1:
             z = X[0]
             Y = (g[0],)
             for k in range(1, trunc + 1):
-                prod = self.tensor_product_homogeneous(Y[k - 1], z)  # one ⊗ per k
-                gk = g[k] if k < len(g) else self.xp.zeros_like(prod)  # cheap zero
-                Y += (gk + prod * (1.0 / float(k)),)
+                # Horner for the k-th level of g ⊗ exp(z)
+                t = self.tensor_product_homogeneous(g[0], z) * (1.0 / float(k))
+
+                # i runs 1..k-1:  t <- (t + g[i]) ⊗ (z/(k-i))
+                for i in range(1, k):
+                    gi = g[i] if i < len(g) else self.xp.zeros_like(t)
+                    t = self.tensor_product_homogeneous(t + gi, z) * (1.0 / float(k - i))
+
+                gk = g[k] if k < len(g) else self.xp.zeros_like(t)
+                Y += (t + gk,)
             return Y if output_zero_level else Y[1:]
         # --- degree>1
         # E_k = (1/k) * sum_{r=1..min(k,R)} r * (X_r ⊗ E_{k-r})
