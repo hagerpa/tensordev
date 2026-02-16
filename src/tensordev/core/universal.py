@@ -6,7 +6,7 @@ from typing import Optional, Sequence, Tuple, Union, Literal, List, TypeVar, Gen
 
 import array_api._2023_12 as array_types
 
-from tensordev.src.tensordev.core.utils.annotations import jit as dummy_jit
+from tensordev.core.utils.annotations import jit as dummy_jit
 
 Array = TypeVar("Array", bound=array_types.Array)
 Elem = Sequence[Optional[Array]]  # one tensor-algebra element (level-list)
