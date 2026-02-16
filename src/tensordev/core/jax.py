@@ -7,7 +7,7 @@ import jax
 from jax import lax
 from jax import numpy as jnp
 
-from .annotations import iter_class_jittables
+from tensordev.src.tensordev.core.utils.annotations import iter_class_jittables
 from .einsum import Einsum
 from .universal import *
 
