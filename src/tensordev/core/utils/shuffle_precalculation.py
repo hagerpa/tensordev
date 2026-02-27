@@ -197,7 +197,7 @@ def _assemble_shuffle_numba(d: int, n: int, m: int) -> Tuple[np.ndarray, np.ndar
         return all_size, all_rows[:idx] - sn, all_cols[:idx] -  sm, all_data[:idx]
     
 
-def assemble_shuffle_tuple_homogeneous(d: int, n: int, m: int):
+def assemble_shuffle_algebra_homogeneous(d: int, n: int, m: int):
     """
     Wrapper for _assemble_shuffle_numba function. Adds meta data (d,n,m) describing Tensor Data.
     """
@@ -206,7 +206,7 @@ def assemble_shuffle_tuple_homogeneous(d: int, n: int, m: int):
     return meta, data
 
 
-def assemble_shuffle_tuple(d: int, N: int):
+def assemble_shuffle_algebra(d: int, N: int):
     """
     Assembles dictionary containing all precomputed shuffles. Maximum allowed shuffle is of to tensors of level N.
     """
@@ -215,7 +215,7 @@ def assemble_shuffle_tuple(d: int, N: int):
     
     for i in range(N + 1):
         for j in range(i + 1):
-            operators[(i, j)] = assemble_shuffle_tuple_homogeneous(d, i, j)
+            operators[(i, j)] = assemble_shuffle_algebra_homogeneous(d, i, j)
     
     # Bundle metadata with the operators
     shuffle_algebra = {

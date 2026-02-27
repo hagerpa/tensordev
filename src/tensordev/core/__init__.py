@@ -5,5 +5,5 @@ from .universal import Universal
 __all__ = [
 	"Einsum",
 	"Jax",
-	"Universal",
+	"Universal"
 ]
