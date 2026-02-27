@@ -10,7 +10,7 @@ import numpy as np
     ),
     fastmath=True   
 )
-def sparse_einsum_numba(Q, Ai, Bj): # rename to sparse_einsum
+def sparse_einsum(Q, Ai, Bj): 
     """
     Performs Q-product of tensor Ai and Bj. Roughly corresponds to `np.einsum('bi,bj,ijl->bl', Ai, Q, Bj)` where 
     we allow for sparse representation of Q.
@@ -72,11 +72,11 @@ def shuffle_product(shuffle_algebra, A, B):
             # Use commutativity to ensure we access the precomputed (I, j) where I >= j
             if i >= j:
                 Q = operators[(i, j)]
-                term += sparse_einsum_numba(Q, A[i], B[j]) # REPLACE BY GENERIC SPARSE EINSUM (NUMBA, NUMPY, TORCH, JAX, ...)
+                term += sparse_einsum(Q, A[i], B[j]) # REPLACE BY GENERIC SPARSE EINSUM (NUMBA, NUMPY, TORCH, JAX, ...)
             else:
                 # Swap A and B because only (j, i) is in the cache
                 Q = operators[(j, i)]
-                term += sparse_einsum_numba(Q, B[j], A[i])
+                term += sparse_einsum(Q, B[j], A[i])
         
         out.append(term)
 
