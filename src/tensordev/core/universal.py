@@ -150,40 +150,80 @@ class Universal(Generic[Array]):
         tmp = self.xp.expand_dims(Ai, -1) * self.xp.expand_dims(Bj, -2)
         return self.xp.reshape(tmp, tmp.shape[:-2] + (tmp.shape[-2] * tmp.shape[-1],))
 
-    @dummy_jit(static_argnums=0, static_argnames=("trunc",), dynamic_batchtime=("A", "B"))
-    def tensor_product(self, A: DenseElem, B: DenseElem, trunc: Optional[int] = None) -> DenseElem:
+    @dummy_jit(static_argnums=0, static_argnames=("trunc", "a_first_on", "b_first_on"),
+               dynamic_batchtime=("A", "B"))
+    def tensor_product(
+            self,
+            A: Union[DenseElem, DenseElemFirstOn],
+            B: Union[DenseElem, DenseElemFirstOn],
+            trunc: Optional[int] = None,
+            *,
+            a_first_on: bool = False,
+            b_first_on: bool = False,
+    ) -> Union[DenseElem, DenseElemFirstOn]:
         """
         Graded (Cauchy-type) product ``C = A ⊗ B`` in the free tensor algebra.
 
         For each degree ``n``,
-            C_n = ∑_{i=0..n} flatten( tensor_product_homogeneous(A_i, B_{n-i}) ).
+            C_n = ∑_{i+j=n} flatten(tensor_product_homogeneous(A_i, B_j)).
 
         Parameters
         ----------
-        A, B : sequence of ndarray
-            Levels of the left/right factors. Each ``A_k`` / ``B_k`` has shape
-            ``batch + (d**k,)``. Batch shapes and dtypes should be compatible.
+        A, B : tuple of ndarray
+            Levels of the left/right factors, each of shape ``batch + (d**k,)``.
+
+            By default, inputs are interpreted as
+            ``(A_0, A_1, ..., A_N)`` and ``(B_0, B_1, ..., B_M)``.
+
+            If ``a_first_on=True``, then ``A`` is interpreted as
+            ``(A_1, A_2, ..., A_N)``.
+
+            If ``b_first_on=True``, then ``B`` is interpreted analogously.
+
         trunc : int, optional
-            If given, truncate the result to degrees ``0..trunc``.
+            If given, truncate the result to degrees up to ``trunc``.
+
+        a_first_on, b_first_on : bool, default=False
+            Whether the corresponding input starts at degree ``1`` rather than ``0``.
 
         Returns
         -------
         tuple of ndarray
-            Levels ``C_0, ..., C_N`` with ``N = min(trunc, deg(A)+deg(B))`` if ``trunc``
-            is provided, else ``deg(A)+deg(B)``.
+            Product levels. If both flags are ``False``, returns
+            ``(C_0, C_1, ..., C_N)``. Otherwise returns ``(C_1, C_2, ..., C_N)``.
         """
         A = tuple(A)
         B = tuple(B)
-        NA, NB = len(A) - 1, len(B) - 1
-        N = (NA + NB) if trunc is None else min(NA + NB, trunc)
+
+        if len(A) == 0 or len(B) == 0:
+            return tuple()
+
+        a0 = 1 if a_first_on else 0
+        b0 = 1 if b_first_on else 0
+        N = len(A) + len(B) + a0 + b0 - 2
+        if trunc is not None:
+            N = min(N, trunc)
 
         out: List[Array] = []
-        for n in range(N + 1):
-            i_min, i_max = max(0, n - NB), min(n, NA)
-            term = self.tensor_product_homogeneous(A[i_min], B[n - i_min])
+        start = 0
+
+        if a_first_on or b_first_on:
+            start = 1
+            if a_first_on and b_first_on:
+                if N < 1:
+                    return tuple()
+                out.append(self.xp.zeros_like(A[0]))
+                start = 2
+
+        for n in range(start, N + 1):
+            i_min = max(a0, n - (len(B) + b0 - 1))
+            i_max = min(len(A) + a0 - 1, n - b0)
+            i = i_min
+            term = self.tensor_product_homogeneous(A[i - a0], B[n - i - b0])
             for i in range(i_min + 1, i_max + 1):
-                term = term + self.tensor_product_homogeneous(A[i], B[n - i])
+                term = term + self.tensor_product_homogeneous(A[i - a0], B[n - i - b0])
             out.append(term)
+
         return tuple(out)
 
     @dummy_jit(static_argnums=0, dynamic_batchtime=("A",), full_dynamic=("alpha",))
@@ -243,15 +283,20 @@ class Universal(Generic[Array]):
         return (Ak * Bk).sum(-1)
 
     @dummy_jit(static_argnums=0, dynamic_batchtime=("A", "B"))
-    def tensor_inner_product(self, A: DenseElem, B: DenseElem) -> Array:
+    def tensor_inner_product(
+            self,
+            A: Union[DenseElem, DenseElemFirstOn],
+            B: Union[DenseElem, DenseElemFirstOn],
+    ) -> Array:
         """
-        Canonical Euclidean inner product ⟨A, B⟩ = ∑_k ⟨A_k, B_k⟩,
-        summing level-wise dot products over the last axis.
+        Canonical Euclidean inner product, summing level-wise dot products over the
+        last axis.
 
         Parameters
         ----------
-        A, B : DenseElem
-            Dense graded elements (X₀, X₁, …) with matching batch shape.
+        A, B : DenseElem or DenseElemFirstOn
+            Graded elements with matching batch shape. If the inputs start at level 1,
+            the inner product is taken over the positive levels only.
 
         Returns
         -------
@@ -260,7 +305,6 @@ class Universal(Generic[Array]):
         """
         K = min(len(A), len(B))
         if K == 0:
-            # Degenerate case: return scalar
             return self.xp.asarray(0.0)
 
         acc = self.tensor_inner_product_homogeneous(A[0], B[0])
@@ -296,81 +340,157 @@ class Universal(Generic[Array]):
         y = Ynj.reshape((*Ynj.shape[:-1], -1, Bj.shape[-1]))  # (..., N, j)
         return (y * Bj[..., None, :]).sum(axis=-1)  # contract over j → (..., N)
 
-    @dummy_jit(static_argnums=0, static_argnames=("trunc", "side"), dynamic_batchtime=("W", "Y"))
     def tensor_adjoint_product(
             self,
-            W: DenseElem,  # multiplier levels (left: A, right: B)
-            Y: DenseElem,  # target levels
+            W: Union[DenseElem, DenseElemFirstOn],
+            Y: Union[DenseElem, DenseElemFirstOn],
             trunc: Optional[int],
             side: Literal["left", "right"],
-    ) -> DenseElem:
+            *,
+            w_first_on: bool = False,
+            y_first_on: bool = False,
+            first_on_out: bool = False,
+    ) -> Union[DenseElem, DenseElemFirstOn]:
         """
-        Shared accumulation for left/right adjoints.
-        For each n: sum_i/j contract(W_i/j, Y_{n+i/j}) using the side-specific homogeneous op.
+        Compute the graded adjoint product of two truncated tensor-algebra elements.
+
+        This is the shared implementation behind the left and right adjoint actions.
+        It contracts homogeneous levels of ``W`` against shifted homogeneous levels
+        of ``Y`` and sums all contributions that land in the same output degree.
+
+        Degree convention
+        -----------------
+        Let ``W_i`` denote the degree-``i`` level of ``W`` and ``Y_j`` the degree-``j``
+        level of ``Y``. For each output degree ``n``, this routine computes
+
+            Z_n = sum_i Adj(W_i, Y_{n+i}),
+
+        where ``Adj`` is either the left or right homogeneous adjoint contraction,
+        depending on ``side``.
+
+        More precisely:
+        - for ``side="left"``, use ``tensor_adjoint_left_homogeneous(W_i, Y_{n+i})``;
+        - for ``side="right"``, use ``tensor_adjoint_right_homogeneous(W_i, Y_{n+i})``.
+
+        Input representation
+        --------------------
+        The inputs may be stored either as dense graded elements or as first-on
+        graded elements:
+
+        - dense:
+            ``(A_0, A_1, ..., A_N)``
+        - first-on:
+            ``(A_1, A_2, ..., A_N)``
+
+        The flags ``w_first_on`` and ``y_first_on`` specify which convention is used
+        for ``W`` and ``Y`` respectively.
+
+        Output representation
+        ---------------------
+        The returned tuple is intended to be either
+
+        - dense, if ``first_on_out=False``:
+            ``(Z_0, Z_1, ..., Z_M)``
+        - first-on, if ``first_on_out=True``:
+            ``(Z_1, Z_2, ..., Z_M)``
+
+        where ``M`` is the largest output degree allowed by the input ranges and by
+        ``trunc``.
+
+        Important
+        ---------
+        This routine should return output in a canonical graded format:
+        - dense output must begin at degree 0,
+        - first-on output must begin at degree 1.
+
+        If the lowest nonzero computable degree is higher than that starting degree,
+        the missing lower degrees should be represented by zero levels rather than
+        being silently skipped. Otherwise the returned tuple no longer has a well-defined
+        dense/first-on interpretation.
+
+        Parameters
+        ----------
+        W :
+            Multiplier graded element. Its stored levels are interpreted as starting
+            at degree 0 or degree 1 according to ``w_first_on``.
+        Y :
+            Target graded element. Its stored levels are interpreted as starting
+            at degree 0 or degree 1 according to ``y_first_on``.
+        trunc :
+            Optional maximum output degree. If ``None``, all output degrees permitted
+            by the available levels of ``W`` and ``Y`` are produced.
+        side :
+            Which adjoint action to use:
+            - ``"left"``  -> left homogeneous adjoint contraction,
+            - ``"right"`` -> right homogeneous adjoint contraction.
+        w_first_on :
+            Whether ``W`` is stored in first-on format.
+        y_first_on :
+            Whether ``Y`` is stored in first-on format.
+        first_on_out :
+            Whether to return the result in first-on format.
+
+        Returns
+        -------
+        DenseElem or DenseElemFirstOn
+            The graded adjoint product, truncated at degree ``trunc`` if requested,
+            in the storage convention specified by ``first_on_out``.
+
+        Notes
+        -----
+        If ``W`` has degrees ``i`` in some range and ``Y`` has degrees ``j`` in some
+        range, then the admissible output degrees are those for which at least one
+        pair ``(i, j)`` satisfies ``j = n + i``. This determines the natural output
+        degree window before truncation is applied.
         """
         W, Y = tuple(W), tuple(Y)
-        NW, NY = len(W) - 1, len(Y) - 1
-        N = NY if trunc is None else min(NY, trunc)
-        contract = self.tensor_adjoint_left_homogeneous if side == "left" else self.tensor_adjoint_right_homogeneous
+
+        if len(W) == 0 or len(Y) == 0:
+            return tuple()
+
+        w0 = 1 if w_first_on else 0
+        y0 = 1 if y_first_on else 0
+
+        w_last = w0 + len(W) - 1
+        y_last = y0 + len(Y) - 1
+
+        contract = (
+            self.tensor_adjoint_left_homogeneous
+            if side == "left"
+            else self.tensor_adjoint_right_homogeneous
+        )
+
+        start = 1 if first_on_out else 0
+        n_min = max(start, y0 - w_last)
+        n_max = y_last - w0
+        if trunc is not None:
+            n_max = min(n_max, trunc)
+
+        if n_max < start:
+            return tuple()
+
+        # Find a template for each output degree from the first available contributing term.
+        def zero_for_degree(n: int):
+            i_min = max(w0, y0 - n)
+            i_max = min(w_last, y_last - n)
+            if i_min > i_max:
+                raise ValueError(f"No contributing term available to infer shape for degree {n}.")
+            term = contract(W[i_min - w0], Y[n + i_min - y0])
+            return self.xp.zeros_like(term)
 
         out = []
-        for n in range(N + 1):
-            m = min(NW, NY - n)
-            terms = [contract(W[i], Y[n + i]) for i in range(m + 1)]
+        for n in range(start, n_max + 1):
+            if n < n_min:
+                out.append(zero_for_degree(n))
+                continue
+
+            i_min = max(w0, y0 - n)
+            i_max = min(w_last, y_last - n)
+
+            terms = [contract(W[i - w0], Y[n + i - y0]) for i in range(i_min, i_max + 1)]
             out.append(terms[0] if len(terms) == 1 else sum(terms[1:], terms[0]))
+
         return tuple(out)
-
-    @dummy_jit(static_argnums=0, static_argnames=("trunc",), dynamic_batchtime=("A", "Y"))
-    def tensor_adjoint_left(self, A: DenseElem, Y: DenseElem, trunc: Optional[int] = None) -> DenseElem:
-        """
-        Left-adjoint of multiplication by ``A``: find ``Z`` such that
-        ``<Z, X> = <Y, A ⊗ X>`` for all ``X`` (canonical Euclidean inner product).
-
-        In components, for each ``n``:
-          ``Z_n = ∑_i  (A_i^T • reshape(Y_{n+i}, (..., A_i_width, -1)))``,
-        where ``A_i_width = A_i.shape[-1]`` and ``•`` contracts that width.
-
-        Parameters
-        ----------
-        A : DenseElem
-            Left multiplier levels.
-        Y : DenseElem
-            Target element levels.
-        trunc : int, optional
-            If given, return degrees ``0..trunc`` only.
-
-        Returns
-        -------
-        DenseElem
-            Levels of the adjoint result ``Z``.
-        """
-        return self.tensor_adjoint_product(A, Y, trunc, side="left")
-
-    @dummy_jit(static_argnums=0, static_argnames=("trunc",), dynamic_batchtime=("B", "Y"))
-    def tensor_adjoint_right(self, B: DenseElem, Y: DenseElem, trunc: Optional[int] = None) -> DenseElem:
-        """
-        Right-adjoint of multiplication by ``B``: find ``Z`` such that
-        ``<Z, X> = <Y, X ⊗ B>`` for all ``X``.
-
-        In components, for each ``n``:
-          ``Z_n = ∑_j  (reshape(Y_{n+j}, (..., -1, B_j_width)) • B_j)``,
-        contracting over the right width axis.
-
-        Parameters
-        ----------
-        B : DenseElem
-            Right multiplier levels.
-        Y : DenseElem
-            Target element levels.
-        trunc : int, optional
-            If given, return degrees ``0..trunc`` only.
-
-        Returns
-        -------
-        DenseElem
-            Levels of the adjoint result ``Z``.
-        """
-        return self.tensor_adjoint_product(B, Y, trunc, side="right")
 
     # ----------------------------------------------------------------------
     # Polynomial / Series Operations
@@ -395,10 +515,12 @@ class Universal(Generic[Array]):
 
         Algorithm
         ---------
-        Recurrences (free tensor algebra):
-            k E_k = Σ_{r=1..k} r Σ_{a+b=k-r} β(a,b) · E_a X_r E_b,
-            k Y_k = k g_k + Σ_{r=1..k} r Σ_{a+b=k-r} β(a,b) · Y_a X_r E_b,
-        where β(a,b) = a! b! / (a+b+1)! and X_r is the degree-r part of X.
+        - For the pure degree-1 case (`len(X) == 1`), use the fused Horner scheme
+          for `g ⊗ exp(X₁)`.
+        - In the general case, build the truncated exponential
+              exp(X) = I + X + X^{⊗2}/2! + ... + X^{⊗trunc}/trunc!
+          exactly via the truncated tensor power series, and then compute
+              Y = g ⊗ exp(X).
 
         Parameters
         ----------
@@ -416,9 +538,11 @@ class Universal(Generic[Array]):
         Tuple[Array, ...]
             (Y₀, …, Y_trunc) for `output_zero_level=True`; otherwise (Y₁, …, Y_trunc).
         """
-        if trunc < 0: raise ValueError("trunc>=0")
+        if trunc < 0:
+            raise ValueError("trunc>=0")
         if trunc == 0 or len(X) == 0:
-            return g if output_zero_level else g[1:]
+            out = g[:trunc + 1]
+            return out if output_zero_level else out[1:]
 
         # --- degree=1 fused path (Signatory-style fmexp):
         # For each k, compute  Y_k = Σ_{i=0..k} g_i ⊗ (X1^{⊗(k-i)} / (k-i)!)
@@ -438,24 +562,30 @@ class Universal(Generic[Array]):
                 gk = g[k] if k < len(g) else self.xp.zeros_like(t)
                 Y += (t + gk,)
             return Y if output_zero_level else Y[1:]
-        # --- degree>1
-        # E_k = (1/k) * sum_{r=1..min(k,R)} r * (X_r ⊗ E_{k-r})
-        # Y_k = sum_{i=0..min(k,deg(g))} g_i ⊗ E_{k-i}
-        E = (self.xp.ones_like(g[0]),)
-        Y = (g[0],)
-        for k in range(1, trunc + 1):
-            invk = 1.0 / float(k)
-            m = min(k, len(X))
-            t = self.tensor_product_homogeneous(X[0], E[k - 1]) * invk
-            for r in range(2, m + 1):
-                t += self.tensor_product_homogeneous(X[r - 1], E[k - r]) * (r * invk)
-            E += (t,)
-            hi = min(k, len(g) - 1)
-            yk = self.tensor_product_homogeneous(g[0], E[k])
-            for i in range(1, hi + 1):
-                yk += self.tensor_product_homogeneous(g[i], E[k - i])
-            Y += (yk,)
 
+        # --- degree>1
+        # Build E = exp(X) exactly from the truncated power series, then set Y = g ⊗ E.
+        zero0 = self.xp.zeros_like(X[0][..., :1])
+        one0 = self.xp.ones_like(zero0)
+
+        # Dense version of X with explicit zero level.
+        H: DenseElem = (zero0,) + tuple(X[:trunc])
+
+        # E = I + H + H^2/2! + ... + H^trunc/trunc!
+        E: DenseElem = (one0,)
+        power: DenseElem = (one0,)  # H^0
+        inv_fact = 1.0
+
+        for n in range(1, trunc + 1):
+            power = self.tensor_product(power, H, trunc=trunc)
+            inv_fact /= float(n)
+            E = self.tensor_summation(
+                E,
+                self.tensor_scalar_multiply(power, inv_fact),
+                trunc=trunc,
+            )
+
+        Y = self.tensor_product(g, E, trunc=trunc)
         return Y if output_zero_level else Y[1:]
 
     @dummy_jit(static_argnums=0, static_argnames=("trunc", "output_zero_level"), dynamic_batchtime=("X",))
@@ -628,7 +758,7 @@ class Universal(Generic[Array]):
         N, reduce_op, _, neutral_gen, seed_gen, truncator = self._pre_processing_for_sequential(len(X), op=op,
                                                                                                 trunc=trunc,
                                                                                                 memory_consumption=memory_consumption)
-        X = self.tensor_moveaxis(truncator(X), soure=axis, destination=0)
+        X = self.tensor_moveaxis(truncator(X), source=axis, destination=0)
         neutral = neutral_gen(X)
         seed = seed_gen(neutral, None)
 
@@ -693,7 +823,7 @@ class Universal(Generic[Array]):
             memory_consumption: Literal["high", "low"] = "low",
     ) -> DenseElem:
         """
-        Aplly, Block, Reduce and Accumulate (ABRA) a **packed graded element**
+        Apply, Block, Reduce and Accumulate (ABRA) a **packed graded element**
         along a steps axis and return an **already-packed** graded element.
 
         Ops
@@ -792,6 +922,7 @@ class Universal(Generic[Array]):
         • No axis reordering during reduction; only a new block axis is inserted at the end.
         • Uses helper ops: ``tensor_product``, ``tensor_summation``, ``tensor_exponential``.
         """
+        # TODO: add a sequential option when block and accumulate as this would often be much faster
         N, reduce_op, acc_op, neutral_gen, seed_gen, truncator = self._pre_processing_for_sequential(len(X), op=op,
                                                                                                      trunc=trunc,
                                                                                                      memory_consumption=memory_consumption)
@@ -834,7 +965,7 @@ class Universal(Generic[Array]):
         return self.tensor_moveaxis(zs, source=0, destination=axis)
 
     @dummy_jit(static_argnums=0, static_argnames=("axis", "trunc", "block_size", "accumulate", "starting_point",
-                                                  "output_starting_point", "memory_consumption"),
+                                                  "output_starting_point", "memory_consumption", "increment_input"),
                dynamic_batchtime=("X",))
     def tensor_development(
             self,
@@ -847,6 +978,7 @@ class Universal(Generic[Array]):
             starting_point: Optional[DenseElem] = None,
             output_starting_point: bool = False,
             memory_consumption: Literal["high", "low"] = "low",
+            increment_input: bool = False,
     ) -> DenseElem:
         """
         Tensor/free development from a **path whose levels start at degree 1**:
@@ -855,30 +987,88 @@ class Universal(Generic[Array]):
         Input & convention
         ------------------
         • Xₖ has shape `(..., S_axis, d**k)` with steps on `axis` and width `d**k` last.
-        • Work with **increments** along `axis`:
-             ΔXₖ = Xₖ[..., 1:, :] − Xₖ[..., :-1, :],  k ≥ 1  (steps S = original_steps−1).
-        • Exponentials apply only to degrees ≥ 1 (no scalar level in `X`).
+        • By default, we first pass to increments along `axis`:
+              ΔXₖ[j] = Xₖ[..., j+1, :] - Xₖ[..., j, :],   k ≥ 1.
+        • If `increment_input=True`, then `X` is already interpreted as the increment array
+          `ΔX = (ΔX₁, ΔX₂, …)` and no differencing is applied.
 
-        Implementation (thin wrapper over `tensor_reduce`)
-        --------------------------------------------------
-        • memory_consumption="high":
-            E = tensor_exponential(ΔX, trunc=trunc, output_zero_level=True)
-            return tensor_reduce(E, op="product", axis=axis, trunc=trunc, ...)
-        • memory_consumption="low":
-            return tensor_reduce((zeros_level0, ΔX), op="fmexp", axis=axis, trunc=trunc, ...)
+        Development
+        -----------
+        Write
+            S(X) := ∏_j exp(ΔX[j]),
+        where the product is the Chen/tensor product taken in step order, truncated at
+        degree `trunc`.
 
-        Output (exactly like `tensor_reduce`)
-        -------------------------------------
-        • If exactly one item is emitted (one block and no standalone `g`): a single graded
-          element (no block axis).
-        • Otherwise: each level has a **block axis inserted at `axis`**.
+        Thus this routine computes the truncated tensor development
+            S(X).
+
+        Blocking
+        --------
+        If the steps are split into contiguous blocks
+            B₀, B₁, ..., B_{L-1},
+        then the emitted block values are the blockwise developments
+            S(B_ℓ) := ∏_{j in B_ℓ} exp(ΔX[j]).
+
+        Accumulation
+        ------------
+        The keyword `accumulate` refers only to **accumulation across blocks**, not within
+        a block.
+
+        More precisely:
+
+        • `accumulate=False`:
+              emit
+                  [S(B₀), S(B₁), ..., S(B_{L-1})].
+
+        • `accumulate=True`:
+              emit the block-prefix developments
+                  [S(B₀), S(B₀)⊗S(B₁), ..., S(B₀)⊗...⊗S(B_{L-1})].
+
+        Therefore, if there is only one block and no nontrivial `starting_point`, then
+        `accumulate=True` and `accumulate=False` give the same result.
+
+        Starting point
+        --------------
+        If a starting point `g` is supplied, then the outputs are left-multiplied by `g`:
+
+        • `accumulate=False`:
+              [g⊗S(B₀), g⊗S(B₁), ..., g⊗S(B_{L-1})]
+
+        • `accumulate=True`:
+              [g⊗S(B₀), g⊗S(B₀)⊗S(B₁), ..., g⊗S(B₀)⊗...⊗S(B_{L-1})].
+
+        If `output_starting_point=True`, then the seed `g` itself is prepended; if no
+        starting point is given, the neutral element is prepended.
+
+        Implementation
+        --------------
+        • `memory_consumption="low"`:
+              call `tensor_abra(..., op="fmexp", ...)`, so exponentials are streamed
+              within each block.
+
+        • `memory_consumption="high"`:
+              first compute the per-step exponentials
+                  exp(ΔX[j]),
+              packed as a graded element along the steps axis, and then call
+              `tensor_abra(..., op="product", ...)`.
+
+        Output
+        ------
+        Exactly as in `tensor_abra`:
+
+        • If exactly one item is emitted, return a single graded element.
+        • Otherwise, return packed levels with a block axis inserted at `axis`.
         """
         X = tuple(X)
         if not X:
             raise ValueError("tensor_development: X must contain at least X₁.")
         N = min(trunc, len(X))
-        # Increments ΔX along `axis` (degrees 1..N)
-        dX = tuple(self.xp.diff(L, axis=axis) for L in X[:N])
+
+        if increment_input:
+            dX = X[:N]
+        else:
+            # Increments ΔX along `axis` (degrees 1..N)
+            dX = tuple(self.xp.diff(L, axis=axis) for L in X[:N])
 
         if memory_consumption == "low":
             return self.tensor_abra(
@@ -1124,7 +1314,6 @@ class Universal(Generic[Array]):
             levels = levels[1:]
         return self.xp.concat(levels, axis=-1) if levels else self.xp.asarray([], dtype=levels[0].dtype)
 
-
     def _index_add(self, target: DenseElem, source: DenseElem, index: DenseElem):
         """
         - Should be private class
@@ -1136,10 +1325,9 @@ class Universal(Generic[Array]):
         """
         pass
 
-
     def index_add(self, a, target_idx):
         """
-        Accepts an 2d-array of shape (N_sample, n). For each sample the values are 
+        Accepts an 2d-array of shape (N_sample, n). For each sample the values are
         added up based on the indices specified in target_idx.
 
         Example:
@@ -1150,22 +1338,20 @@ class Universal(Generic[Array]):
         """
         pass
 
-
     def tensor_shuffle_homogeneous(self, Ai, Bi, d):
         """
-        sparse einsum 
-        at initialization, get d and if wanted, precomoute right away, 
+        sparse einsum
+        at initialization, get d and if wanted, precomoute right away,
         check whether precomputed shuffle is here or not; if yes, check if dimension d matches.
         check also if precomputed.
         """
         pass
 
-
     def tensor_shuffle(self, A, B):
         """
-        sparse einsum 
-        add optional d: if provided assert that d matches dimension of A and B; if d is not proivided, then 
+        sparse einsum
+        add optional d: if provided assert that d matches dimension of A and B; if d is not proivided, then
         from second level of A -> infer dimension d and truncation levels
-        if not precoputed for d and n and m then do; 
+        if not precoputed for d and n and m then do;
         """
         pass

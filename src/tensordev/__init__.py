@@ -7,3 +7,5 @@ __all__ = [
 	"Jax",
 	"Universal",
 ]
+
+jax = Jax()
