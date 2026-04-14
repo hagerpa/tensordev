@@ -1315,7 +1315,7 @@ class Universal(Generic[Array]):
             levels = levels[1:]
         return self.xp.concat(levels, axis=-1) if levels else self.xp.asarray([], dtype=levels[0].dtype)
 
-
+    @dummy_jit(static_argnums=(0,), dynamic_batchtime=("Ai", "Bj"))
     def sparse_einsum(self, Ai, Bj, operator):
         """
         Performs product of tensor Ai and Bj for operator. Roughly corresponds to `np.einsum('bi,bj,ijl->bl', Ai, Bj, Q)` where 
@@ -1339,7 +1339,7 @@ class Universal(Generic[Array]):
             res[:,segment_ids[i]] += Ai[:,rows[i]] * Bj[:,cols[i]] * data[i]
         return res
     
-
+    @dummy_jit(static_argnums=(0,), dynamic_batchtime=("A", "B"))
     def shuffle_product(self, A, B, shuffle_algebra):
         """
         A, B: Tuples of arrays (the tensors)
@@ -1349,7 +1349,6 @@ class Universal(Generic[Array]):
         NA = len(A) - 1 # Subtract 1 to get truncation level
         NB = len(B) - 1
         N = shuffle_algebra['metadata'][1]
-        assert max(NA,NB) <= N, "Precomputed shuffles not sufficient."
         
         # Unpack and initiate output
         operators = shuffle_algebra['operators']

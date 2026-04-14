@@ -1,6 +1,6 @@
 import jax
 
-jax.jit
+@jax.jit
 def sparse_einsum_jax(Ai, Bj, operator):
     # Unpack operator
     _, Q = operator

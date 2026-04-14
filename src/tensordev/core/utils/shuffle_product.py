@@ -1,10 +1,10 @@
-from tensordev.core.utils.einsum_numba import sparse_einsum
+#from tensordev.core.utils.einsum_numba import sparse_einsum
 
-#import jax
-#from tensordev.core.utils.einsum_jax import sparse_einsum_jax as sparse_einsum
+import jax
+from tensordev.core.utils.einsum_jax import sparse_einsum_jax as sparse_einsum
 
 
-#jax.jit
+@jax.jit
 def shuffle_product(A, B, shuffle_algebra):
     """
     A, B: Tuples of arrays (the tensors)
@@ -14,7 +14,6 @@ def shuffle_product(A, B, shuffle_algebra):
     NA = len(A) - 1 # Subtract 1 to get truncation level
     NB = len(B) - 1
     N = shuffle_algebra['metadata'][1]
-    assert max(NA,NB) <= N, "Precomputed shuffles not sufficient."
     
     # Unpack and initiate output
     operators = shuffle_algebra['operators']
