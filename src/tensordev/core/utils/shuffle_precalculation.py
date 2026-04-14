@@ -111,7 +111,7 @@ def partition(k: int, n: int, m: int, d: int) -> Tuple[np.ndarray, np.ndarray]:
         idx = 0
         while set < limit:
             # convert current valid binary number to boolean array
-            binary_arr = np.array([(set >> (len_k - j - 1)) & 1 for j in range(len_k)], dtype=np.bool)
+            binary_arr = np.array([(set >> (len_k - j - 1)) & 1 for j in range(len_k)], dtype=np.bool_)
 
             # update rows; ~ converts to complementary binary number
             row0[idx] = sum(digits[binary_arr] * pow_d_n)
@@ -205,21 +205,56 @@ def assemble_shuffle_algebra_homogeneous(d: int, n: int, m: int):
     data = _assemble_shuffle_numba(d, n, m)
     return meta, data
 
+# BACKUP: OLD SHUFFLE
+#def assemble_shuffle_algebra(d: int, N: int):
+#    """
+#    Assembles dictionary containing all precomputed shuffles. Maximum allowed shuffle is of to tensors of level N.
+#    """
+#    Create empty dictionary
+#    operators = {}
+#    
+#    for i in range(N + 1):
+#        for j in range(i + 1):
+#            operators[(i, j)] = assemble_shuffle_algebra_homogeneous(d, i, j)
+#    
+#    # Bundle metadata with the operators
+#    shuffle_algebra = {
+#        "metadata": (d, N),
+#        "operators": operators
+#    }
+#    return shuffle_algebra   
 
 def assemble_shuffle_algebra(d: int, N: int):
     """
     Assembles dictionary containing all precomputed shuffles. Maximum allowed shuffle is of to tensors of level N.
+
+    Remark: The function `assemble_shuffle_algebra_homogeneous` returns in one part a 4-tuple representing the sparse 3-tensor
+    for the (bilinear) shuffle product. This is basically a 3d extension of csr format. The first array of this 4-tuple 
+    represents the sizes of the 2d slices of this sparse 3-tensor, call it `idx`. 
+    This `idx` array will be further preprocessed to segement_ids (as done below) for an easier einsum function (primarily this
+    makes the jax implementation easier).
     """
     # Create empty dictionary
     operators = {}
     
+    # Loop over homogenous tensors (note that shuffle is symmetric)
     for i in range(N + 1):
         for j in range(i + 1):
-            operators[(i, j)] = assemble_shuffle_algebra_homogeneous(d, i, j)
+            meta, vals = assemble_shuffle_algebra_homogeneous(d, i, j)
+
+            # Unpack vals 
+            idx, rows, cols, data = vals
+
+            # Extract segment ids from idx
+            idx_ = np.arange(len(idx))
+            segment_ids = np.repeat(idx_, idx)
+            
+            # Combine to homogeneous operator again
+            operators[(i, j)] = meta, (segment_ids, rows, cols, data)
     
     # Bundle metadata with the operators
-    shuffle_algebra = {
+    shuffle_algebra_jax = {
         "metadata": (d, N),
         "operators": operators
     }
-    return shuffle_algebra   
+    return shuffle_algebra_jax

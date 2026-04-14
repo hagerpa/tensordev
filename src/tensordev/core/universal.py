@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import itertools
+import numpy as np
 from typing import Optional, Sequence, Tuple, Union, Literal, List, TypeVar, Generic, Callable
 
 import array_api._2023_12 as array_types
@@ -1314,44 +1315,77 @@ class Universal(Generic[Array]):
             levels = levels[1:]
         return self.xp.concat(levels, axis=-1) if levels else self.xp.asarray([], dtype=levels[0].dtype)
 
-    def _index_add(self, target: DenseElem, source: DenseElem, index: DenseElem):
-        """
-        - Should be private class
-        - Example:
-        target = [0, 1, 3]
-        source = [1, 5, 4]
-        index = [0,2,2]
-        => Result = [0+1,1+0,3+5+4] = [1,1,12]
-        """
-        pass
 
-    def index_add(self, a, target_idx):
+    def sparse_einsum(self, Ai, Bj, operator):
         """
-        Accepts an 2d-array of shape (N_sample, n). For each sample the values are
-        added up based on the indices specified in target_idx.
+        Performs product of tensor Ai and Bj for operator. Roughly corresponds to `np.einsum('bi,bj,ijl->bl', Ai, Bj, Q)` where 
+        we allow for sparse representation of Q.
 
-        Example:
+        ATTENTION:
+        - Requires Ai and Bi to have a batch dimension.
+        - Meta data of shuffle tuple Q must align with tensor shapes of Ai and Bj.
+        - Batch dimension of Ai and Bj must match.
+        - Data type of Ai and Bj must match.
+        """
+        # Unpack operator
+        _, Q = operator
+        segment_ids, rows, cols, data = Q
 
-        a = np.array([[1,2,3,4,1,4]]) # shape (1,6)
-        target_idx = np.array([1,2,2,1]) # shape (4,) with sum 6
-        >>> np.array([1,5,5,4]) # =(1,2+3,4+1,4)
-        """
-        pass
+        # Init output
+        res = np.zeros((Ai.shape[0], Ai.shape[1]*Bj.shape[1]), dtype=Ai.dtype)
 
-    def tensor_shuffle_homogeneous(self, Ai, Bi, d):
-        """
-        sparse einsum
-        at initialization, get d and if wanted, precomoute right away,
-        check whether precomputed shuffle is here or not; if yes, check if dimension d matches.
-        check also if precomputed.
-        """
-        pass
+        # Run sparse einsum
+        for i in range(len(segment_ids)):
+            res[:,segment_ids[i]] += Ai[:,rows[i]] * Bj[:,cols[i]] * data[i]
+        return res
+    
 
-    def tensor_shuffle(self, A, B):
+    def shuffle_product(self, A, B, shuffle_algebra):
         """
-        sparse einsum
-        add optional d: if provided assert that d matches dimension of A and B; if d is not proivided, then
-        from second level of A -> infer dimension d and truncation levels
-        if not precoputed for d and n and m then do;
+        A, B: Tuples of arrays (the tensors)
         """
-        pass
+
+        # Extract length of A and B 
+        NA = len(A) - 1 # Subtract 1 to get truncation level
+        NB = len(B) - 1
+        N = shuffle_algebra['metadata'][1]
+        assert max(NA,NB) <= N, "Precomputed shuffles not sufficient."
+        
+        # Unpack and initiate output
+        operators = shuffle_algebra['operators']
+        out = []
+
+        for n in range(NA + NB + 1):
+            # Determine the range of indices i + j = n; i must be in [0, NA] and j must be in [0, NB]
+            i_min = max(0, n - NB)
+            i_max = min(n, NA)
+
+            # Sum the terms for this specific tensor level in the end
+            current_grade_terms = []
+
+            for i in range(i_min, i_max + 1):
+                j = n - i
+                
+                # Symmetric lookup logic
+                if i >= j:
+                    op = operators[(i, j)]
+                    term = self.sparse_einsum(A[i], B[j], op) # To adapt to JAX only have to change the sparse einsum
+                else:
+                    # Swap A and B because only (i, j) where i >= j is cached
+                    op = operators[(j, i)]
+                    term = self.sparse_einsum(B[j], A[i], op)
+                
+                current_grade_terms.append(term)
+            
+            # Combine all i,j pairs for this tensor level
+            out.append(sum(current_grade_terms))
+
+        return tuple(out)
+
+
+
+
+
+
+
+    
