@@ -31,6 +31,7 @@ def _ours_signature_kernel(dyadic_order):
 
     return td_sigkernel.SigKernel(
         dyadic_order=dyadic_order,
+        backend="wavefront",
     )
 
 

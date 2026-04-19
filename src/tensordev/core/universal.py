@@ -1332,24 +1332,24 @@ class Universal(Generic[Array]):
         segment_ids, rows, cols, data = Q
 
         # Init output
-        res = np.zeros((Ai.shape[0], Ai.shape[1]*Bj.shape[1]), dtype=Ai.dtype)
+        res = np.zeros((Ai.shape[0], Ai.shape[1] * Bj.shape[1]), dtype=Ai.dtype)
 
         # Run sparse einsum
         for i in range(len(segment_ids)):
-            res[:,segment_ids[i]] += Ai[:,rows[i]] * Bj[:,cols[i]] * data[i]
+            res[:, segment_ids[i]] += Ai[:, rows[i]] * Bj[:, cols[i]] * data[i]
         return res
-    
+
     @dummy_jit(static_argnums=(0,), dynamic_batchtime=("A", "B"))
-    def shuffle_product(self, A, B, shuffle_algebra):
+    def tensor_shuffle_product(self, A, B, shuffle_algebra):
         """
         A, B: Tuples of arrays (the tensors)
         """
 
         # Extract length of A and B 
-        NA = len(A) - 1 # Subtract 1 to get truncation level
+        NA = len(A) - 1  # Subtract 1 to get truncation level
         NB = len(B) - 1
         N = shuffle_algebra['metadata'][1]
-        
+
         # Unpack and initiate output
         operators = shuffle_algebra['operators']
         out = []
@@ -1364,27 +1364,364 @@ class Universal(Generic[Array]):
 
             for i in range(i_min, i_max + 1):
                 j = n - i
-                
+
                 # Symmetric lookup logic
                 if i >= j:
                     op = operators[(i, j)]
-                    term = self.sparse_einsum(A[i], B[j], op) # To adapt to JAX only have to change the sparse einsum
+                    term = self.sparse_einsum(A[i], B[j], op)  # To adapt to JAX only have to change the sparse einsum
                 else:
                     # Swap A and B because only (i, j) where i >= j is cached
                     op = operators[(j, i)]
                     term = self.sparse_einsum(B[j], A[i], op)
-                
+
                 current_grade_terms.append(term)
-            
+
             # Combine all i,j pairs for this tensor level
             out.append(sum(current_grade_terms))
 
         return tuple(out)
 
+    # ----------------------------------------------------------------------
+    # Matrix Tensor Operations
+    # ----------------------------------------------------------------------
 
+    def _canonicalize_matrix_axes(
+            self,
+            X: Array,
+            row_axis: int,
+            col_axis: int,
+    ) -> Tuple[Array, int, int]:
+        """
+        Move the matrix axes of ``X`` to the canonical positions ``(-3, -2)``.
 
+        Parameters
+        ----------
+        X : ndarray
+            Array with a final tensor-coordinate axis.
+        row_axis, col_axis : int
+            Positions of the row and column axes.
 
+        Returns
+        -------
+        Xc : ndarray
+            Array with row and column axes moved to ``(-3, -2)``.
+        row_axis, col_axis : int
+            Normalized original axis positions.
+        """
+        ndim = X.ndim
+        row_axis = row_axis % ndim
+        col_axis = col_axis % ndim
 
+        if row_axis == col_axis:
+            raise ValueError("row_axis and col_axis must be distinct.")
+        if row_axis == ndim - 1 or col_axis == ndim - 1:
+            raise ValueError("row_axis and col_axis may not coincide with the tensor axis.")
 
+        Xc = self.xp.moveaxis(X, (row_axis, col_axis), (-3, -2))
+        return Xc, row_axis, col_axis
 
-    
+    def _restore_matrix_axes(
+            self,
+            X: Array,
+            row_axis: int,
+            col_axis: int,
+    ) -> Array:
+        """
+        Restore canonical matrix axes ``(-3, -2)`` to ``(row_axis, col_axis)``.
+        """
+        return self.xp.moveaxis(X, (-3, -2), (row_axis, col_axis))
+
+    @dummy_jit(static_argnums=0, static_argnames=("row_axis", "col_axis"), dynamic_batchtime=("A",),
+               full_dynamic=("M",))
+    def tensor_matrix_product_right_homogeneous(
+            self,
+            A: Array,
+            M: Array,
+            row_axis: int = -3,
+            col_axis: int = -2,
+    ) -> Array:
+        """
+        Right-multiply a homogeneous matrix-valued tensor-algebra coefficient by
+        a numeric matrix.
+
+        The default axis convention is
+
+            ``batch + (T?, n, k, d_r)``,
+
+        where the final axis stores tensor coordinates, an optional time axis
+        precedes the matrix axes, and the matrix axes are ``(row_axis, col_axis)``.
+
+        Parameters
+        ----------
+        A : ndarray
+            Homogeneous matrix-valued coefficient with shape
+            ``batch + (T?, n, k, d_r)`` up to axis placement.
+        M : ndarray
+            Numeric matrix with shape ``(..., k, l)``.
+        row_axis, col_axis : int, default=(-3, -2)
+            Positions of the matrix row and column axes in ``A``.
+
+        Returns
+        -------
+        ndarray
+            Homogeneous coefficient with shape
+            ``batch + (T?, n, l, d_r)`` up to axis placement.
+        """
+        A, row_axis, col_axis = self._canonicalize_matrix_axes(A, row_axis, col_axis)
+
+        a = self.xp.expand_dims(A, axis=-2)  # ... n k 1 a
+        m = self.xp.expand_dims(M, axis=-1)  # ... k l 1
+        m = self.xp.expand_dims(m, axis=-4)  # ... 1 k l 1
+        out = (a * m).sum(axis=-3)  # ... n l a
+
+        return self._restore_matrix_axes(out, row_axis, col_axis)
+
+    @dummy_jit(static_argnums=0, static_argnames=("row_axis", "col_axis"), dynamic_batchtime=("A",),
+               full_dynamic=("M",))
+    def tensor_matrix_product_left_homogeneous(
+            self,
+            M: Array,
+            A: Array,
+            row_axis: int = -3,
+            col_axis: int = -2,
+    ) -> Array:
+        """
+        Left-multiply a homogeneous matrix-valued tensor-algebra coefficient by
+        a numeric matrix.
+
+        The default axis convention is
+
+            ``batch + (T?, k, l, d_r)``,
+
+        where the final axis stores tensor coordinates, an optional time axis
+        precedes the matrix axes, and the matrix axes are ``(row_axis, col_axis)``.
+
+        Parameters
+        ----------
+        M : ndarray
+            Numeric matrix with shape ``(..., n, k)``.
+        A : ndarray
+            Homogeneous matrix-valued coefficient with shape
+            ``batch + (T?, k, l, d_r)`` up to axis placement.
+        row_axis, col_axis : int, default=(-3, -2)
+            Positions of the matrix row and column axes in ``A``.
+
+        Returns
+        -------
+        ndarray
+            Homogeneous coefficient with shape
+            ``batch + (T?, n, l, d_r)`` up to axis placement.
+        """
+        A, row_axis, col_axis = self._canonicalize_matrix_axes(A, row_axis, col_axis)
+
+        m = self.xp.expand_dims(M, axis=-1)  # ... n k 1
+        m = self.xp.expand_dims(m, axis=-1)  # ... n k 1 1
+        a = self.xp.expand_dims(A, axis=-4)  # ... 1 k l a
+        out = (m * a).sum(axis=-3)  # ... n l a
+
+        return self._restore_matrix_axes(out, row_axis, col_axis)
+
+    @dummy_jit(static_argnums=0, static_argnames=("row_axis", "col_axis"), dynamic_batchtime=("A", "B"))
+    def tensor_matrix_product_homogeneous(
+            self,
+            A: Array,
+            B: Array,
+            row_axis: int = -3,
+            col_axis: int = -2,
+    ) -> Array:
+        """
+        Multiply two homogeneous matrix-valued tensor-algebra coefficients.
+
+        If ``A`` has shape ``batch + (T?, n, k, d_i)`` and ``B`` has shape
+        ``batch + (T?, k, l, d_j)`` up to axis placement, then the result has
+        shape ``batch + (T?, n, l, d_i d_j)`` up to axis placement.
+
+        Parameters
+        ----------
+        A, B : ndarray
+            Homogeneous matrix-valued coefficients.
+        row_axis, col_axis : int, default=(-3, -2)
+            Positions of the matrix row and column axes in ``A`` and ``B``.
+            Both operands are assumed to follow the same convention.
+
+        Returns
+        -------
+        ndarray
+            Homogeneous matrix-valued coefficient.
+        """
+        A, row_axis, col_axis = self._canonicalize_matrix_axes(A, row_axis, col_axis)
+        B, _, _ = self._canonicalize_matrix_axes(B, row_axis, col_axis)
+
+        x = self.xp.expand_dims(A, axis=-2)  # ... n k 1 a
+        x = self.xp.expand_dims(x, axis=-1)  # ... n k 1 a 1
+        y = self.xp.expand_dims(B, axis=-4)  # ... 1 k l b
+        y = self.xp.expand_dims(y, axis=-2)  # ... 1 k l 1 b
+        out = (x * y).sum(axis=-4)  # ... n l a b
+        out = self.xp.reshape(out, out.shape[:-2] + (out.shape[-2] * out.shape[-1],))
+
+        return self._restore_matrix_axes(out, row_axis, col_axis)
+
+    @dummy_jit(static_argnums=0, static_argnames=("trunc", "row_axis", "col_axis"), dynamic_batchtime=("A",),
+               full_dynamic=("M",))
+    def tensor_matrix_product_right(
+            self,
+            A: DenseElem,
+            M: Array,
+            trunc: Optional[int] = None,
+            row_axis: int = -3,
+            col_axis: int = -2,
+    ) -> DenseElem:
+        """
+        Right-multiply a matrix-valued tensor-algebra element by a numeric matrix.
+
+        Each homogeneous level ``A[r]`` is interpreted using the matrix-axis
+        convention specified by ``row_axis`` and ``col_axis``. Under the default
+        convention, levels have shape
+
+            ``batch + (T?, n, k, d_r)``.
+
+        Parameters
+        ----------
+        A : tuple of ndarray
+            Matrix-valued tensor-algebra element.
+        M : ndarray
+            Numeric matrix with shape ``(..., k, l)``.
+        trunc : int, optional
+            If given, keep only degrees ``0, ..., trunc``.
+        row_axis, col_axis : int, default=(-3, -2)
+            Positions of the matrix row and column axes in each level of ``A``.
+
+        Returns
+        -------
+        tuple of ndarray
+            Matrix-valued tensor-algebra element with column dimension updated
+            from ``k`` to ``l``.
+        """
+        A = tuple(A)
+        if not A:
+            return A
+
+        N = len(A) - 1
+        if trunc is not None:
+            N = min(N, trunc)
+
+        return tuple(
+            self.tensor_matrix_product_right_homogeneous(
+                A[r], M, row_axis=row_axis, col_axis=col_axis
+            )
+            for r in range(N + 1)
+        )
+
+    @dummy_jit(static_argnums=0, static_argnames=("trunc", "row_axis", "col_axis"), dynamic_batchtime=("A",),
+               full_dynamic=("M",))
+    def tensor_matrix_product_left(
+            self,
+            M: Array,
+            A: DenseElem,
+            trunc: Optional[int] = None,
+            row_axis: int = -3,
+            col_axis: int = -2,
+    ) -> DenseElem:
+        """
+        Left-multiply a matrix-valued tensor-algebra element by a numeric matrix.
+
+        Each homogeneous level ``A[r]`` is interpreted using the matrix-axis
+        convention specified by ``row_axis`` and ``col_axis``. Under the default
+        convention, levels have shape
+
+            ``batch + (T?, k, l, d_r)``.
+
+        Parameters
+        ----------
+        M : ndarray
+            Numeric matrix with shape ``(..., n, k)``.
+        A : tuple of ndarray
+            Matrix-valued tensor-algebra element.
+        trunc : int, optional
+            If given, keep only degrees ``0, ..., trunc``.
+        row_axis, col_axis : int, default=(-3, -2)
+            Positions of the matrix row and column axes in each level of ``A``.
+
+        Returns
+        -------
+        tuple of ndarray
+            Matrix-valued tensor-algebra element with row dimension updated from
+            ``k`` to ``n``.
+        """
+        A = tuple(A)
+        if not A:
+            return A
+
+        N = len(A) - 1
+        if trunc is not None:
+            N = min(N, trunc)
+
+        return tuple(
+            self.tensor_matrix_product_left_homogeneous(
+                M, A[r], row_axis=row_axis, col_axis=col_axis
+            )
+            for r in range(N + 1)
+        )
+
+    @dummy_jit(static_argnums=0, static_argnames=("trunc", "row_axis", "col_axis"), dynamic_batchtime=("A", "B"))
+    def tensor_matrix_product(
+            self,
+            A: DenseElem,
+            B: DenseElem,
+            trunc: Optional[int] = None,
+            row_axis: int = -3,
+            col_axis: int = -2,
+    ) -> DenseElem:
+        """
+        Multiply two matrix-valued tensor-algebra elements.
+
+        If ``A`` and ``B`` are represented levelwise as
+        ``batch + (T?, n, k, d_i)`` and ``batch + (T?, k, l, d_j)``,
+        respectively, then this computes the graded Cauchy product
+
+            ``(A * B)[r] = sum_{i+j=r} A[i] @ B[j]``,
+
+        where the homogeneous products contract the inner matrix index and use
+        the tensor product on the final tensor-coordinate axis.
+
+        Parameters
+        ----------
+        A, B : tuple of ndarray
+            Matrix-valued tensor-algebra elements.
+        trunc : int, optional
+            If given, truncate the product to degrees ``0, ..., trunc``.
+        row_axis, col_axis : int, default=(-3, -2)
+            Positions of the matrix row and column axes in each homogeneous
+            level of ``A`` and ``B``. Both operands are assumed to use the
+            same convention.
+
+        Returns
+        -------
+        tuple of ndarray
+            Matrix-valued tensor-algebra product.
+        """
+        A = tuple(A)
+        B = tuple(B)
+
+        if len(A) == 0 or len(B) == 0:
+            return tuple()
+
+        N = len(A) + len(B) - 2
+        if trunc is not None:
+            N = min(N, trunc)
+
+        out: List[Array] = []
+        for r in range(N + 1):
+            i_min = max(0, r - (len(B) - 1))
+            i_max = min(len(A) - 1, r)
+
+            term = self.tensor_matrix_product_homogeneous(
+                A[i_min], B[r - i_min], row_axis=row_axis, col_axis=col_axis
+            )
+            for i in range(i_min + 1, i_max + 1):
+                term = term + self.tensor_matrix_product_homogeneous(
+                    A[i], B[r - i], row_axis=row_axis, col_axis=col_axis
+                )
+            out.append(term)
+
+        return tuple(out)

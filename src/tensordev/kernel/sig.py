@@ -7,6 +7,7 @@ import jax.numpy as jnp
 from tensordev import Jax
 from tensordev.kernel.free import free_kernel
 from tensordev.kernel.base_kernel import BaseKernel
+from tensordev.kernel.util import DyadicOrder
 
 Array = jnp.ndarray
 JaxCore = Jax()
@@ -27,11 +28,12 @@ class SigKernel(BaseKernel):
     ``(length, dim)``. A single path is promoted to batch size ``1``.
 
     The parameter ``dyadic_order`` controls optional dyadic refinement of the
-    time grid before evaluation.
+    time grid before evaluation.  It can be a single int (same for both paths)
+    or a tuple ``(order_x, order_y)`` for asymmetric refinement.
     """
 
     backend: str = "scan"
-    dyadic_order: int = 0
+    dyadic_order: DyadicOrder = 0
     core: object = None
 
     def __call__(

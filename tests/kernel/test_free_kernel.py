@@ -108,6 +108,7 @@ DECAY_CASES = [
 ]
 
 
+@pytest.mark.heavy
 @pytest.mark.parametrize("level_lambda,factorial", DECAY_CASES)
 @pytest.mark.parametrize(
     ("path_kind", "dim", "trunc"),

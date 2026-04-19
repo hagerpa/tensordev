@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import types
+from functools import partial
 
 import jax
 from jax import lax
@@ -87,8 +88,8 @@ class Jax(Einsum[jnp.ndarray]):
             return final, ys_stacked
 
         return scan_fn
-    
-    @jax.jit(static_argnums=(0,))
+
+    @partial(jax.jit, static_argnums=(0,))
     def sparse_einsum(self, Ai, Bj, operator):
         # Unpack operator
         _, Q = operator

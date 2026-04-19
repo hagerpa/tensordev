@@ -577,3 +577,79 @@ def test_tensor_development_nonaccumulate_returns_block_developments(
     )
 
     _assert_tuple_allclose(out, ref)
+
+
+
+def test_tensor_development_level1_matches_first_level_increment():
+    """
+    The level-1 component of the free/tensor development depends only on the
+    level-1 increments of the driving tensor path.
+
+    In particular, higher tensor levels in the input must not affect level 1.
+    """
+    # 4 increments in a 2D truncated tensor algebra, with nonzero levels 1,2,3
+    dX1 = np.array([
+        [0.10, -0.20],
+        [0.30,  0.40],
+        [-0.50, 0.60],
+        [0.20, -0.10],
+    ], dtype=float)
+
+    dX2 = np.array([
+        [1.0,  2.0,  3.0,  4.0],
+        [0.5, -1.0,  1.5, -2.0],
+        [2.0,  0.0, -1.0,  1.0],
+        [3.0, -2.0,  0.5,  1.5],
+    ], dtype=float)
+
+    dX3 = np.array([
+        [ 1.0,  0.0,  2.0, -1.0,  0.5,  1.5, -0.5,  2.5],
+        [ 0.2, -0.3,  0.4,  0.1, -0.2,  0.7,  1.2, -0.8],
+        [-1.0,  0.5,  0.0,  1.0,  2.0, -1.5,  0.3,  0.9],
+        [ 0.6,  1.1, -0.4,  0.8, -0.7,  0.2,  1.4, -0.1],
+    ], dtype=float)
+
+    dev = CORE.tensor_development(
+        (dX1, dX2, dX3),
+        axis=-2,
+        trunc=3,
+        accumulate=False,
+        output_starting_point=False,
+        increment_input=True,
+    )
+
+    expected_level1 = dX1.sum(axis=0)
+    actual_level1 = np.asarray(dev[1], dtype=float)
+
+    np.testing.assert_allclose(
+        actual_level1,
+        expected_level1,
+        atol=1e-12,
+        rtol=1e-12,
+        err_msg="level 1 of tensor development should equal total level-1 increment",
+    )
+
+
+def test_tensor_development_higher_levels_do_not_create_level1():
+    dX1 = np.zeros((3, 2), dtype=float)
+    dX2 = np.array([
+        [1.0, 2.0, 3.0, 4.0],
+        [0.5, 0.0, 1.5, 2.0],
+        [-1.0, 1.0, 0.0, 0.5],
+    ], dtype=float)
+    dX3 = np.array([
+        [1.0, 0.0, 2.0, 1.0, 0.5, 1.5, 0.5, 2.5],
+        [0.2, 0.3, 0.4, 0.1, 0.2, 0.7, 1.2, 0.8],
+        [1.0, 0.5, 0.0, 1.0, 2.0, 1.5, 0.3, 0.9],
+    ], dtype=float)
+
+    dev = CORE.tensor_development(
+        (dX1, dX2, dX3),
+        axis=-2,
+        trunc=3,
+        accumulate=False,
+        output_starting_point=False,
+        increment_input=True,
+    )
+
+    np.testing.assert_allclose(np.asarray(dev[1], dtype=float), 0.0, atol=1e-12, rtol=1e-12)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional, Union
+from typing import Literal, Union
 
 import jax.numpy as jnp
 
@@ -9,6 +9,7 @@ from tensordev import Jax
 from tensordev.core.universal import DenseElemFirstOn
 from tensordev.kernel.free import free_kernel
 from tensordev.kernel.base_kernel import BaseKernel
+from tensordev.kernel.util import DyadicOrder
 
 JaxCore = Jax()
 Array = jnp.ndarray
@@ -24,10 +25,8 @@ def higher_order_kernel(
         evaluate: Literal["terminal", "grid"] = "terminal",
         return_fg: bool = False,
         pairwise: bool = False,
-        chunk_size_x: Optional[int] = None,
-        chunk_size_y: Optional[int] = None,
         backend: Literal["scan", "wavefront"] = "scan",
-        dyadic_order: int = 0,
+        dyadic_order: DyadicOrder = 0,
         increment_input: bool = False,
         core=None,
 ):
@@ -78,7 +77,7 @@ def higher_order_kernel(
         Tuple ``(log_degree_x, log_degree_y)`` of truncation degrees used for the
         block signatures / block log-signatures of ``X`` and ``Y``.
 
-    evaluate, return_fg, pairwise, chunk_size_x, chunk_size_y, backend, dyadic_order :
+    evaluate, return_fg, pairwise, backend, dyadic_order :
         Passed through to ``free_kernel``.
 
     increment_input :
@@ -166,7 +165,7 @@ def higher_order_kernel(
         log_y = tuple(level[..., None, :] for level in log_y)
 
     return free_kernel(log_x, log_y, evaluate=evaluate, return_fg=return_fg, pairwise=pairwise,
-                       chunk_size_x=chunk_size_x, chunk_size_y=chunk_size_y, backend=backend, dyadic_order=dyadic_order,
+                       backend=backend, dyadic_order=dyadic_order,
                        core=core, increment_in=True)
 
 
@@ -194,7 +193,7 @@ class HigherOrderKernel(BaseKernel):
     log_steps: tuple[int, int]
     log_degree: tuple[int, int]
     backend: str = "scan"
-    dyadic_order: int = 0
+    dyadic_order: DyadicOrder = 0
     increment_input: bool = False
     core: object = None
 

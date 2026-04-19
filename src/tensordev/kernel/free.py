@@ -3,36 +3,154 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import Callable, Literal, Optional, Union
+from typing import Literal
 
+import jax
 import jax.numpy as jnp
 from jax import lax
+from dataclasses import dataclass
 
 from tensordev import Jax
 from tensordev.core.universal import DenseElemFirstOn
 from tensordev.kernel.base_kernel import BaseKernel
+from tensordev.kernel.util import DyadicOrder, normalize_dyadic_order
 
 JaxCore = Jax()
 Array = jnp.ndarray
 
-from dataclasses import dataclass
-from typing import Literal, Optional
 
-import jax.numpy as jnp
+# ---------------------------------------------------------------------------
+# State dataclasses
+# ---------------------------------------------------------------------------
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class FreeCellData:
+    """Backend-independent neighbourhood data for one free-kernel cell update.
+
+    Bundles the three-corner stencil (nw, n, w) together with the driving
+    increments so that the cell step function receives a single structured
+    input.  This is the free-kernel analogue of ``fssk.CellData``.
+    """
+
+    # driving increments
+    dx_i: tuple   # x-increment for row i, M levels
+    dy_j: tuple   # y-increment for column j, N levels
+
+    # scalar PDE state at three corners
+    u_nw: Array   # (i-1, j-1)
+    u_n: Array    # (i-1, j)
+    u_w: Array    # (i, j-1)
+
+    # left-adjoint (f) at three corners — n levels each
+    f_nw: tuple
+    f_n: tuple
+    f_w: tuple
+
+    # right-adjoint (g) at three corners — m levels each
+    g_nw: tuple
+    g_n: tuple
+    g_w: tuple
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class FreeRowState:
+    """Full row of the 2-D grid — the free-kernel analogue of ``fssk.RowState``.
+
+    Fields
+    ------
+    u : Array, shape ``batch + (t_nodes,)``
+        Scalar PDE state along the row.
+    f : tuple of Array
+        Left-adjoint tensor levels, ``n`` arrays each ``batch + (t_nodes, width_k)``.
+    g : tuple of Array
+        Right-adjoint tensor levels, ``m`` arrays each ``batch + (t_nodes, width_k)``.
+    """
+
+    u: Array
+    f: tuple
+    g: tuple
+
+    # -- assembly helpers (parallel to fssk.RowState) ----------------------
+
+    @classmethod
+    def from_scan_hist(cls, *, west_u, west_f, west_g, hist):
+        """Build a row from its west-boundary cell and column-scan history.
+
+        Parameters
+        ----------
+        west_u : Array, shape ``batch``
+            Scalar west-boundary value for this row.
+        west_f : tuple of Array
+            West-boundary f values (``n`` levels), each ``batch + (width_k,)``.
+        west_g : tuple of Array
+            West-boundary g values (``m`` levels), each ``batch + (width_k,)``.
+        hist : ``(u_hist, f_hist, g_hist)``
+            Output of the inner ``lax.scan`` over columns.  ``u_hist`` has
+            shape ``(T, batch…)``, ``f_hist[k]`` has ``(T, batch…, width_k)``,
+            etc.
+        """
+        u_hist, f_hist, g_hist = hist
+        u = jnp.concatenate(
+            [west_u[..., None], jnp.moveaxis(u_hist, 0, -1)],
+            axis=-1,
+        )
+        f = tuple(
+            jnp.concatenate(
+                [west_f[k][..., None, :], jnp.moveaxis(f_hist[k], 0, -2)],
+                axis=-2,
+            )
+            for k in range(len(west_f))
+        )
+        g = tuple(
+            jnp.concatenate(
+                [west_g[k][..., None, :], jnp.moveaxis(g_hist[k], 0, -2)],
+                axis=-2,
+            )
+            for k in range(len(west_g))
+        )
+        return cls(u=u, f=f, g=g)
+
+    @classmethod
+    def stack_history(cls, initial: "FreeRowState", hist: "FreeRowState"):
+        """Stack the initial row and scanned row-history into a full grid.
+
+        Parameters
+        ----------
+        initial : FreeRowState
+            Row 0 (north boundary).
+        hist : FreeRowState
+            Stacked rows 1…S from the outer ``lax.scan``.  Each field has an
+            extra leading scan axis at position 0.
+
+        Returns
+        -------
+        FreeRowState
+            Grid arrays with shape ``batch + (s_nodes, t_nodes, …)``.
+        """
+        def _prepend(first, scanned, axis):
+            return jnp.concatenate(
+                (jnp.expand_dims(first, axis), jnp.moveaxis(scanned, 0, axis)),
+                axis=axis,
+            )
+
+        u = _prepend(initial.u, hist.u, -2)
+        f = tuple(_prepend(f0, fr, -3) for f0, fr in zip(initial.f, hist.f))
+        g = tuple(_prepend(g0, gr, -3) for g0, gr in zip(initial.g, hist.g))
+        return cls(u=u, f=f, g=g)
 
 
 def free_kernel(
-        x: Union[DenseElemFirstOn, tuple[Callable[[Array], DenseElemFirstOn], Array]],
-        y: Union[DenseElemFirstOn, tuple[Callable[[Array], DenseElemFirstOn], Array]],
+        x: DenseElemFirstOn,
+        y: DenseElemFirstOn,
         *,
         evaluate: Literal["terminal", "grid"] = "terminal",
         return_fg: bool = False,
         pairwise: bool = False,
-        chunk_size_x: Optional[int] = None,
-        chunk_size_y: Optional[int] = None,
         backend: Literal["scan", "wavefront"] = "scan",
-        dyadic_order: int = 0,
-        quadrature: Literal["left", "midpoint", "trapezoid"] = "trapezoid",
+        dyadic_order: DyadicOrder = 0,
         core=None,
         increment_in: bool = False):
     """
@@ -41,13 +159,9 @@ def free_kernel(
     Parameters
     ----------
     x, y :
-        Each input is either
-
-        - a ``DenseElemFirstOn``, interpreted as path values if
-          ``increment_in=False`` and as interval increments if
-          ``increment_in=True``, or
-        - a pair ``(callable, grid)``, where the callable is interpreted as the
-          characteristic velocity and converted to increments on the given grid.
+        Tensor-level tuples, interpreted as path values if
+        ``increment_in=False`` and as interval increments if
+        ``increment_in=True``.
 
         If ``increment_in=True``, the k-th level should have shape
         ``batch + (S, d**k)`` for ``x`` and ``batch + (T, d**k)`` for ``y``.
@@ -63,18 +177,15 @@ def free_kernel(
     pairwise : bool, default=False
         If ``True``, evaluate the kernel pairwise over the batch axes of ``x`` and ``y``.
 
-    chunk_size_x, chunk_size_y : int, optional
-        Optional chunk sizes used in pairwise mode to reduce memory usage.
-
     backend : {"scan", "wavefront"}, default="scan"
         Discrete solver backend.
 
-    dyadic_order : int, default=0
-        Dyadic refinement level applied before solving.
-
-    quadrature : {"left", "midpoint", "trapezoid"}, default="trapezoid"
-        Quadrature rule used when callable characteristic velocities are converted
-        to increments.
+    dyadic_order : int or tuple of int, default=0
+        Dyadic refinement level.  A single int applies the same refinement to
+        both paths.  A tuple ``(order_x, order_y)`` allows different refinement
+        for ``x`` and ``y``.  Each coarse interval is split into
+        ``2**order`` sub-intervals; driving data is stored on the coarse grid
+        and indexed lazily (memory-efficient).
 
     core : optional
         Tensor algebra backend. If ``None``, the default ``Jax()`` backend is used.
@@ -89,102 +200,42 @@ def free_kernel(
     Depending on ``evaluate`` and ``return_fg``, returns either ``w`` or
     ``(w, f, g)``, either at the terminal point or on the full discrete grid.
     """
+    dyadic_order = normalize_dyadic_order(dyadic_order)
     core = JaxCore if core is None else core
 
-    dx = _normalize_input(
-        x,
-        quadrature=quadrature,
-        dyadic_order=dyadic_order,
-        increment_in=increment_in,
-    )
-    dy = _normalize_input(
-        y,
-        quadrature=quadrature,
-        dyadic_order=dyadic_order,
-        increment_in=increment_in,
-    )
+    dx = _to_increments(x, increment_in=increment_in)
+    dy = _to_increments(y, increment_in=increment_in)
 
     if pairwise:
         dx, dy = _broadcast_pairwise(dx, dy)
 
-    if chunk_size_x is not None or chunk_size_y is not None:
-        return _solve_chunked(
-            dx,
-            dy,
-            evaluate=evaluate,
-            return_fg=return_fg,
-            backend=backend,
-            chunk_size_x=chunk_size_x,
-            chunk_size_y=chunk_size_y,
-            core=core,
-        )
-
     if backend == "scan":
-        return _solve_scan(dx, dy, evaluate=evaluate, return_fg=return_fg, core=core)
+        return _solve_scan(dx, dy, evaluate=evaluate, return_fg=return_fg,
+                           dyadic_order=dyadic_order, core=core)
 
     if backend == "wavefront":
-        return _solve_wavefront(dx, dy, evaluate=evaluate, return_fg=return_fg, core=core)
+        return _solve_wavefront(dx, dy, evaluate=evaluate, return_fg=return_fg,
+                                dyadic_order=dyadic_order, core=core)
 
     raise ValueError(f"Unknown backend={backend!r}.")
 
 
-def _normalize_input(
-        arg: Union[DenseElemFirstOn, tuple[Callable[[Array], DenseElemFirstOn], Array]],
+def _to_increments(
+        arg: DenseElemFirstOn,
         *,
-        quadrature: Literal["left", "midpoint", "trapezoid"],
-        dyadic_order: int,
         increment_in: bool,
 ) -> DenseElemFirstOn:
+    """Normalize tensor-level input into interval increments (coarse grid).
+
+    If ``increment_in=False``, path values are differenced along axis ``-2``.
+    If ``increment_in=True``, the levels are returned as-is after validation.
     """
-    Normalize one input into interval increments.
-
-    Cases
-    -----
-    - arg = (callable, grid): the callable is interpreted as a characteristic
-      velocity and converted to interval increments on the given node grid.
-    - arg = levels:
-        * if ``increment_in=False``, the levels are interpreted as path values and
-          converted to interval increments by differencing along the interval axis;
-        * if ``increment_in=True``, the levels are interpreted directly as interval
-          increments.
-
-    Refinement convention
-    ---------------------
-    - callable input: refine the node grid first, then compute increments on the
-      refined grid;
-    - tensor input with ``increment_in=False``: first convert path values to
-      increments, then refine;
-    - tensor input with ``increment_in=True``: refine the already-given increments.
-    """
-    if dyadic_order < 0:
-        raise ValueError("dyadic_order must be non-negative.")
-
-    if isinstance(arg, tuple) and len(arg) == 2 and callable(arg[0]):
-        velocity, grid = arg
-        grid = jnp.asarray(grid)
-
-        if grid.ndim != 1:
-            raise ValueError("The node grid must be one-dimensional.")
-        if grid.shape[0] < 2:
-            raise ValueError("The node grid must contain at least two nodes.")
-
-        if dyadic_order > 0:
-            for _ in range(dyadic_order):
-                mids = 0.5 * (grid[:-1] + grid[1:])
-                grid = jnp.sort(jnp.concatenate([grid, mids], axis=0))
-
-        return _velocity_to_increments(
-            velocity,
-            grid,
-            quadrature=quadrature,
-        )
-
     levels = tuple(arg)
     if not levels:
         raise ValueError("Expected at least one positive tensor level.")
 
     if increment_in:
-        normalized_levels = levels
+        normalized = levels
     else:
         for k, lvl in enumerate(levels, start=1):
             if lvl.shape[-2] < 2:
@@ -192,95 +243,16 @@ def _normalize_input(
                     f"Path-valued tensor input at level {k} must have at least "
                     f"two nodes along the interval axis, got {lvl.shape[-2]}."
                 )
-        normalized_levels = tuple(jnp.diff(lvl, axis=-2) for lvl in levels)
+        normalized = tuple(jnp.diff(lvl, axis=-2) for lvl in levels)
 
-    S = int(normalized_levels[0].shape[-2])
-    for k, lvl in enumerate(normalized_levels, start=1):
+    S = int(normalized[0].shape[-2])
+    for k, lvl in enumerate(normalized, start=1):
         if lvl.shape[-2] != S:
             raise ValueError(
                 f"All tensor levels must have the same interval axis length. "
                 f"Level 1 has {S}, level {k} has {lvl.shape[-2]}."
             )
-
-    if dyadic_order > 0:
-        normalized_levels = _refine_increments(
-            normalized_levels,
-            dyadic_order=dyadic_order,
-        )
-
-    return normalized_levels
-
-
-def _velocity_to_increments(
-        velocity: Callable[[Array], DenseElemFirstOn],
-        grid: Array,
-        *,
-        quadrature: Literal["left", "midpoint", "trapezoid"],
-) -> DenseElemFirstOn:
-    """
-    Convert a characteristic velocity into interval increments on the node grid.
-
-    For each interval [t_{i-1}, t_i], compute
-        Δx_i = ∫_{t_{i-1}}^{t_i} x(r) dr
-    by the chosen quadrature rule.
-    """
-    t0 = grid[:-1]
-    t1 = grid[1:]
-    dt = t1 - t0
-
-    if quadrature == "left":
-        vals = velocity(t0)
-        return tuple(v * jnp.expand_dims(dt, axis=-1) for v in vals)
-
-    if quadrature == "midpoint":
-        tm = 0.5 * (t0 + t1)
-        vals = velocity(tm)
-        return tuple(v * jnp.expand_dims(dt, axis=-1) for v in vals)
-
-    if quadrature == "trapezoid":
-        v0 = velocity(t0)
-        v1 = velocity(t1)
-        return tuple(0.5 * (a + b) * jnp.expand_dims(dt, axis=-1) for a, b in zip(v0, v1))
-
-    raise ValueError(f"Unknown quadrature={quadrature!r}.")
-
-
-def _refine_increments(
-        levels: DenseElemFirstOn,
-        *,
-        dyadic_order: int,
-) -> DenseElemFirstOn:
-    """
-    Dyadically refine interval increments by equal splitting.
-
-    If the original interval increments are
-        Δx_1, ..., Δx_S,
-    then after dyadic refinement of order λ each increment Δx_i is replaced by
-        2**λ copies of Δx_i / 2**λ
-    along the interval axis ``-2``.
-
-    Parameters
-    ----------
-    levels :
-        Positive tensor levels interpreted as interval increments. The k-th level
-        is assumed to have shape ``batch + (S, d**k)``.
-
-    dyadic_order : int
-        Dyadic refinement order. ``0`` means no refinement.
-
-    Returns
-    -------
-    DenseElemFirstOn
-        Refined interval increments with interval axis length multiplied by
-        ``2**dyadic_order``.
-    """
-    if dyadic_order < 0:
-        raise ValueError("dyadic_order must be non-negative.")
-    if dyadic_order == 0:
-        return levels
-
-    r = 2 ** dyadic_order
-    return tuple(jnp.repeat(level / r, repeats=r, axis=-2) for level in levels)
+    return normalized
 
 
 def _broadcast_pairwise(
@@ -322,25 +294,38 @@ def _build_scan_boundaries(
         dx: DenseElemFirstOn,
         dy: DenseElemFirstOn,
         *,
+        dyadic_order: tuple[int, int],
         core,
 ):
     """
     Build the exact boundary data for the rowwise scan solver.
 
+    Increments ``dx``, ``dy`` are on the **coarse** grid.  When
+    ``dyadic_order > (0, 0)`` the boundaries are computed on the coarse grid and
+    the solver indexes them lazily via ``i >> dyadic_order_x`` / ``j >> dyadic_order_y``.
+
     Returns
     -------
     tuple
-        (w_row_0, f_row_0, g_row_0, w_col_0, g_col_0, dx_steps, dy_steps, w_boundary_steps, f_boundary_steps)
+        (initial_row, g_w_0, dx_steps, dy_steps, u_w_steps, f_w_steps,
+         S_coarse, T_coarse)
     """
+    dyadic_order_x, dyadic_order_y = dyadic_order
+
     M, N = len(dx), len(dy)
     m, n = M - 1, N - 1
 
-    S = dx[0].shape[-2]
-    T = dy[0].shape[-2]
+    S_coarse = dx[0].shape[-2]
+    T_coarse = dy[0].shape[-2]
 
     batch_shape = jnp.broadcast_shapes(dx[0].shape[:-2], dy[0].shape[:-2])
     dtype = jnp.result_type(dx[0], dy[0])
     one = jnp.ones(batch_shape, dtype=dtype)
+
+    r_x = 1 << dyadic_order_x
+    r_y = 1 << dyadic_order_y
+    S_fine = S_coarse * r_x
+    T_fine = T_coarse * r_y
 
     def _boundary_development(
             driving,
@@ -375,61 +360,86 @@ def _build_scan_boundaries(
             for k in range(out_trunc)
         )
 
-    f_boundary = _boundary_development(
+    # Boundary developments on the coarse grid (S_coarse+1 / T_coarse+1 nodes)
+    f_boundary_coarse = _boundary_development(
         dx,
         out_trunc=n,
-        nodes=S + 1,
+        nodes=S_coarse + 1,
         template=dy,
     )
-    g_boundary = _boundary_development(
+    g_boundary_coarse = _boundary_development(
         dy,
         out_trunc=m,
-        nodes=T + 1,
+        nodes=T_coarse + 1,
         template=dx,
     )
 
-    # south / west scalar boundary for w
-    w_row_0 = jnp.broadcast_to(one[..., None], batch_shape + (T + 1,))
-    w_col_0 = jnp.broadcast_to(one[..., None], batch_shape + (S + 1,))
+    # Row 0 boundary: needs T_fine+1 nodes.  The coarse boundary at coarse
+    # node j maps to fine nodes j*r … (j+1)*r-1.  We index via j >> order.
+    def _expand_boundary_to_fine(coarse_levels, fine_nodes, order):
+        """Expand coarse-grid boundary to fine grid.
 
-    # south boundary for f is zero
+        Fine node ``i`` maps to coarse node ``min(i >> order, n_coarse-1)``.
+        """
+        if not coarse_levels:
+            return tuple()
+        if order == 0:
+            return coarse_levels
+        n_coarse = coarse_levels[0].shape[-2]
+        idx = jnp.minimum(jnp.arange(fine_nodes) >> order, n_coarse - 1)
+        return tuple(level[..., idx, :] for level in coarse_levels)
+
+    # south / west scalar boundary for w (all ones on fine grid)
+    w_row_0 = jnp.broadcast_to(one[..., None], batch_shape + (T_fine + 1,))
+    w_col_0 = jnp.broadcast_to(one[..., None], batch_shape + (S_fine + 1,))
+
+    # south boundary for f is zero on fine grid
     f_row_0 = tuple(
-        jnp.zeros(batch_shape + (T + 1, dy[k].shape[-1]), dtype=dtype)
+        jnp.zeros(batch_shape + (T_fine + 1, dy[k].shape[-1]), dtype=dtype)
         for k in range(n)
     )
 
-    # south boundary for g is the boundary development in y
-    g_row_0 = g_boundary
+    # south boundary for g is the boundary development in y, expanded to fine grid
+    g_row_0_coarse = g_boundary_coarse  # (T_coarse+1 nodes)
+    g_row_0 = _expand_boundary_to_fine(g_row_0_coarse, T_fine + 1, dyadic_order_y)
 
-    # west boundary for g is zero
+    # west boundary for g is zero (per-cell, no grid axis)
     g_col_0 = tuple(
         jnp.zeros(batch_shape + (dx[k].shape[-1],), dtype=dtype)
         for k in range(m)
     )
 
-    dx_steps = core.tensor_moveaxis(dx, source=-2, destination=0)
-    dy_steps = core.tensor_moveaxis(dy, source=-2, destination=0)
+    # Scale coarse increments for the fine grid: each sub-cell gets dx/r_x, dy/r_y
+    dx_scaled = tuple(level / r_x for level in dx) if dyadic_order_x > 0 else dx
+    dy_scaled = tuple(level / r_y for level in dy) if dyadic_order_y > 0 else dy
 
-    # row scan needs west boundary values for rows i = 1, ..., S
+    # Move interval axis to position 0 for scanning (coarse grid)
+    dx_steps_coarse = core.tensor_moveaxis(dx_scaled, source=-2, destination=0)
+    dy_steps_coarse = core.tensor_moveaxis(dy_scaled, source=-2, destination=0)
+
+    # West boundary values for rows i = 1, ..., S_fine
     w_boundary_steps = jnp.moveaxis(w_col_0[..., 1:], -1, 0)
 
-    # row scan needs west f-boundary values for rows i = 1, ..., S
+    # West f-boundary values for rows i = 1, ..., S_fine
+    # Expand coarse f_boundary to fine grid, then extract rows 1..S_fine
+    f_boundary_fine = _expand_boundary_to_fine(f_boundary_coarse, S_fine + 1, dyadic_order_x)
     f_boundary_steps = core.tensor_moveaxis(
-        tuple(level[..., 1:, :] for level in f_boundary),
+        tuple(level[..., 1:, :] for level in f_boundary_fine),
         source=-2,
         destination=0,
     )
 
+    initial_row = FreeRowState(u=w_row_0, f=f_row_0, g=g_row_0)
+
     return (
-        w_row_0,
-        f_row_0,
-        g_row_0,
-        w_col_0,
+        initial_row,
         g_col_0,
-        dx_steps,
-        dy_steps,
+        dx_steps_coarse,
+        dy_steps_coarse,
         w_boundary_steps,
         f_boundary_steps,
+        S_coarse,
+        T_coarse,
     )
 
 
@@ -459,216 +469,277 @@ def _swap_scan_output(
     )
 
 
+def _free_cell_step(cell: FreeCellData, *, core, M, N, m, n, P, P_f, P_g):
+    """Compute the SE corner ``(u_se, f_se, g_se)`` from a three-corner neighbourhood.
+
+    This is the free-kernel analogue of ``fssk._heun_cell_step``.  It
+    implements a Heun-like predictor–corrector scheme with a special fast
+    path when ``M == N == 1`` (scalar-only, no tensor adjoint states).
+
+    Parameters
+    ----------
+    cell : FreeCellData
+        Three-corner stencil + driving increments.
+    core : tensor algebra backend
+        Provides ``tensor_inner_product``, ``tensor_adjoint_product``, etc.
+    M, N : int
+        Number of x- / y-levels (including level 0 if it were present; here
+        ``M = len(dx)``, ``N = len(dy)``).
+    m, n : int
+        ``M - 1``, ``N - 1`` — truncation depths for g and f respectively.
+    P, P_f, P_g : int
+        ``min(M, N)``, ``min(M, n)``, ``min(N, m)`` — overlap depths.
+
+    Returns
+    -------
+    u_se : Array
+        Scalar PDE value at the SE corner.
+    f_se : tuple
+        Left-adjoint tensor at the SE corner (``n`` levels).
+    g_se : tuple
+        Right-adjoint tensor at the SE corner (``m`` levels).
+    """
+    adj_left = partial(
+        core.tensor_adjoint_product,
+        side="left", w_first_on=True, y_first_on=True, first_on_out=True,
+    )
+    adj_right = partial(
+        core.tensor_adjoint_product,
+        side="right", w_first_on=True, y_first_on=True, first_on_out=True,
+    )
+    t_prod = partial(core.tensor_product, a_first_on=True, b_first_on=True)
+    t_sum = core.tensor_summation
+    t_scal = core.tensor_scalar_multiply
+    t_inner = core.tensor_inner_product
+
+    dx_i, dy_j = cell.dx_i, cell.dy_j
+    u_nw, u_n, u_w = cell.u_nw, cell.u_n, cell.u_w
+    f_nw, f_n, f_w = cell.f_nw, cell.f_n, cell.f_w
+    g_nw, g_n, g_w = cell.g_nw, cell.g_n, cell.g_w
+
+    G_ij = t_inner(dx_i[:P], dy_j[:P])
+
+    # --- M == 1, N == 1 fast path (scalar-only, no adjoint states) --------
+    if M == 1 and N == 1:
+        kap = 1.0 / 12.0
+        G2_ij = G_ij * G_ij
+        u_se = (u_n + u_w) * (1.0 + 0.5 * G_ij + kap * G2_ij) \
+               - u_nw * (1.0 - kap * G2_ij)
+        return u_se, f_n, g_w          # f, g are empty tuples — pass through
+
+    # --- general Heun predictor–corrector ---------------------------------
+    dx_adj_dy = adj_right(dx_i, dy_j, trunc=n)
+    dy_adj_dx = adj_right(dy_j, dx_i, trunc=m)
+
+    def f_increment(u_val, f_val, g_val):
+        return t_sum(
+            t_sum(
+                t_scal(dx_i[:P_f], u_val),
+                t_prod(f_val, dx_i[:P_f], trunc=n),
+            ),
+            adj_left(g_val, dx_i, trunc=n),
+        )
+
+    def g_increment(u_val, f_val, g_val):
+        return t_sum(
+            t_sum(
+                t_scal(dy_j[:P_g], u_val),
+                t_prod(g_val, dy_j[:P_g], trunc=m),
+            ),
+            adj_left(f_val, dy_j, trunc=m),
+        )
+
+    def forcing(u_val, f_val, g_val):
+        return (
+                u_val * G_ij
+                + t_inner(f_val, dx_adj_dy)
+                + t_inner(g_val, dy_adj_dx)
+        )
+
+    # stage 0: one-sided provisional edge advances
+    df0 = f_increment(u_n, f_n, g_n)
+    dg0 = g_increment(u_w, f_w, g_w)
+
+    f_p = t_sum(f_n, df0)
+    g_p = t_sum(g_w, dg0)
+
+    F_nw = forcing(u_nw, f_nw, g_nw)
+    F_n = forcing(u_n, f_n, g_n)
+    F_w = forcing(u_w, f_w, g_w)
+
+    u_base = u_n + u_w - u_nw
+    u_p = u_base + F_nw
+
+    # stage 1: coupled correction for f and g at the provisional corner
+    df1 = f_increment(u_p, f_p, g_p)
+    dg1 = g_increment(u_p, f_p, g_p)
+
+    f_se = t_sum(f_n, t_scal(t_sum(df0, df1), 0.5))
+    g_se = t_sum(g_w, t_scal(t_sum(dg0, dg1), 0.5))
+
+    # final scalar correction with corrected corner tensors
+    F_c = forcing(u_p, f_se, g_se)
+    u_se = u_base + 0.25 * (F_nw + F_n + F_w + F_c)
+
+    return u_se, f_se, g_se
+
+
 def _solve_scan(
         dx: DenseElemFirstOn,
         dy: DenseElemFirstOn,
         *,
         evaluate: Literal["terminal", "grid"],
         return_fg: bool,
+        dyadic_order: tuple[int, int],
         core,
 ):
     """
     Solve the truncated free-kernel system by a rowwise scan, using symmetry to
     choose the more economical orientation.
-    """
-    S, T = dx[0].shape[-2], dy[0].shape[-2]
 
-    swapped = T > S
+    Driving increments ``dx``, ``dy`` live on the **coarse** grid.  When
+    ``dyadic_order > (0, 0)`` each coarse interval is split into
+    ``2^dyadic_order_x`` / ``2^dyadic_order_y`` sub-intervals; the coarse
+    increment is reused (scaled by ``1/r``) for every sub-cell via
+    ``i >> dyadic_order`` indexing — no data duplication.
+    """
+    dyadic_order_x, dyadic_order_y = dyadic_order
+    r_x = 1 << dyadic_order_x
+    r_y = 1 << dyadic_order_y
+    S_fine, T_fine = dx[0].shape[-2] * r_x, dy[0].shape[-2] * r_y
+
+    swapped = T_fine > S_fine
     if swapped:
         dx, dy = dy, dx
-        S, T = T, S
+        S_fine, T_fine = T_fine, S_fine
+        dyadic_order = (dyadic_order_y, dyadic_order_x)
+        dyadic_order_x, dyadic_order_y = dyadic_order
 
     M, N = len(dx), len(dy)
     P = min(M, N)
     m, n = M - 1, N - 1
     P_f, P_g = min(M, n), min(N, m)
 
-    adj_left = partial(
-        core.tensor_adjoint_product,
-        side="left",
-        w_first_on=True,
-        y_first_on=True,
-        first_on_out=True,
-    )
-    adj_right = partial(
-        core.tensor_adjoint_product,
-        side="right",
-        w_first_on=True,
-        y_first_on=True,
-        first_on_out=True,
-    )
-    t_prod = partial(
-        core.tensor_product,
-        a_first_on=True,
-        b_first_on=True,
-    )
-    t_sum = core.tensor_summation
-    t_scal = core.tensor_scalar_multiply
-
     (
-        u_row_0,
-        f_row_0,
-        g_row_0,
-        _u_col_0,
+        initial_row,
         g_w_0,
-        dx_steps,
-        dy_steps,
+        dx_steps_coarse,
+        dy_steps_coarse,
         u_w_steps,
         f_w_steps,
-    ) = _build_scan_boundaries(dx, dy, core=core)
+        S_coarse,
+        T_coarse,
+    ) = _build_scan_boundaries(dx, dy, dyadic_order=dyadic_order, core=core)
 
-    def split_rows(some_row):
-        some_s = core.tensor_moveaxis(
+    def _idx_coarse_x(steps_coarse, fine_idx):
+        """Index coarse driving data at fine-grid position ``fine_idx`` (x-axis)."""
+        coarse_idx = fine_idx >> dyadic_order_x
+        return tuple(level[coarse_idx] for level in steps_coarse)
+
+    def _idx_coarse_y(steps_coarse, fine_idx):
+        """Index coarse driving data at fine-grid position ``fine_idx`` (y-axis)."""
+        coarse_idx = fine_idx >> dyadic_order_y
+        return tuple(level[coarse_idx] for level in steps_coarse)
+
+    def _split_tensor_row(some_row):
+        """Split a tensor-row into (north j+1, northwest j) with scan axis at 0."""
+        some_n = core.tensor_moveaxis(
             tuple(level[..., 1:, :] for level in some_row),
-            source=-2,
-            destination=0,
+            source=-2, destination=0,
         )
-        some_sw = core.tensor_moveaxis(
+        some_nw = core.tensor_moveaxis(
             tuple(level[..., :-1, :] for level in some_row),
-            source=-2,
-            destination=0,
+            source=-2, destination=0,
         )
-        return some_s, some_sw
+        return some_n, some_nw
 
-    def prepend_rows(first, scanned, axis):
-        return jnp.concatenate(
-            (jnp.expand_dims(first, axis), jnp.moveaxis(scanned, 0, axis)),
-            axis=axis,
-        )
+    def row_step(north: FreeRowState, data):
+        ix, u_w0, f_w0 = data
+        dx_i = _idx_coarse_x(dx_steps_coarse, ix)
 
-    def row_step(carry, data):
-        u_s_row, f_s_row, g_s_row = carry
-        dx_i, u_w0, f_w0 = data
+        # Extract north (j+1) and northwest (j) columns for inner scan
+        u_n = jnp.moveaxis(north.u[..., 1:], -1, 0)
+        u_nw = jnp.moveaxis(north.u[..., :-1], -1, 0)
+        f_n, f_nw = _split_tensor_row(north.f)
+        g_n, g_nw = _split_tensor_row(north.g)
 
-        u_s = jnp.moveaxis(u_s_row[..., 1:], -1, 0)
-        u_sw = jnp.moveaxis(u_s_row[..., :-1], -1, 0)
+        def inner_step(carry, col_data):
+            u_w, f_w, g_w = carry
+            iy, u_nj, u_nwj, f_nj, f_nwj, g_nj, g_nwj = col_data
+            dy_j = _idx_coarse_y(dy_steps_coarse, iy)
 
-        f_s, f_sw = split_rows(f_s_row)
-        g_s, g_sw = split_rows(g_s_row)
-
-        def cell_step(carry_cell, data_cell):
-            u_w, f_w, g_w = carry_cell
-            dy_j, u_sj, u_swj, f_sj, f_swj, g_sj, g_swj = data_cell
-
-            f_ij = t_sum(
-                t_sum(
-                    f_sj,
-                    t_scal(dx_i[:P_f], u_sj),
-                ),
-                t_sum(
-                    t_prod(f_sj, dx_i[:P_f], trunc=n),
-                    adj_left(g_sj, dx_i, trunc=n),
-                ),
+            cell = FreeCellData(
+                dx_i=dx_i, dy_j=dy_j,
+                u_nw=u_nwj, u_n=u_nj, u_w=u_w,
+                f_nw=f_nwj, f_n=f_nj, f_w=f_w,
+                g_nw=g_nwj, g_n=g_nj, g_w=g_w,
             )
-
-            g_ij = t_sum(
-                t_sum(
-                    g_w,
-                    t_scal(dy_j[:P_g], u_w),
-                ),
-                t_sum(
-                    t_prod(g_w, dy_j[:P_g], trunc=m),
-                    adj_left(f_w, dy_j, trunc=m),
-                ),
+            u_se, f_se, g_se = _free_cell_step(
+                cell, core=core, M=M, N=N, m=m, n=n, P=P, P_f=P_f, P_g=P_g,
             )
+            return (u_se, f_se, g_se), (u_se, f_se, g_se)
 
-            G_ij = core.tensor_inner_product(dx_i[:P], dy_j[:P])
-
-            if P == 1:
-                kap = 1.0 / 12.0
-                G2_ij = G_ij * G_ij
-                u_ij = (u_sj + u_w) * (1.0 + 0.5 * G_ij + kap * G2_ij) - u_swj * (1.0 - kap * G2_ij)
-            else:
-                dx_adj_dy = adj_right(dx_i, dy_j, trunc=n)
-                dy_adj_dx = adj_right(dy_j, dx_i, trunc=m)
-
-                def forcing(u_val, f_val, g_val):
-                    return (
-                            u_val * G_ij
-                            + core.tensor_inner_product(f_val, dx_adj_dy)
-                            + core.tensor_inner_product(g_val, dy_adj_dx)
-                    )
-
-                F_sw = forcing(u_swj, f_swj, g_swj)
-                F_s = forcing(u_sj, f_sj, g_sj)
-                F_w = forcing(u_w, f_w, g_w)
-
-                u_p = u_sj + u_w - u_swj + F_sw
-                F_p = forcing(u_p, f_ij, g_ij)
-                u_ij = u_sj + u_w - u_swj + 0.25 * (F_sw + F_s + F_w + F_p)
-
-            return (u_ij, f_ij, g_ij), (u_ij, f_ij, g_ij)
-
-        (_, _, _), (u_cells, f_cells, g_cells) = lax.scan(
-            cell_step,
+        _, hist = lax.scan(
+            inner_step,
             (u_w0, f_w0, g_w_0),
-            (dy_steps, u_s, u_sw, f_s, f_sw, g_s, g_sw),
+            (jnp.arange(T_fine, dtype=jnp.int32),
+             u_n, u_nw, f_n, f_nw, g_n, g_nw),
         )
 
-        u_row = jnp.concatenate(
-            [u_w0[..., None], jnp.moveaxis(u_cells, 0, -1)],
-            axis=-1,
+        south = FreeRowState.from_scan_hist(
+            west_u=u_w0, west_f=f_w0, west_g=g_w_0, hist=hist,
         )
-        f_row = tuple(
-            jnp.concatenate(
-                [f_w0[k][..., None, :], jnp.moveaxis(f_cells[k], 0, -2)],
-                axis=-2,
-            )
-            for k in range(n)
-        )
-        g_row = tuple(
-            jnp.concatenate(
-                [g_w_0[k][..., None, :], jnp.moveaxis(g_cells[k], 0, -2)],
-                axis=-2,
-            )
-            for k in range(m)
-        )
+        return south, south
 
-        return (u_row, f_row, g_row), (u_row, f_row, g_row)
+    row_indices = jnp.arange(S_fine, dtype=jnp.int32)
 
     if evaluate == "terminal":
-        def row_step_terminal(carry, data):
-            carry, _ = row_step(carry, data)
-            return carry, None
+        def row_step_terminal(north, data):
+            south, _ = row_step(north, data)
+            return south, None
 
-        (u_last_row, f_last_row, g_last_row), _ = lax.scan(
+        last_row, _ = lax.scan(
             row_step_terminal,
-            (u_row_0, f_row_0, g_row_0),
-            (dx_steps, u_w_steps, f_w_steps),
+            initial_row,
+            (row_indices, u_w_steps, f_w_steps),
         )
 
-        out = u_last_row[..., -1]
+        out = last_row.u[..., -1]
         if return_fg:
             out = (
                 out,
-                tuple(level[..., -1, :] for level in f_last_row),
-                tuple(level[..., -1, :] for level in g_last_row),
+                tuple(level[..., -1, :] for level in last_row.f),
+                tuple(level[..., -1, :] for level in last_row.g),
             )
 
     elif evaluate == "grid":
         if return_fg:
-            (_, _, _), (u_rows, f_rows, g_rows) = lax.scan(
+            _, row_hist = lax.scan(
                 row_step,
-                (u_row_0, f_row_0, g_row_0),
-                (dx_steps, u_w_steps, f_w_steps),
+                initial_row,
+                (row_indices, u_w_steps, f_w_steps),
             )
 
-            u = prepend_rows(u_row_0, u_rows, -2)
-            f = tuple(prepend_rows(f0, fr, -3) for f0, fr in zip(f_row_0, f_rows))
-            g = tuple(prepend_rows(g0, gr, -3) for g0, gr in zip(g_row_0, g_rows))
-            out = (u, f, g)
+            grid = FreeRowState.stack_history(initial_row, row_hist)
+            out = (grid.u, grid.f, grid.g)
         else:
-            def row_step_uonly(carry, data):
-                carry, (u_row, _, _) = row_step(carry, data)
-                return carry, u_row
+            def row_step_uonly(north, data):
+                south, _ = row_step(north, data)
+                return south, south.u
 
-            (_, _, _), u_rows = lax.scan(
+            _, u_rows = lax.scan(
                 row_step_uonly,
-                (u_row_0, f_row_0, g_row_0),
-                (dx_steps, u_w_steps, f_w_steps),
+                initial_row,
+                (row_indices, u_w_steps, f_w_steps),
             )
 
-            out = prepend_rows(u_row_0, u_rows, -2)
+            def _prepend(first, scanned, axis):
+                return jnp.concatenate(
+                    (jnp.expand_dims(first, axis), jnp.moveaxis(scanned, 0, axis)),
+                    axis=axis,
+                )
+
+            out = _prepend(initial_row.u, u_rows, -2)
 
     else:
         raise ValueError(f"Unknown evaluate={evaluate!r}.")
@@ -682,25 +753,295 @@ def _solve_wavefront(
         *,
         evaluate: Literal["terminal", "grid"],
         return_fg: bool,
+        dyadic_order: tuple[int, int],
         core,
 ):
-    """Optional anti-diagonal backend."""
-    raise NotImplementedError
+    """Anti-diagonal wavefront solver for the free-kernel PDE.
 
+    Processes cells along anti-diagonals ``d = i + j`` in parallel via
+    ``jax.vmap``, keeping only two diagonal buffers in memory.  This trades
+    sequential depth for parallelism compared to the row-scan backend.
 
-def _solve_chunked(
-        dx: DenseElemFirstOn,
-        dy: DenseElemFirstOn,
-        *,
-        evaluate: Literal["terminal", "grid"],
-        return_fg: bool,
-        backend: Literal["scan", "wavefront"],
-        chunk_size_x: Optional[int],
-        chunk_size_y: Optional[int],
-        core,
-):
-    """Chunked pairwise evaluation."""
-    raise NotImplementedError
+    Boundary developments (f on column 0, g on row 0) are pre-computed on the
+    coarse grid, expanded to the fine grid, and injected into each fresh
+    diagonal buffer before interior cells are written.
+    """
+    dyadic_order_x, dyadic_order_y = dyadic_order
+    r_x = 1 << dyadic_order_x
+    r_y = 1 << dyadic_order_y
+
+    S_coarse, T_coarse = dx[0].shape[-2], dy[0].shape[-2]
+    S_fine, T_fine = S_coarse * r_x, T_coarse * r_y
+    s_nodes, t_nodes = S_fine + 1, T_fine + 1
+
+    M, N = len(dx), len(dy)
+    m, n = M - 1, N - 1
+    P = min(M, N)
+    P_f, P_g = min(M, n), min(N, m)
+
+    batch_shape = jnp.broadcast_shapes(dx[0].shape[:-2], dy[0].shape[:-2])
+    dtype = jnp.result_type(dx[0], dy[0])
+    terminal_only = evaluate != "grid"
+
+    # Scale coarse increments and move interval axis to position 0
+    dx_sc = tuple(level / r_x for level in dx) if dyadic_order_x > 0 else dx
+    dy_sc = tuple(level / r_y for level in dy) if dyadic_order_y > 0 else dy
+    dx_steps = core.tensor_moveaxis(dx_sc, source=-2, destination=0)
+    dy_steps = core.tensor_moveaxis(dy_sc, source=-2, destination=0)
+
+    # --- Boundary developments on the fine grid ---
+
+    def _bdev(driving, *, out_trunc):
+        if out_trunc == 0:
+            return tuple()
+        bnd = core.tensor_development(
+            driving, axis=-2, trunc=out_trunc, block_size=1,
+            accumulate=True, output_starting_point=True, increment_input=True,
+        )
+        return tuple(
+            jnp.broadcast_to(bnd[k + 1], batch_shape + bnd[k + 1].shape[-2:])
+            for k in range(out_trunc)
+        )
+
+    def _expand(coarse, fine_nodes, order):
+        if not coarse or order == 0:
+            return coarse
+        nc = coarse[0].shape[-2]
+        idx = jnp.minimum(jnp.arange(fine_nodes) >> order, nc - 1)
+        return tuple(lev[..., idx, :] for lev in coarse)
+
+    # f_col0: f-boundary at column 0, nodes i = 0..S_fine  (n levels)
+    # g_row0: g-boundary at row 0, nodes j = 0..T_fine     (m levels)
+    f_col0 = _expand(_bdev(dx, out_trunc=n), S_fine + 1, dyadic_order_x)
+    g_row0 = _expand(_bdev(dy, out_trunc=m), T_fine + 1, dyadic_order_y)
+
+    # Index-ready: move node axis to 0 → (nodes,) + batch + (width,)
+    f_col0_i = tuple(jnp.moveaxis(lev, -2, 0) for lev in f_col0)
+    g_row0_i = tuple(jnp.moveaxis(lev, -2, 0) for lev in g_row0)
+
+    W = min(S_fine, T_fine) + 1
+    max_int_w = max(min(S_fine, T_fine), 1)
+
+    # --- Diagonal buffers ---
+
+    def _zeros_buf():
+        """Fresh buffer: u = 1 (boundary default), f = 0, g = 0."""
+        u = jnp.ones((W,) + batch_shape, dtype=dtype)
+        f = tuple(
+            jnp.zeros((W,) + batch_shape + (dy[k].shape[-1],), dtype=dtype)
+            for k in range(n)
+        )
+        g = tuple(
+            jnp.zeros((W,) + batch_shape + (dx[k].shape[-1],), dtype=dtype)
+            for k in range(m)
+        )
+        return u, f, g
+
+    def _inject_boundary(buf, d):
+        """Write non-trivial boundary values into a fresh diagonal buffer.
+
+        On diagonal ``d`` (i + j = d) at most two boundary positions exist:
+        * **top** (i = 0, j = d): g comes from g_row0.
+        * **left** (i = d, j = 0): f comes from f_col0.
+        """
+        u_b, f_b, g_b = buf
+        ext_lo = jnp.maximum(0, d - T_fine)
+
+        # Top boundary: node (0, d) at buffer position 0
+        if g_row0_i:
+            has_top = (ext_lo == 0) & (d <= T_fine)
+            j_top = jnp.clip(d, 0, T_fine)
+            g_b = tuple(
+                lev.at[0].set(jnp.where(has_top, g_row0_i[k][j_top], lev[0]))
+                for k, lev in enumerate(g_b)
+            )
+
+        # Left boundary: node (d, 0) at buffer position d - ext_lo
+        if f_col0_i:
+            has_left = d <= S_fine
+            pos_left = jnp.clip(d - ext_lo, 0, W - 1)
+            i_left = jnp.clip(d, 0, S_fine)
+            f_b = tuple(
+                lev.at[pos_left].set(jnp.where(has_left, f_col0_i[k][i_left], lev[pos_left]))
+                for k, lev in enumerate(f_b)
+            )
+
+        return u_b, f_b, g_b
+
+    buf_d0 = _inject_boundary(_zeros_buf(), 0)
+    buf_d1 = _inject_boundary(_zeros_buf(), 1)
+
+    n_diags = S_fine + T_fine - 1
+    if n_diags <= 0:
+        out_u = jnp.ones(batch_shape + (s_nodes, t_nodes), dtype=dtype)
+        if return_fg:
+            out_f = tuple(
+                jnp.zeros(batch_shape + (s_nodes, t_nodes, dy[k].shape[-1],), dtype=dtype)
+                for k in range(n)
+            )
+            out_g = tuple(
+                jnp.zeros(batch_shape + (s_nodes, t_nodes, dx[k].shape[-1],), dtype=dtype)
+                for k in range(m)
+            )
+            return out_u, out_f, out_g
+        return out_u
+
+    d_arr = jnp.arange(2, S_fine + T_fine + 1, dtype=jnp.int32)
+
+    def _idx_x(fine_idx):
+        ci = jnp.minimum(fine_idx >> dyadic_order_x, S_coarse - 1)
+        return tuple(lev[ci] for lev in dx_steps)
+
+    def _idx_y(fine_idx):
+        ci = jnp.minimum(fine_idx >> dyadic_order_y, T_coarse - 1)
+        return tuple(lev[ci] for lev in dy_steps)
+
+    # --- Diagonal scan ---
+
+    def diag_step(carry, d):
+        buf_prev, buf_prev2 = carry
+        u_p, f_p, g_p = buf_prev
+        u_p2, f_p2, g_p2 = buf_prev2
+
+        ext_lo = jnp.maximum(0, d - T_fine)
+        ext_lo_p = jnp.maximum(0, d - 1 - T_fine)
+        ext_lo_p2 = jnp.maximum(0, d - 2 - T_fine)
+
+        int_lo = jnp.maximum(1, d - T_fine)
+        int_hi = jnp.minimum(S_fine, d - 1)
+        int_w = jnp.maximum(int_hi - int_lo + 1, 0)
+
+        offsets = jnp.arange(max_int_w, dtype=jnp.int32)
+        valid = offsets < int_w
+        i_int = jnp.clip(int_lo + offsets, 1, S_fine)
+        j_int = jnp.clip(d - i_int, 1, T_fine)
+        im1, jm1 = i_int - 1, j_int - 1
+        i_safe = jnp.where(valid, i_int, 0)
+        j_safe = jnp.where(valid, j_int, 0)
+
+        # Buffer positions for the three-corner stencil
+        k_n = jnp.clip(im1 - ext_lo_p, 0, W - 1)
+        k_w = jnp.clip(i_int - ext_lo_p, 0, W - 1)
+        k_nw = jnp.clip(im1 - ext_lo_p2, 0, W - 1)
+
+        # Gather stencil values
+        u_n_v, u_w_v, u_nw_v = u_p[k_n], u_p[k_w], u_p2[k_nw]
+        f_n_v = tuple(lev[k_n] for lev in f_p)
+        f_w_v = tuple(lev[k_w] for lev in f_p)
+        f_nw_v = tuple(lev[k_nw] for lev in f_p2)
+        g_n_v = tuple(lev[k_n] for lev in g_p)
+        g_w_v = tuple(lev[k_w] for lev in g_p)
+        g_nw_v = tuple(lev[k_nw] for lev in g_p2)
+
+        # Driving increments (coarse-indexed)
+        dx_v = _idx_x(im1)
+        dy_v = _idx_y(jm1)
+
+        # Parallel cell step over the anti-diagonal
+        cells = FreeCellData(
+            dx_i=dx_v, dy_j=dy_v,
+            u_nw=u_nw_v, u_n=u_n_v, u_w=u_w_v,
+            f_nw=f_nw_v, f_n=f_n_v, f_w=f_w_v,
+            g_nw=g_nw_v, g_n=g_n_v, g_w=g_w_v,
+        )
+        u_new, f_new, g_new = jax.vmap(
+            lambda c: _free_cell_step(
+                c, core=core, M=M, N=N, m=m, n=n, P=P, P_f=P_f, P_g=P_g,
+            )
+        )(cells)
+
+        # Fresh buffer with boundary values, then overwrite interior
+        new_u, new_f, new_g = _inject_boundary(_zeros_buf(), d)
+
+        int_pos = jnp.clip(int_lo - ext_lo + offsets, 0, W - 1)
+        vm = valid.reshape(valid.shape + (1,) * len(batch_shape))
+        vm_t = valid.reshape(valid.shape + (1,) * (len(batch_shape) + 1))
+
+        new_u = new_u.at[int_pos].set(jnp.where(vm, u_new, new_u[int_pos]))
+        new_f = tuple(
+            lev.at[int_pos].set(jnp.where(vm_t, f_new[k], lev[int_pos]))
+            for k, lev in enumerate(new_f)
+        )
+        new_g = tuple(
+            lev.at[int_pos].set(jnp.where(vm_t, g_new[k], lev[int_pos]))
+            for k, lev in enumerate(new_g)
+        )
+
+        new_buf = (new_u, new_f, new_g)
+        out = None if terminal_only else (i_safe, j_safe, valid, u_new, f_new, g_new)
+        return (new_buf, buf_prev), out
+
+    (last_buf, _), all_out = lax.scan(diag_step, (buf_d1, buf_d0), d_arr)
+
+    if terminal_only:
+        u_last, f_last, g_last = last_buf
+        u_term = u_last[0]
+        if return_fg:
+            return u_term, tuple(lev[0] for lev in f_last), tuple(lev[0] for lev in g_last)
+        return u_term
+
+    # --- Reconstruct full grid ---
+    i_all, j_all, valid_all, u_all, f_all, g_all = all_out
+
+    i_flat = i_all.reshape(-1)
+    j_flat = j_all.reshape(-1)
+    v_flat = valid_all.reshape(-1)
+    flat_idx = i_flat * t_nodes + j_flat  # 1-D index into (s_nodes * t_nodes)
+
+    n_batch = len(batch_shape)
+    # u_all: (n_diags, max_int_w) + batch_shape → batch_shape + (n_flat,)
+    u_flat_b = jnp.moveaxis(u_all.reshape(-1, *batch_shape), 0, n_batch)
+    vm_u = v_flat.reshape((1,) * n_batch + (-1,))
+
+    u_grid = jnp.ones(batch_shape + (s_nodes * t_nodes,), dtype=dtype)
+    u_grid = u_grid.at[..., flat_idx].set(
+        jnp.where(vm_u, u_flat_b, u_grid[..., flat_idx])
+    )
+    u_grid = u_grid.reshape(batch_shape + (s_nodes, t_nodes))
+
+    if not return_fg:
+        return u_grid
+
+    vm_fg = v_flat.reshape((1,) * n_batch + (-1,) + (1,))
+
+    def _scatter_tuple(all_levels, n_levels, grid_width_fn, boundary_row, boundary_col):
+        grids = []
+        for k in range(n_levels):
+            wk = grid_width_fn(k)
+            g = jnp.zeros(batch_shape + (s_nodes * t_nodes, wk), dtype=dtype)
+            flat = jnp.moveaxis(all_levels[k].reshape(-1, *batch_shape, wk), 0, n_batch)
+            g = g.at[..., flat_idx, :].set(
+                jnp.where(vm_fg, flat, g[..., flat_idx, :])
+            )
+            g = g.reshape(batch_shape + (s_nodes, t_nodes, wk))
+            # Inject boundary row (i=0) and column (j=0)
+            if boundary_row:
+                g = g.at[..., 0, :, :].set(boundary_row[k])
+            if boundary_col:
+                g = g.at[..., :, 0, :].set(boundary_col[k])
+            grids.append(g)
+        return tuple(grids)
+
+    f_grid = _scatter_tuple(
+        f_all, n,
+        lambda k: dy[k].shape[-1],
+        boundary_row=tuple(
+            jnp.zeros(batch_shape + (t_nodes, dy[k].shape[-1]), dtype=dtype)
+            for k in range(n)
+        ),
+        boundary_col=f_col0,
+    )
+    g_grid = _scatter_tuple(
+        g_all, m,
+        lambda k: dx[k].shape[-1],
+        boundary_row=g_row0,
+        boundary_col=tuple(
+            jnp.zeros(batch_shape + (s_nodes, dx[k].shape[-1]), dtype=dtype)
+            for k in range(m)
+        ),
+    )
+
+    return u_grid, f_grid, g_grid
 
 
 @dataclass(frozen=True)
@@ -724,8 +1065,7 @@ class FreeKernel(BaseKernel):
     path values or as interval increments.
     """
     backend: Literal["scan", "wavefront"] = "scan"
-    dyadic_order: int = 0
-    quadrature: Literal["left", "midpoint", "trapezoid"] = "trapezoid"
+    dyadic_order: DyadicOrder = 0
     increment_in: bool = False
     core: object = None
 
@@ -738,28 +1078,7 @@ class FreeKernel(BaseKernel):
             return_fg: bool = False,
             pairwise: bool = False,
     ):
-        """
-        Evaluate the configured free kernel.
-
-        Parameters
-        ----------
-        X, Y :
-            Normalized tensor-path inputs in packed positive-level form, with
-            empirical sample axis on axis ``0``.
-        evaluate : {"terminal", "grid"}, default="terminal"
-            Whether to return only the terminal kernel values or the full discrete
-            solution.
-        return_fg : bool, default=False
-            Whether to additionally return the tensor-valued components ``f`` and
-            ``g``.
-        pairwise : bool, default=False
-            Whether to evaluate batchwise or pairwise over the empirical samples.
-
-        Returns
-        -------
-        Array or tuple
-            Output of ``free_kernel`` with the stored hyperparameters.
-        """
+        # ...existing code...
         return free_kernel(
             X,
             Y,
@@ -768,7 +1087,6 @@ class FreeKernel(BaseKernel):
             pairwise=pairwise,
             backend=self.backend,
             dyadic_order=self.dyadic_order,
-            quadrature=self.quadrature,
             core=self.core,
             increment_in=self.increment_in,
         )
