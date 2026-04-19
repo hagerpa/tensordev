@@ -53,7 +53,7 @@ class FSSKSigKernel(BaseKernel):
     dt_y: Array | float
     backend: str = "scan"
     scheme: str = "heun"
-    precompute_propagators: bool = False
+    precompute_propagators: bool = True
     dyadic_order: DyadicOrder = 0
     increment_in: bool = False
 
