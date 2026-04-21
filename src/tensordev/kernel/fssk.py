@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 
 from tensordev.kernel.base_kernel import BaseKernel
+from tensordev.kernel.parallel import pmap_solver_call
 from tensordev.kernel.util import DyadicOrder, normalize_dyadic_order
 from tensordev.volterra.fssk.kernels import FSSKKernel
 
@@ -56,6 +57,7 @@ class FSSKSigKernel(BaseKernel):
     precompute_propagators: bool = True
     dyadic_order: DyadicOrder = 0
     increment_in: bool = False
+    num_devices: int = 1
 
     def __call__(self, X, Y, *, evaluate="terminal", return_fg=False, pairwise=False):
         return fssk_sigkernel(
@@ -66,6 +68,7 @@ class FSSKSigKernel(BaseKernel):
             precompute_propagators=self.precompute_propagators,
             dyadic_order=self.dyadic_order,
             increment_in=self.increment_in,
+            num_devices=self.num_devices,
         )
 
     def _as_sample_batch(self, X):
@@ -197,6 +200,7 @@ def fssk_sigkernel(
         backend: str = "scan", scheme: str = "heun",
         precompute_propagators: bool = False, dyadic_order: DyadicOrder = 0,
         increment_in: bool = False,
+        num_devices: int = 1,
 ):
     """Evaluate the beta PDE approximation of the FSSK signature kernel.
 
@@ -231,6 +235,16 @@ def fssk_sigkernel(
         Number of dyadic refinement levels.
     increment_in : bool, default=False
         If ``True``, *X* and *Y* are path increments, not path values.
+    num_devices : int, default=1
+        Number of JAX devices (virtual CPUs) to distribute the batch across via
+        ``jax.pmap``.  Set to ``jax.device_count()`` to use all available
+        devices.  Requires setting ``XLA_FLAGS`` *before* importing JAX::
+
+            import os
+            os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
+            import jax
+
+        See :mod:`tensordev.kernel.parallel` for details.
 
     Returns
     -------
@@ -285,10 +299,18 @@ def fssk_sigkernel(
     terminal_only = evaluate != "grid"
     solver = _get_solver(backend=backend, scheme=scheme, precompute_propagators=precompute_propagators,
                          dyadic_order=(dyadic_order_x, dyadic_order_y), terminal_only=terminal_only)
-    result = solver(
-        gamma_coarse, dt_x_arr, dt_y_arr, lambda_op=kernel.Lambda,
-        transport_params=transport_params,
-    )
+
+    if num_devices > 1:
+        result = pmap_solver_call(
+            solver, gamma_coarse, dt_x_arr, dt_y_arr,
+            lambda_op=kernel.Lambda, transport_params=transport_params,
+            num_devices=num_devices,
+        )
+    else:
+        result = solver(
+            gamma_coarse, dt_x_arr, dt_y_arr, lambda_op=kernel.Lambda,
+            transport_params=transport_params,
+        )
 
     if terminal_only:
         # result is (eta_terminal, K_terminal, A_terminal, B_terminal) — just the terminal cell
