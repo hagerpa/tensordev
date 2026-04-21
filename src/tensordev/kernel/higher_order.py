@@ -29,6 +29,7 @@ def higher_order_kernel(
         dyadic_order: DyadicOrder = 0,
         increment_input: bool = False,
         core=None,
+        num_devices: int = 1,
 ):
     """
     Higher-order signature kernel via piecewise log-linear approximation.
@@ -166,7 +167,7 @@ def higher_order_kernel(
 
     return free_kernel(log_x, log_y, evaluate=evaluate, return_fg=return_fg, pairwise=pairwise,
                        backend=backend, dyadic_order=dyadic_order,
-                       core=core, increment_in=True)
+                       core=core, increment_in=True, num_devices=num_devices)
 
 
 @dataclass(frozen=True)
@@ -196,6 +197,7 @@ class HigherOrderKernel(BaseKernel):
     dyadic_order: DyadicOrder = 0
     increment_input: bool = False
     core: object = None
+    num_devices: int = 1
 
     def __call__(
             self,
@@ -239,6 +241,7 @@ class HigherOrderKernel(BaseKernel):
             dyadic_order=self.dyadic_order,
             increment_input=self.increment_input,
             core=self.core,
+            num_devices=self.num_devices,
         )
 
     def _as_sample_batch(self, X):

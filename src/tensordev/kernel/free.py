@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from tensordev import Jax
 from tensordev.core.universal import DenseElemFirstOn
 from tensordev.kernel.base_kernel import BaseKernel
+from tensordev.kernel.parallel import pmap_batch
 from tensordev.kernel.util import DyadicOrder, normalize_dyadic_order
 
 JaxCore = Jax()
@@ -152,7 +153,8 @@ def free_kernel(
         backend: Literal["scan", "wavefront"] = "scan",
         dyadic_order: DyadicOrder = 0,
         core=None,
-        increment_in: bool = False):
+        increment_in: bool = False,
+        num_devices: int = 1):
     """
     Compute the truncated kernel of free developments.
 
@@ -195,6 +197,24 @@ def free_kernel(
         increments. If ``False``, they are interpreted as path values and converted
         to increments along the interval axis.
 
+    num_devices : int, default=1
+        Number of JAX virtual devices to distribute the batch across via
+        ``jax.pmap``.  Set to ``jax.device_count()`` to use all available
+        devices.  Requires ``XLA_FLAGS`` to be set *before* importing JAX::
+
+            import os
+            os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
+            import jax
+
+        **Non-pairwise**: both ``x`` and ``y`` batches are sharded along
+        axis 0 (must have the same leading size).
+
+        **Pairwise**: only the ``x`` batch is sharded; the full ``y`` batch is
+        replicated to every device.  The assembled result has the full
+        ``batch_x × batch_y`` shape.
+
+        See :mod:`tensordev.kernel.parallel` for details.
+
     Returns
     -------
     Depending on ``evaluate`` and ``return_fg``, returns either ``w`` or
@@ -206,18 +226,32 @@ def free_kernel(
     dx = _to_increments(x, increment_in=increment_in)
     dy = _to_increments(y, increment_in=increment_in)
 
+    def _solve(dx_, dy_):
+        if backend == "scan":
+            return _solve_scan(dx_, dy_, evaluate=evaluate, return_fg=return_fg,
+                               dyadic_order=dyadic_order, core=core)
+        if backend == "wavefront":
+            return _solve_wavefront(dx_, dy_, evaluate=evaluate, return_fg=return_fg,
+                                    dyadic_order=dyadic_order, core=core)
+        raise ValueError(f"Unknown backend={backend!r}.")
+
+    if num_devices > 1:
+        if pairwise:
+            # Shard along the x-batch axis (axis 0 of dx after broadcast).
+            # dy is replicated via closure; the per-device result has shape
+            # (batch_x // num_devices) + batch_y + ... and is reassembled
+            # along axis 0 by pmap_batch.
+            dx_b, dy_b = _broadcast_pairwise(dx, dy)
+            return pmap_batch(lambda dx_s: _solve(dx_s, dy_b), dx_b,
+                              num_devices=num_devices)
+        else:
+            # Shard both dx and dy along axis 0 (same leading batch size).
+            return pmap_batch(_solve, dx, dy, num_devices=num_devices)
+
     if pairwise:
         dx, dy = _broadcast_pairwise(dx, dy)
 
-    if backend == "scan":
-        return _solve_scan(dx, dy, evaluate=evaluate, return_fg=return_fg,
-                           dyadic_order=dyadic_order, core=core)
-
-    if backend == "wavefront":
-        return _solve_wavefront(dx, dy, evaluate=evaluate, return_fg=return_fg,
-                                dyadic_order=dyadic_order, core=core)
-
-    raise ValueError(f"Unknown backend={backend!r}.")
+    return _solve(dx, dy)
 
 
 def _to_increments(
@@ -1068,6 +1102,7 @@ class FreeKernel(BaseKernel):
     dyadic_order: DyadicOrder = 0
     increment_in: bool = False
     core: object = None
+    num_devices: int = 1
 
     def __call__(
             self,
@@ -1089,6 +1124,7 @@ class FreeKernel(BaseKernel):
             dyadic_order=self.dyadic_order,
             core=self.core,
             increment_in=self.increment_in,
+            num_devices=self.num_devices,
         )
 
     def _as_sample_batch(self, X):

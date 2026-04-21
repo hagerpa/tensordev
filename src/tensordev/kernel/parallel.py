@@ -106,31 +106,44 @@ def recommend_parallelism() -> str:
     return "\n".join(lines)
 
 
-def pmap_solver_call(solver, gamma, dt_x, dt_y, *, lambda_op, transport_params, num_devices: int):
-    """Evaluate *solver* with the batch dimension distributed across devices.
+def pmap_batch(fn, *sharded_pytrees, num_devices: int):
+    """Evaluate *fn* with all positional pytree arguments sharded along axis 0.
+
+    This is the core building block for device-level batch parallelism.  All
+    leaves in every ``sharded_pytrees`` argument must share the same size on
+    axis 0 (the batch dimension).  That axis is split across ``num_devices``
+    virtual JAX devices and the results are reassembled transparently.
 
     Parameters
     ----------
-    solver : callable
-        A compiled solver function with signature
-        ``(gamma, dt_x, dt_y, *, lambda_op, transport_params) -> tuple``.
-    gamma : Array, shape ``(batch, ...)``
-        The combined gamma grid.  Axis 0 is the batch dimension to shard.
-    dt_x, dt_y : Array
-        Time-step arrays (replicated to all devices).
-    lambda_op :
-        Lambda operator (replicated via closure — must be a JAX pytree or have
-        only JAX-traced operations called on it during compilation).
-    transport_params :
-        Pre-computed propagators (replicated via closure).
+    fn : callable
+        A function whose positional arguments match ``sharded_pytrees`` in
+        number and structure.  Any additional state (e.g. non-batched arrays,
+        Python objects) should be captured via a closure — pmap replicates
+        closed-over JAX arrays automatically.
+    *sharded_pytrees :
+        One or more JAX pytrees (arrays, tuples/lists of arrays, …) whose
+        **axis 0** carries the batch dimension to shard.  Tuples of arrays
+        (as used by ``free_kernel`` for multi-level inputs) are fully
+        supported.
     num_devices : int
-        Number of virtual CPU (or GPU) devices to distribute across.
-        Must be ≤ ``jax.device_count()``.
+        Number of virtual JAX devices to distribute across.  Clamped to
+        ``jax.device_count()`` with a ``RuntimeWarning`` if too large.
 
     Returns
     -------
-    tuple
-        Same structure as ``solver(...)``.  Batch axis 0 is reassembled.
+    Same pytree structure as ``fn(*sharded_pytrees)``.  Axis 0 is the
+    reassembled batch dimension.
+
+    Examples
+    --------
+    Single-array shard (fssk style)::
+
+        result = pmap_batch(lambda g: solver(g, dt_x, dt_y, ...), gamma, num_devices=4)
+
+    Multi-level tuple shard (free_kernel style)::
+
+        result = pmap_batch(solve_fn, dx_tuple, dy_tuple, num_devices=4)
     """
     devices = jax.devices()[:num_devices]
     if len(devices) < num_devices:
@@ -146,48 +159,80 @@ def pmap_solver_call(solver, gamma, dt_x, dt_y, *, lambda_op, transport_params, 
         num_devices = len(devices)
 
     if num_devices <= 1:
-        # Nothing to shard — call the solver directly.
-        return solver(gamma, dt_x, dt_y, lambda_op=lambda_op, transport_params=transport_params)
+        return fn(*sharded_pytrees)
 
-    batch = gamma.shape[0]
-    # Pad so batch is divisible by num_devices
+    # Infer batch size from the first leaf of the first pytree argument.
+    first_leaf = jax.tree_util.tree_leaves(sharded_pytrees[0])[0]
+    batch = int(first_leaf.shape[0])
+
     pad = (-batch) % num_devices
-    if pad:
-        gamma = jnp.concatenate([gamma, gamma[:pad]], axis=0)
+    local_batch = (batch + pad) // num_devices
 
-    local_batch = gamma.shape[0] // num_devices
-    gamma_sharded_arr = gamma.reshape(num_devices, local_batch, *gamma.shape[1:])
+    def _pad(x):
+        return jnp.concatenate([x, x[:pad]], axis=0) if pad else x
 
-    # Scatter shards to individual devices.
-    # In JAX >= 0.4: pmap distributes the leading axis across devices
-    # automatically — no explicit device_put_sharded needed.
-    gamma_per_device = gamma_sharded_arr
+    def _shard(x):
+        return x.reshape(num_devices, local_batch, *x.shape[1:])
 
-    # dt_x, dt_y, lambda_op and transport_params are captured as constants in
-    # the closure and automatically broadcast/replicated by pmap.
-    def _local(g_shard):
+    sharded = tuple(
+        jax.tree_util.tree_map(lambda x: _shard(_pad(x)), pt)
+        for pt in sharded_pytrees
+    )
+
+    result = jax.pmap(fn, devices=devices)(*sharded)
+
+    def _flatten(x):
+        # x.shape == (num_devices, local_batch, ...)
+        return x.reshape(-1, *x.shape[2:])[:batch]
+
+    return jax.tree_util.tree_map(_flatten, result)
+
+
+def pmap_solver_call(solver, gamma, dt_x, dt_y, *, lambda_op, transport_params, num_devices: int):
+    """Evaluate *solver* with the batch dimension distributed across devices.
+
+    Thin wrapper around :func:`pmap_batch` specialised for the FSSK solver
+    interface ``(gamma, dt_x, dt_y, *, lambda_op, transport_params) -> tuple``.
+
+    Parameters
+    ----------
+    solver : callable
+        Compiled solver returned by ``_get_solver``.
+    gamma : Array, shape ``(batch, ...)``
+        The combined gamma grid.  Axis 0 is the batch dimension to shard.
+    dt_x, dt_y : Array
+        Time-step arrays (replicated to all devices via closure).
+    lambda_op :
+        Lambda operator (replicated via closure).
+    transport_params :
+        Pre-computed propagators (replicated via closure).
+    num_devices : int
+        Number of virtual CPU (or GPU) devices to distribute across.
+
+    Returns
+    -------
+    tuple
+        Same structure as ``solver(...)``.  Batch axis 0 is reassembled.
+    """
+    def _fn(g_shard):
         return solver(
             g_shard, dt_x, dt_y,
             lambda_op=lambda_op,
             transport_params=transport_params,
         )
 
-    result = jax.pmap(_local, devices=devices)(gamma_per_device)
-
-    # Merge device axis back into batch and strip padding
-    def _flatten_device_axis(x):
-        # x.shape == (num_devices, local_batch, ...)
-        return x.reshape(-1, *x.shape[2:])[:batch]
-
-    return jax.tree_util.tree_map(_flatten_device_axis, result)
+    return pmap_batch(_fn, gamma, num_devices=num_devices)
 
 
 __all__ = [
     "cpu_device_count",
     "physical_cpu_count",
     "recommend_parallelism",
+    "pmap_batch",
     "pmap_solver_call",
 ]
+
+
 
 
 

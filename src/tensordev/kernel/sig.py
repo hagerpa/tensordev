@@ -35,6 +35,7 @@ class SigKernel(BaseKernel):
     backend: str = "scan"
     dyadic_order: DyadicOrder = 0
     core: object = None
+    num_devices: int = 1
 
     def __call__(
             self,
@@ -76,6 +77,7 @@ class SigKernel(BaseKernel):
             dyadic_order=self.dyadic_order,
             core=self.core,
             increment_in=False,
+            num_devices=self.num_devices,
         )
 
     def _as_sample_batch(self, X):
