@@ -554,7 +554,7 @@ def _free_cell_step(cell: FreeCellData, *, core, M, N, m, n, P, P_f, P_g):
     G_ij = t_inner(dx_i[:P], dy_j[:P])
 
     # --- M == 1, N == 1 fast path (scalar-only, no adjoint states) --------
-    if False and M == 1 and N == 1:
+    if M == 1 and N == 1:
         kap = 1.0 / 12.0
         G2_ij = G_ij * G_ij
         u_se = (u_n + u_w) * (1.0 + 0.5 * G_ij + kap * G2_ij) \
