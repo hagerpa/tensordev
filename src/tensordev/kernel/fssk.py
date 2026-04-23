@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import dataclass
 from functools import lru_cache
 import jax
@@ -8,7 +7,6 @@ import jax.numpy as jnp
 
 from tensordev.kernel.base_kernel import BaseKernel
 from tensordev.kernel.parallel import pmap_solver_call
-from tensordev.kernel.static_kernels import LinearKernel, StaticKernel
 from tensordev.kernel.util import DyadicOrder, normalize_dyadic_order
 from tensordev.volterra.fssk.kernels import FSSKKernel
 
@@ -60,7 +58,6 @@ class FSSKSigKernel(BaseKernel):
     dyadic_order: DyadicOrder = 0
     increment_in: bool = False
     num_devices: int = 1
-    static_kernel: StaticKernel = dataclasses.field(default_factory=LinearKernel)
 
     def __call__(self, X, Y, *, evaluate="terminal", return_fg=False, pairwise=False):
         return fssk_sigkernel(
@@ -72,7 +69,6 @@ class FSSKSigKernel(BaseKernel):
             dyadic_order=self.dyadic_order,
             increment_in=self.increment_in,
             num_devices=self.num_devices,
-            static_kernel=self.static_kernel,
         )
 
     def _as_sample_batch(self, X):
@@ -178,6 +174,7 @@ class WaveState:
     B: Array
 
 
+
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class EmptyTransportParams:
@@ -204,7 +201,6 @@ def fssk_sigkernel(
         precompute_propagators: bool = False, dyadic_order: DyadicOrder = 0,
         increment_in: bool = False,
         num_devices: int = 1,
-        static_kernel: StaticKernel | None = None,
 ):
     """Evaluate the beta PDE approximation of the FSSK signature kernel.
 
@@ -270,10 +266,6 @@ def fssk_sigkernel(
         raise ValueError(f"Unknown scheme {scheme!r}. Supported: {', '.join(sorted(_SCHEME_REGISTRY))}.")
     dyadic_order_x, dyadic_order_y = normalize_dyadic_order(dyadic_order)
 
-    if static_kernel is None:
-        static_kernel = LinearKernel()
-    is_linear = isinstance(static_kernel, LinearKernel)
-
     dim = kernel.path_dim
     dX = _to_increments(X, path_dim=dim, name="X", increment_in=increment_in)
     dY = _to_increments(Y, path_dim=dim, name="Y", increment_in=increment_in)
@@ -282,120 +274,42 @@ def fssk_sigkernel(
     dt_x_arr, dt_x_uniform = _prepare_dt(dt_x, int(dX.shape[-2]), name="dt_x", dtype=dtype)
     dt_y_arr, dt_y_uniform = _prepare_dt(dt_y, int(dY.shape[-2]), name="dt_y", dtype=dtype)
 
+    # Build gamma on the coarse grid; solvers index it via i >> dyadic_order.
+    proj = _state_projection_tensor(kernel, dtype=dtype)
+    gamma_coarse, batch_shape = _build_gamma_grid(dX, dY, proj=proj, pairwise=pairwise)
+
+    # Dyadic refinement: scale gamma (sub-cell increments are 1/2^k of coarse)
+    # and build fine-grid dt. Coarse gamma shape is unchanged.
     n_x = 1 << dyadic_order_x
     n_y = 1 << dyadic_order_y
-    proj = _state_projection_tensor(kernel, dtype=dtype)
+    if dyadic_order_x > 0 or dyadic_order_y > 0:
+        gamma_coarse = gamma_coarse * dtype.type(0.5 ** (dyadic_order_x + dyadic_order_y))
+    if dyadic_order_x > 0:
+        dt_x_arr = jnp.repeat(dt_x_arr * dtype.type(0.5 ** dyadic_order_x), n_x, axis=0)
+    if dyadic_order_y > 0:
+        dt_y_arr = jnp.repeat(dt_y_arr * dtype.type(0.5 ** dyadic_order_y), n_y, axis=0)
+        # uniformity is preserved: all refined dt's are identical
+
+    transport_params = _build_transport_params(
+        kernel.Lambda, dt_x_arr, dt_y_arr,
+        dt_x_uniform=dt_x_uniform, dt_y_uniform=dt_y_uniform,
+        dtype=dtype, precompute_propagators=precompute_propagators,
+    )
+
     terminal_only = evaluate != "grid"
+    solver = _get_solver(backend=backend, scheme=scheme, precompute_propagators=precompute_propagators,
+                         dyadic_order=(dyadic_order_x, dyadic_order_y), terminal_only=terminal_only)
 
-    if is_linear:
-        # -------------------------------------------------------------------
-        # Linear branch: precompute coarse gamma once, reuse for all sub-cells
-        # via the dyadic index mapping  i >> dyadic_order_x.
-        # -------------------------------------------------------------------
-        gamma_coarse, batch_shape = _build_gamma_grid(dX, dY, proj=proj, pairwise=pairwise)
-
-        if static_kernel.scale != 1.0:
-            gamma_coarse = gamma_coarse * dtype.type(static_kernel.scale)
-
-        # Dyadic refinement: scale gamma (sub-cell increments are 1/2^k of coarse)
-        if dyadic_order_x > 0 or dyadic_order_y > 0:
-            gamma_coarse = gamma_coarse * dtype.type(0.5 ** (dyadic_order_x + dyadic_order_y))
-        if dyadic_order_x > 0:
-            dt_x_arr = jnp.repeat(dt_x_arr * dtype.type(0.5 ** dyadic_order_x), n_x, axis=0)
-        if dyadic_order_y > 0:
-            dt_y_arr = jnp.repeat(dt_y_arr * dtype.type(0.5 ** dyadic_order_y), n_y, axis=0)
-
-        transport_params = _build_transport_params(
-            kernel.Lambda, dt_x_arr, dt_y_arr,
-            dt_x_uniform=dt_x_uniform, dt_y_uniform=dt_y_uniform,
-            dtype=dtype, precompute_propagators=precompute_propagators,
-        )
-
-        solver = _get_solver(backend=backend, scheme=scheme,
-                             precompute_propagators=precompute_propagators,
-                             dyadic_order=(dyadic_order_x, dyadic_order_y),
-                             terminal_only=terminal_only, is_linear=True)
-
-        if num_devices > 1:
-            result = pmap_solver_call(
-                solver, gamma_coarse, dt_x_arr, dt_y_arr,
-                lambda_op=kernel.Lambda, transport_params=transport_params,
-                num_devices=num_devices,
-            )
-        else:
-            result = solver(
-                gamma_coarse, dt_x_arr, dt_y_arr, lambda_op=kernel.Lambda,
-                transport_params=transport_params,
-            )
-
-    else:
-        # -------------------------------------------------------------------
-        # Static (nonlinear) branch: gamma computed on-the-fly per sub-cell
-        # via the 4-corner finite difference  ΔᵢΔⱼ K(Aᴿ X, Aˢ Y).
-        # -------------------------------------------------------------------
-        if num_devices > 1:
-            raise NotImplementedError(
-                "num_devices > 1 is not yet supported for non-linear static kernels.")
-
-        # Obtain path nodes (not increments)
-        X_arr = jnp.asarray(X)
-        if X_arr.ndim == 2:
-            X_arr = X_arr[None]
-        Y_arr = jnp.asarray(Y)
-        if Y_arr.ndim == 2:
-            Y_arr = Y_arr[None]
-        if increment_in:
-            # Reconstruct nodes by cumulative sum; place X_0 = 0.
-            X_nodes = jnp.concatenate(
-                [jnp.zeros_like(X_arr[:, :1]), jnp.cumsum(X_arr, axis=1)], axis=1)
-            Y_nodes = jnp.concatenate(
-                [jnp.zeros_like(Y_arr[:, :1]), jnp.cumsum(Y_arr, axis=1)], axis=1)
-        else:
-            X_nodes, Y_nodes = X_arr, Y_arr
-
-        # Project path nodes: (batch, n_nodes, R, m)
-        qx_coarse = _project_nodes(X_nodes, proj=proj)
-        qy_coarse = _project_nodes(Y_nodes, proj=proj)
-
-        # Linearly interpolate fine-grid nodes for dyadic refinement.
-        # No gamma scaling needed — the 4-corner formula is exact per sub-cell.
-        qx_fine = _build_fine_nodes(qx_coarse, n_x)   # (batch, s_fine_nodes, R, m)
-        qy_fine = _build_fine_nodes(qy_coarse, n_y)   # (batch, t_fine_nodes, R, m)
-
-        if dyadic_order_x > 0:
-            dt_x_arr = jnp.repeat(dt_x_arr * dtype.type(0.5 ** dyadic_order_x), n_x, axis=0)
-        if dyadic_order_y > 0:
-            dt_y_arr = jnp.repeat(dt_y_arr * dtype.type(0.5 ** dyadic_order_y), n_y, axis=0)
-
-        # Handle pairwise: broadcast node arrays to a flat (bx*by) batch.
-        if pairwise:
-            bx, by = int(X_nodes.shape[0]), int(Y_nodes.shape[0])
-            qx_flat = jnp.repeat(qx_fine, by, axis=0)      # (bx*by, s_fine_nodes, R, m)
-            qy_flat = jnp.tile(qy_fine, (bx, 1, 1, 1))     # (bx*by, t_fine_nodes, R, m)
-            batch_shape = (bx, by)
-        else:
-            bx, by = int(X_nodes.shape[0]), int(Y_nodes.shape[0])
-            if bx != by:
-                raise ValueError(
-                    f"Batchwise evaluation requires matching batch sizes; got {bx} and {by}.")
-            qx_flat, qy_flat = qx_fine, qy_fine
-            batch_shape = (bx,)
-
-        transport_params = _build_transport_params(
-            kernel.Lambda, dt_x_arr, dt_y_arr,
-            dt_x_uniform=dt_x_uniform, dt_y_uniform=dt_y_uniform,
-            dtype=dtype, precompute_propagators=precompute_propagators,
-        )
-
-        solver = _get_solver(backend=backend, scheme=scheme,
-                             precompute_propagators=precompute_propagators,
-                             dyadic_order=(dyadic_order_x, dyadic_order_y),
-                             terminal_only=terminal_only, is_linear=False)
-
-        result = solver(
-            qx_flat, qy_flat, dt_x_arr, dt_y_arr,
+    if num_devices > 1:
+        result = pmap_solver_call(
+            solver, gamma_coarse, dt_x_arr, dt_y_arr,
             lambda_op=kernel.Lambda, transport_params=transport_params,
-            static_kernel=static_kernel,
+            num_devices=num_devices,
+        )
+    else:
+        result = solver(
+            gamma_coarse, dt_x_arr, dt_y_arr, lambda_op=kernel.Lambda,
+            transport_params=transport_params,
         )
 
     if terminal_only:
@@ -556,7 +470,7 @@ def _etd1_cell_step(lambda_op, cell, transport_params, *,
 
 
 def _heun_cell_step(lambda_op, cell, transport_params, *,
-                    precompute_propagators, ix, iy, dtype):
+                         precompute_propagators, ix, iy, dtype):
     gij, ds, dt = cell.gamma_nw, cell.hx, cell.hy
     A_prev, B_curr = cell.A_n, cell.B_w
 
@@ -623,22 +537,17 @@ _SCHEME_REGISTRY = {
 
 
 @lru_cache(maxsize=None)
-def _get_solver(*, backend, scheme, precompute_propagators, dyadic_order, terminal_only, is_linear=True):
+def _get_solver(*, backend, scheme, precompute_propagators, dyadic_order, terminal_only):
     cell_step = _SCHEME_REGISTRY[scheme]
-    if is_linear:
-        if backend == "scan":
-            return _make_scan_solver(cell_step, precompute_propagators, dyadic_order, terminal_only)
-        if backend == "wavefront":
-            return _make_wavefront_solver(cell_step, precompute_propagators, dyadic_order, terminal_only)
-    else:
-        if backend == "scan":
-            return _make_scan_solver_static(cell_step, precompute_propagators, terminal_only)
-        if backend == "wavefront":
-            return _make_wavefront_solver_static(cell_step, precompute_propagators, terminal_only)
+    if backend == "scan":
+        return _make_scan_solver(cell_step, precompute_propagators, dyadic_order, terminal_only)
+    if backend == "wavefront":
+        return _make_wavefront_solver(cell_step, precompute_propagators, dyadic_order, terminal_only)
     raise ValueError(f"Unknown backend {backend!r}.")
 
 
 def _make_scan_solver(cell_step, precompute_propagators, dyadic_order, terminal_only):
+
     dyadic_order_x, dyadic_order_y = dyadic_order
 
     @jax.jit
@@ -658,7 +567,7 @@ def _make_scan_solver(cell_step, precompute_propagators, dyadic_order, terminal_
         def _g(i, j):
             """Index coarse gamma at fine-grid node (i, j)."""
             return gamma[:, jnp.minimum(i >> dyadic_order_x, s_coarse - 1),
-            jnp.minimum(j >> dyadic_order_y, t_coarse - 1)]
+                            jnp.minimum(j >> dyadic_order_y, t_coarse - 1)]
 
         def row_step(north, xs):
             hx, ix = xs
@@ -764,7 +673,7 @@ def _make_wavefront_solver(cell_step, precompute_propagators, dyadic_order, term
             sw = lambda a: jnp.swapaxes(a, 0, 1)
             # Index coarse gamma at fine-grid positions
             _gc = lambda i, j: gamma[:, jnp.minimum(i >> dyadic_order_x, s_coarse - 1),
-            jnp.minimum(j >> dyadic_order_y, t_coarse - 1)]
+                                        jnp.minimum(j >> dyadic_order_y, t_coarse - 1)]
 
             cells = CellData(
                 hx=dt_x[im1], hy=dt_y[jm1],
@@ -827,273 +736,8 @@ def _make_wavefront_solver(cell_step, precompute_propagators, dyadic_order, term
 
 
 # ---------------------------------------------------------------------------
-# Static kernel solvers (on-the-fly 4-corner gamma)
-# ---------------------------------------------------------------------------
-
-def _g_cell_static(qx, qy, sk, i, j):
-    """Compute γ[b,R,S] = ΔᵢΔⱼ K(Aᴿ X, Aˢ Y) at fine-grid corner (i, j).
-
-    Uses ``StaticKernel.batch_kernel`` which maps
-
-        (batch, R, m) × (batch, R, m)  →  (batch, R, R)
-
-    so the 4-corner finite difference is simply 4 batched matmul-like calls.
-
-    Parameters
-    ----------
-    qx : Array, shape (batch, s_fine_nodes, R, m)
-    qy : Array, shape (batch, t_fine_nodes, R, m)
-    sk : StaticKernel
-    i, j : int scalars (JAX tracers OK) — fine-grid interval indices
-
-    Returns
-    -------
-    Array, shape (batch, R, R)
-    """
-    def K_at(qi, rj):
-        # qx[:, qi]: (batch, R, m),  qy[:, rj]: (batch, R, m)
-        # batch_kernel treats last two axes as (length, dim):
-        #   (batch, R, m) → length=R, dim=m  →  result: (batch, R, R)
-        return sk.batch_kernel(qx[:, qi], qy[:, rj])
-
-    return K_at(i + 1, j + 1) - K_at(i, j + 1) - K_at(i + 1, j) + K_at(i, j)
-
-
-def _make_scan_solver_static(cell_step, precompute_propagators, terminal_only):
-    """Scan solver for non-linear static kernels with on-the-fly gamma.
-
-    Solver signature:
-        solver(qx, qy, dt_x, dt_y, *, lambda_op, transport_params, static_kernel)
-
-    qx : (batch, s_fine_nodes, R, m)
-    qy : (batch, t_fine_nodes, R, m)
-    """
-
-    @jax.jit
-    def solver(qx, qy, dt_x, dt_y, *, lambda_op, transport_params, static_kernel):
-        batch, s_fine_nodes, r, _ = qx.shape
-        t_fine_nodes = qy.shape[1]
-        s_steps = s_fine_nodes - 1
-        t_steps = t_fine_nodes - 1
-        t_nodes = t_steps + 1
-        dtype = qx.dtype
-
-        zero_node = jnp.zeros((batch, r, r), dtype=dtype)
-        one_node = jnp.ones((batch,), dtype=dtype)
-        initial_row = RowState.zeros(batch=batch, t_nodes=t_nodes, r=r, dtype=dtype)
-
-        def _g(i, j):
-            return _g_cell_static(qx, qy, static_kernel, i, j)
-
-        def row_step(north, xs):
-            hx, ix = xs
-
-            def cell_scan(carry, iy):
-                K_w, eta_w, A_w, B_w = carry
-                cell = CellData(
-                    hx=hx, hy=dt_y[iy],
-                    K_w=K_w, K_n=north.K[:, iy + 1], K_nw=north.K[:, iy],
-                    eta_w=eta_w, eta_n=north.eta[:, iy + 1], eta_nw=north.eta[:, iy],
-                    A_w=A_w, A_n=north.A[:, iy + 1], A_nw=north.A[:, iy],
-                    B_w=B_w, B_n=north.B[:, iy + 1], B_nw=north.B[:, iy],
-                    gamma_nw=_g(ix, iy), gamma_n=_g(ix, iy + 1),
-                    gamma_w=_g(ix + 1, iy), gamma_se=_g(ix + 1, iy + 1),
-                )
-                out = cell_step(
-                    lambda_op, cell, transport_params,
-                    precompute_propagators=precompute_propagators,
-                    ix=ix, iy=iy, dtype=dtype,
-                )
-                return out, out
-
-            _, cell_hist = jax.lax.scan(
-                cell_scan,
-                (zero_node, one_node, zero_node, zero_node),
-                jnp.arange(t_steps, dtype=jnp.int32),
-            )
-            south = RowState.from_scan_hist(zero_node=zero_node, one_node=one_node, hist=cell_hist)
-            return south, None if terminal_only else south
-
-        last_row, row_hist = jax.lax.scan(
-            row_step, initial_row,
-            (dt_x, jnp.arange(s_steps, dtype=jnp.int32)),
-        )
-        if terminal_only:
-            return last_row.eta[:, -1], last_row.K[:, -1], last_row.A[:, -1], last_row.B[:, -1]
-        grid = RowState.stack_history(initial_row, row_hist)
-        return grid.eta, grid.K, grid.A, grid.B
-
-    return solver
-
-
-def _make_wavefront_solver_static(cell_step, precompute_propagators, terminal_only):
-    """Wavefront solver for non-linear static kernels with on-the-fly gamma."""
-
-    @jax.jit
-    def solver(qx, qy, dt_x, dt_y, *, lambda_op, transport_params, static_kernel):
-        batch, s_fine_nodes, r, _ = qx.shape
-        t_fine_nodes = qy.shape[1]
-        s_steps = s_fine_nodes - 1
-        t_steps = t_fine_nodes - 1
-        s_nodes, t_nodes = s_steps + 1, t_steps + 1
-        dtype = qx.dtype
-        W = min(s_steps, t_steps) + 1
-        max_int_w = max(min(s_steps, t_steps), 1)
-
-        def _zeros_buf():
-            return (
-                jnp.ones((W, batch), dtype=dtype),
-                jnp.zeros((W, batch, r, r), dtype=dtype),
-                jnp.zeros((W, batch, r, r), dtype=dtype),
-                jnp.zeros((W, batch, r, r), dtype=dtype),
-            )
-
-        buf_d0 = _zeros_buf()
-        buf_d1 = _zeros_buf()
-
-        n_diags = s_steps + t_steps - 1
-        if n_diags <= 0:
-            eta_grid = jnp.ones((batch, s_nodes, t_nodes), dtype=dtype)
-            z = jnp.zeros((batch, s_nodes, t_nodes, r, r), dtype=dtype)
-            return eta_grid, z, z.copy(), z.copy()
-
-        d_arr = jnp.arange(2, s_steps + t_steps + 1, dtype=jnp.int32)
-
-        def diag_step(carry, d):
-            buf_prev, buf_prev2 = carry
-            eta_p, K_p, A_p, B_p = buf_prev
-            eta_p2, K_p2, A_p2, B_p2 = buf_prev2
-
-            ext_lo = jnp.maximum(0, d - t_steps)
-            ext_lo_p = jnp.maximum(0, d - 1 - t_steps)
-            ext_lo_p2 = jnp.maximum(0, d - 2 - t_steps)
-
-            int_lo = jnp.maximum(1, d - t_steps)
-            int_hi = jnp.minimum(s_steps, d - 1)
-            int_w = jnp.maximum(int_hi - int_lo + 1, 0)
-
-            offsets = jnp.arange(max_int_w, dtype=jnp.int32)
-            valid = offsets < int_w
-            i_int = jnp.clip(int_lo + offsets, 1, s_steps)
-            j_int = jnp.clip(d - i_int, 1, t_steps)
-            im1, jm1 = i_int - 1, j_int - 1
-            i_safe = jnp.where(valid, i_int, 0)
-            j_safe = jnp.where(valid, j_int, 0)
-
-            k_n = jnp.clip(im1 - ext_lo_p, 0, W - 1)
-            k_w = jnp.clip(i_int - ext_lo_p, 0, W - 1)
-            k_nw = jnp.clip(im1 - ext_lo_p2, 0, W - 1)
-
-            # On-the-fly gamma: vmap _g_cell_static over the anti-diagonal.
-            # Returns (max_int_w, batch, r, r) — already in the sw'd layout.
-            def _gc_diag(i_arr, j_arr):
-                return jax.vmap(
-                    lambda i, j: _g_cell_static(qx, qy, static_kernel, i, j)
-                )(i_arr, j_arr)
-
-            cells = CellData(
-                hx=dt_x[im1], hy=dt_y[jm1],
-                K_w=K_p[k_w], K_n=K_p[k_n], K_nw=K_p2[k_nw],
-                eta_w=eta_p[k_w], eta_n=eta_p[k_n], eta_nw=eta_p2[k_nw],
-                A_w=A_p[k_w], A_n=A_p[k_n], A_nw=A_p2[k_nw],
-                B_w=B_p[k_w], B_n=B_p[k_n], B_nw=B_p2[k_nw],
-                gamma_nw=_gc_diag(im1, jm1),
-                gamma_n=_gc_diag(im1, j_int),
-                gamma_w=_gc_diag(i_int, jm1),
-                gamma_se=_gc_diag(i_int, j_int),
-            )
-
-            K_new, eta_new, A_new, B_new = jax.vmap(
-                lambda c, ix, iy: cell_step(
-                    lambda_op, c, transport_params,
-                    precompute_propagators=precompute_propagators, ix=ix, iy=iy, dtype=dtype,
-                ), in_axes=(0, 0, 0),
-            )(cells, im1, jm1)
-
-            new_eta, new_K, new_A, new_B = _zeros_buf()
-
-            int_pos = jnp.clip(int_lo - ext_lo + offsets, 0, W - 1)
-            vmask, vmask_rr = valid[:, None], valid[:, None, None, None]
-            new_eta = new_eta.at[int_pos].set(jnp.where(vmask, eta_new, new_eta[int_pos]))
-            new_K = new_K.at[int_pos].set(jnp.where(vmask_rr, K_new, new_K[int_pos]))
-            new_A = new_A.at[int_pos].set(jnp.where(vmask_rr, A_new, new_A[int_pos]))
-            new_B = new_B.at[int_pos].set(jnp.where(vmask_rr, B_new, new_B[int_pos]))
-
-            return ((new_eta, new_K, new_A, new_B), buf_prev), \
-                None if terminal_only else (i_safe, j_safe, valid, eta_new, K_new, A_new, B_new)
-
-        (last_buf, _), all_out = jax.lax.scan(diag_step, (buf_d1, buf_d0), d_arr)
-
-        if terminal_only:
-            eta_last, K_last, A_last, B_last = last_buf
-            return eta_last[0], K_last[0], A_last[0], B_last[0]
-
-        i_all, j_all, valid_all, eta_all, K_all, A_all, B_all = all_out
-
-        eta_grid = jnp.ones((batch, s_nodes, t_nodes), dtype=dtype)
-        z = jnp.zeros((batch, s_nodes, t_nodes, r, r), dtype=dtype)
-        K_grid, A_grid, B_grid = z, z.copy(), z.copy()
-
-        i_flat, j_flat, v_flat = i_all.reshape(-1), j_all.reshape(-1), valid_all.reshape(-1)
-        mv = lambda a: jnp.moveaxis(a.reshape(-1, *a.shape[2:]), 0, 1)
-        eta_flat, K_flat, A_flat, B_flat = mv(eta_all), mv(K_all), mv(A_all), mv(B_all)
-
-        vmask, vmask_rr = v_flat[None, :], v_flat[None, :, None, None]
-        eta_grid = eta_grid.at[:, i_flat, j_flat].set(jnp.where(vmask, eta_flat, eta_grid[:, i_flat, j_flat]))
-        K_grid = K_grid.at[:, i_flat, j_flat].set(jnp.where(vmask_rr, K_flat, K_grid[:, i_flat, j_flat]))
-        A_grid = A_grid.at[:, i_flat, j_flat].set(jnp.where(vmask_rr, A_flat, A_grid[:, i_flat, j_flat]))
-        B_grid = B_grid.at[:, i_flat, j_flat].set(jnp.where(vmask_rr, B_flat, B_grid[:, i_flat, j_flat]))
-
-        return eta_grid, K_grid, A_grid, B_grid
-
-    return solver
-
-
-# ---------------------------------------------------------------------------
 # Shared path/gamma helpers
 # ---------------------------------------------------------------------------
-
-def _project_nodes(X_nodes, *, proj):
-    """Project path nodes (not increments) through the state tensor.
-
-    Parameters
-    ----------
-    X_nodes : Array, shape (batch, n_nodes, dim)
-    proj    : Array, shape (R, m, dim)  — from :func:`_state_projection_tensor`
-
-    Returns
-    -------
-    Array, shape (batch, n_nodes, R, m)
-    """
-    return jnp.einsum("Rmd,bid->biRm", proj, X_nodes)
-
-
-def _build_fine_nodes(q_coarse, n):
-    """Linearly interpolate coarse projected nodes to fine-grid nodes.
-
-    For dyadic order k, ``n = 2^k``.  Fine-grid node at coarse interval p,
-    sub-step l is  q_coarse[p] + (l/n)·(q_coarse[p+1] − q_coarse[p]).
-
-    Parameters
-    ----------
-    q_coarse : Array, shape (batch, n_coarse_nodes, R, m)
-    n        : int — dyadic refinement factor (1 << dyadic_order)
-
-    Returns
-    -------
-    Array, shape (batch, (n_coarse_nodes − 1) · n + 1, R, m)
-    """
-    if n == 1:
-        return q_coarse
-    batch, n_nodes, R, m = q_coarse.shape
-    n_intervals = n_nodes - 1
-    frac = jnp.arange(n, dtype=q_coarse.dtype) / n          # (n,)
-    dq = q_coarse[:, 1:] - q_coarse[:, :-1]                  # (batch, n_intervals, R, m)
-    # (batch, n_intervals, n, R, m)
-    interp = (q_coarse[:, :-1, None, :, :]
-              + frac[None, None, :, None, None] * dq[:, :, None, :, :])
-    interp = interp.reshape(batch, n_intervals * n, R, m)
-    return jnp.concatenate([interp, q_coarse[:, -1:]], axis=1)
 
 
 def _build_gamma_grid(dX, dY, *, proj, pairwise):
@@ -1140,6 +784,8 @@ def _to_increments(X, *, path_dim, name, increment_in):
     return jnp.diff(X, axis=-2)
 
 
+
+
 def _prepare_dt(dt, steps, *, name, dtype):
     dt_arr = jnp.asarray(dt, dtype=dtype)
     if dt_arr.ndim == 0:
@@ -1149,6 +795,7 @@ def _prepare_dt(dt, steps, *, name, dtype):
     if int(dt_arr.shape[0]) != steps:
         raise ValueError(f"{name} must have length {steps}, got {dt_arr.shape[0]}.")
     return dt_arr, False
+
 
 
 def _lambda_left_right(lambda_op, X, *, dtype):
