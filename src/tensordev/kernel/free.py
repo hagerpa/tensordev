@@ -36,13 +36,13 @@ class FreeCellData:
     """
 
     # driving increments
-    dx_i: tuple  # x-increment for row i, M levels
-    dy_j: tuple  # y-increment for column j, N levels
+    dx_i: tuple   # x-increment for row i, M levels
+    dy_j: tuple   # y-increment for column j, N levels
 
     # scalar PDE state at three corners
-    u_nw: Array  # (i-1, j-1)
-    u_n: Array  # (i-1, j)
-    u_w: Array  # (i, j-1)
+    u_nw: Array   # (i-1, j-1)
+    u_n: Array    # (i-1, j)
+    u_w: Array    # (i, j-1)
 
     # left-adjoint (f) at three corners — n levels each
     f_nw: tuple
@@ -131,7 +131,6 @@ class FreeRowState:
         FreeRowState
             Grid arrays with shape ``batch + (s_nodes, t_nodes, …)``.
         """
-
         def _prepend(first, scanned, axis):
             return jnp.concatenate(
                 (jnp.expand_dims(first, axis), jnp.moveaxis(scanned, 0, axis)),
@@ -560,7 +559,7 @@ def _free_cell_step(cell: FreeCellData, *, core, M, N, m, n, P, P_f, P_g):
         G2_ij = G_ij * G_ij
         u_se = (u_n + u_w) * (1.0 + 0.5 * G_ij + kap * G2_ij) \
                - u_nw * (1.0 - kap * G2_ij)
-        return u_se, f_n, g_w  # f, g are empty tuples — pass through
+        return u_se, f_n, g_w          # f, g are empty tuples — pass through
 
     # --- general Heun predictor–corrector ---------------------------------
     dx_adj_dy = adj_right(dx_i, dy_j, trunc=n)
