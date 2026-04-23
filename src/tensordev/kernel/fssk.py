@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Optional
 import jax
 import jax.numpy as jnp
 
 from tensordev.kernel.base_kernel import BaseKernel
 from tensordev.kernel.parallel import pmap_solver_call
+from tensordev.kernel.static_kernels import StaticKernel
 from tensordev.kernel.util import DyadicOrder, normalize_dyadic_order
 from tensordev.volterra.fssk.kernels import FSSKKernel
 
@@ -58,6 +60,7 @@ class FSSKSigKernel(BaseKernel):
     dyadic_order: DyadicOrder = 0
     increment_in: bool = False
     num_devices: int = 1
+    static_kernel: Optional[StaticKernel] = None
 
     def __call__(self, X, Y, *, evaluate="terminal", return_fg=False, pairwise=False):
         return fssk_sigkernel(
@@ -69,6 +72,7 @@ class FSSKSigKernel(BaseKernel):
             dyadic_order=self.dyadic_order,
             increment_in=self.increment_in,
             num_devices=self.num_devices,
+            static_kernel=self.static_kernel,
         )
 
     def _as_sample_batch(self, X):
@@ -201,6 +205,7 @@ def fssk_sigkernel(
         precompute_propagators: bool = False, dyadic_order: DyadicOrder = 0,
         increment_in: bool = False,
         num_devices: int = 1,
+        static_kernel: Optional[StaticKernel] = None,
 ):
     """Evaluate the beta PDE approximation of the FSSK signature kernel.
 
@@ -245,6 +250,20 @@ def fssk_sigkernel(
             import jax
 
         See :mod:`tensordev.kernel.parallel` for details.
+    static_kernel : StaticKernel, optional
+        If provided, gamma is computed from projected path *nodes* using the
+        discrete mixed-derivative formula
+
+        .. math::
+            G_{q,p}^{i,j} = k(A_q X_{i+1}, A_p Y_{j+1})
+                           - k(A_q X_i,   A_p Y_{j+1})
+                           - k(A_q X_{i+1}, A_p Y_j)
+                           + k(A_q X_i,   A_p Y_j)
+
+        followed by contraction
+        :math:`\\gamma[R,S] = \\sum_{q,p} b_{q,R}\\, G_{q,p}\\, b_{p,S}`.
+        When ``None`` (default) the original increment-based projection is
+        used instead.
 
     Returns
     -------
@@ -275,8 +294,17 @@ def fssk_sigkernel(
     dt_y_arr, dt_y_uniform = _prepare_dt(dt_y, int(dY.shape[-2]), name="dt_y", dtype=dtype)
 
     # Build gamma on the coarse grid; solvers index it via i >> dyadic_order.
-    proj = _state_projection_tensor(kernel, dtype=dtype)
-    gamma_coarse, batch_shape = _build_gamma_grid(dX, dY, proj=proj, pairwise=pairwise)
+    if static_kernel is not None:
+        X_nodes = _to_nodes(X, path_dim=dim, name="X", increment_in=increment_in)
+        Y_nodes = _to_nodes(Y, path_dim=dim, name="Y", increment_in=increment_in)
+        gamma_coarse, batch_shape = _build_gamma_grid_static(
+            X_nodes, Y_nodes,
+            kernel=kernel, static_kernel=static_kernel,
+            pairwise=pairwise, dtype=dtype,
+        )
+    else:
+        proj = _state_projection_tensor(kernel, dtype=dtype)
+        gamma_coarse, batch_shape = _build_gamma_grid(dX, dY, proj=proj, pairwise=pairwise)
 
     # Dyadic refinement: scale gamma (sub-cell increments are 1/2^k of coarse)
     # and build fine-grid dt. Coarse gamma shape is unchanged.
@@ -802,4 +830,120 @@ def _lambda_left_right(lambda_op, X, *, dtype):
     return lambda_op.lambda_multiply_right(lambda_op.lambda_multiply_left(X, dtype=dtype), dtype=dtype)
 
 
-__all__ = ["fssk_sigkernel", "FSSKSigKernel", "CellData", "RowState", "WaveState"]
+# ---------------------------------------------------------------------------
+# Static-kernel gamma helpers
+# ---------------------------------------------------------------------------
+
+
+def _to_nodes(X, *, path_dim, name, increment_in):
+    """Normalize input to ``(batch, nodes, dim)`` path *node* values.
+
+    If ``increment_in=True`` the increments are integrated with a zero initial
+    state via cumulative sum.  Otherwise the array is returned as-is (possibly
+    with a batch dimension prepended).
+    """
+    X = jnp.asarray(X)
+    if X.ndim == 2:
+        X = X[None, ...]
+    if X.ndim != 3:
+        raise ValueError(f"{name} must have shape (batch, length, dim) or (length, dim).")
+    if X.shape[-1] != path_dim:
+        raise ValueError(
+            f"{name} must have terminal feature dimension {path_dim}, got {X.shape[-1]}."
+        )
+    if increment_in:
+        if X.shape[-2] < 1:
+            raise ValueError(f"{name} must contain at least one interval when increment_in=True.")
+        zeros = jnp.zeros_like(X[:, :1, :])
+        return jnp.concatenate([zeros, jnp.cumsum(X, axis=1)], axis=1)
+    if X.shape[-2] < 2:
+        raise ValueError(f"{name} must contain at least two time points.")
+    return X
+
+
+def _build_gamma_grid_static(X_nodes, Y_nodes, *, kernel, static_kernel, pairwise, dtype):
+    """Build the coarse-grid gamma array using a static kernel.
+
+    For each coarse cell ``(i, j)`` the entry is
+
+    .. math::
+        \\gamma[R, S]
+        = \\sum_{q, p} b_{q,R}\\,
+          \\bigl[
+            k(A_q X_{i+1}, A_p Y_{j+1})
+          - k(A_q X_i,   A_p Y_{j+1})
+          - k(A_q X_{i+1}, A_p Y_j  )
+          + k(A_q X_i,   A_p Y_j  )
+          \\bigr]\\,
+          b_{p,S}.
+
+    The returned array has shape ``(batch, s_nodes, t_nodes, R, R)`` where
+    ``s_nodes = s_intervals + 1`` and the last row/column is zero-padded so
+    that the shape convention matches the increment-based ``_build_gamma_grid``.
+
+    Parameters
+    ----------
+    X_nodes : ``(bx, s_nodes, d)``
+    Y_nodes : ``(by, t_nodes, d)``
+    """
+    A = kernel.A.astype(dtype)   # (q, m, d)
+    b = kernel.b.astype(dtype)   # (q, R)
+
+    bx, s_nodes = int(X_nodes.shape[0]), int(X_nodes.shape[1])
+    by, t_nodes = int(Y_nodes.shape[0]), int(Y_nodes.shape[1])
+    q = int(A.shape[0])
+    m = int(A.shape[1])
+    R = int(b.shape[1])
+
+    s_intervals = s_nodes - 1
+    t_intervals = t_nodes - 1
+
+    # Projected nodes: AX[b, i, q, :] = A[q] @ X_nodes[b, i, :]
+    AX = jnp.einsum("qmd,bid->biqm", A, X_nodes.astype(dtype))  # (bx, s_nodes, q, m)
+    AY = jnp.einsum("qmd,bjd->bjqm", A, Y_nodes.astype(dtype))  # (by, t_nodes, q, m)
+
+    # Flatten (node, component) axes so the static kernel sees (batch, length, dim)
+    AX_flat = AX.reshape(bx, s_nodes * q, m)   # (bx, s_nodes*q, m)
+    AY_flat = AY.reshape(by, t_nodes * q, m)   # (by, t_nodes*q, m)
+
+    if pairwise:
+        # K: (bx, by, s_nodes*q, t_nodes*q)
+        K = static_kernel.Gram_matrix(AX_flat, AY_flat)
+        K = K.reshape(bx, by, s_nodes, q, t_nodes, q)
+        K = jnp.transpose(K, (0, 1, 2, 4, 3, 5))  # (bx, by, s_nodes, t_nodes, q, q)
+        # Discrete mixed derivative: G[bx, by, i, j, q, p] for i<s_intervals, j<t_intervals
+        G = (K[:, :, 1:, 1:, :, :]
+             - K[:, :, :-1, 1:, :, :]
+             - K[:, :, 1:, :-1, :, :]
+             + K[:, :, :-1, :-1, :, :])  # (bx, by, s_intervals, t_intervals, q, q)
+        # Contract with b: gamma[R, S] = sum_{q,p} b[q,R] * G[q,p] * b[p,S]
+        gamma_cell = jnp.einsum("qR,bcijqp,pS->bcijRS", b, G, b)
+        # (bx, by, s_intervals, t_intervals, R, R)
+        # Zero-pad to (bx, by, s_nodes, t_nodes, R, R)
+        gamma_padded = jnp.pad(gamma_cell, ((0, 0), (0, 0), (0, 1), (0, 1), (0, 0), (0, 0)))
+        gamma = gamma_padded.reshape(bx * by, s_nodes, t_nodes, R, R)
+        return gamma, (bx, by)
+    else:
+        if bx != by:
+            raise ValueError(
+                f"Batchwise evaluation requires matching batch sizes; got {bx} and {by}."
+            )
+        batch = bx
+        # K: (batch, s_nodes*q, t_nodes*q)
+        K = static_kernel.batch_kernel(AX_flat, AY_flat)
+        K = K.reshape(batch, s_nodes, q, t_nodes, q)
+        K = jnp.transpose(K, (0, 1, 3, 2, 4))  # (batch, s_nodes, t_nodes, q, q)
+        # Discrete mixed derivative
+        G = (K[:, 1:, 1:, :, :]
+             - K[:, :-1, 1:, :, :]
+             - K[:, 1:, :-1, :, :]
+             + K[:, :-1, :-1, :, :])   # (batch, s_intervals, t_intervals, q, q)
+        gamma_cell = jnp.einsum("qR,bijqp,pS->bijRS", b, G, b)
+        # (batch, s_intervals, t_intervals, R, R)
+        # Zero-pad to (batch, s_nodes, t_nodes, R, R)
+        gamma_padded = jnp.pad(gamma_cell, ((0, 0), (0, 1), (0, 1), (0, 0), (0, 0)))
+        return gamma_padded, (batch,)
+
+
+__all__ = ["fssk_sigkernel", "FSSKSigKernel", "CellData", "RowState", "WaveState",
+           "_to_nodes", "_build_gamma_grid_static"]
