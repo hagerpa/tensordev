@@ -6,7 +6,7 @@ import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
-from tensordev.volterra.fssk import DenseLambda, FSSKCoefficients, FSSKKernel, JordanLambda
+from tensordev.sss import DenseLambda, FSSKCoefficients, FSSK, JordanLambda
 
 
 def _assert_allclose(x, y, *, atol=1e-9, rtol=1e-9):
@@ -30,7 +30,7 @@ def test_fssk_kernel_q1_uses_unified_layout_and_shapes():
     lam = DenseLambda(jnp.asarray([[1.0, 0.0], [0.0, 0.5]]))
     A = jnp.ones((1, 2, 3))
     b = jnp.asarray([[0.7, -0.2]])
-    ker = FSSKKernel(Lambda=lam, A=A, b=b)
+    ker = FSSK(Lambda=lam, A=A, b=b)
 
     coef = ker.coef(jnp.asarray([0.1, 0.2, 0.3]), trunc=4)
     assert isinstance(coef, FSSKCoefficients)
@@ -45,7 +45,7 @@ def test_fssk_kernel_multivariate_shapes_for_dt_array():
     lam = DenseLambda(jnp.asarray([[1.0, 0.0], [0.0, 0.5]]))
     A = jnp.ones((2, 2, 3))
     b = jnp.asarray([[0.7, -0.2], [0.1, 0.4]])
-    ker = FSSKKernel(Lambda=lam, A=A, b=b)
+    ker = FSSK(Lambda=lam, A=A, b=b)
 
     coef = ker.coef(jnp.asarray([0.1, 0.2]), trunc=4)
     assert coef.layout.q == 2
@@ -62,8 +62,8 @@ def test_shared_coef_algorithm_matches_dense_and_jordan_paths():
     A = jnp.ones((2, 1, 1))
     b = jnp.asarray([[0.8, 0.1, -0.3, 0.2], [0.2, -0.1, 0.4, 0.6]])
 
-    ker_dense = FSSKKernel(Lambda=dense, A=A, b=b)
-    ker_jordan = FSSKKernel(Lambda=jordan, A=A, b=b)
+    ker_dense = FSSK(Lambda=dense, A=A, b=b)
+    ker_jordan = FSSK(Lambda=jordan, A=A, b=b)
 
     dt = jnp.asarray([0.1, 0.3])
     coef_dense = ker_dense.coef(dt, trunc=3)
@@ -78,7 +78,7 @@ def test_fssk_kernel_coef_is_jittable_when_trunc_is_static():
     lam = DenseLambda(jnp.asarray([[1.0, 0.0], [0.0, 0.5]]))
     A = jnp.ones((2, 2, 3))
     b = jnp.asarray([[0.7, -0.2], [0.1, 0.4]])
-    ker = FSSKKernel(Lambda=lam, A=A, b=b)
+    ker = FSSK(Lambda=lam, A=A, b=b)
 
     @partial(jax.jit, static_argnames=("trunc",))
     def build(kernel, dt, *, trunc):
@@ -95,7 +95,7 @@ def test_from_jordan_constructs_structured_kernel_with_explicit_b():
     jordan = JordanLambda(real_rates=(0.7, 1.2), real_sizes=(1, 1))
     b = jnp.asarray([[1.0, -0.5], [0.25, 0.75]])
 
-    ker = FSSKKernel.from_jordan(
+    ker = FSSK.from_jordan(
         A=A,
         b=b,
         real_rates=(0.7, 1.2),

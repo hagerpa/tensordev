@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import jax.scipy.linalg as jsp_linalg
 import pytest
 
-from tensordev.volterra.fssk.lambdas import DenseLambda, JordanLambda
+from tensordev.sss.lambdas import DenseLambda, JordanLambda
 
 
 def _assert_allclose(x, y, *, atol=1e-10, rtol=1e-10):

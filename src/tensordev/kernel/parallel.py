@@ -47,7 +47,7 @@ Quick start
     os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 
     import jax
-    from tensordev.kernel.fssk import FSSKSigKernel
+    from tensordev.kernel.sss import FSSKSigKernel
 
     kernel = FSSKSigKernel(..., num_devices=8)
     gram = kernel.compute_Gram(X, Y)
@@ -137,7 +137,7 @@ def pmap_batch(fn, *sharded_pytrees, num_devices: int):
 
     Examples
     --------
-    Single-array shard (fssk style)::
+    Single-array shard (sss style)::
 
         result = pmap_batch(lambda g: solver(g, dt_x, dt_y, ...), gamma, num_devices=4)
 

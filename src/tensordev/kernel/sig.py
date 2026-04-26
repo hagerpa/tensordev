@@ -7,6 +7,7 @@ import jax.numpy as jnp
 from tensordev import Jax
 from tensordev.kernel.free import free_kernel
 from tensordev.kernel.base_kernel import BaseKernel
+from tensordev.kernel.static_kernels import LinearKernel, StaticKernel
 from tensordev.kernel.util import DyadicOrder
 
 Array = jnp.ndarray
@@ -30,12 +31,22 @@ class SigKernel(BaseKernel):
     The parameter ``dyadic_order`` controls optional dyadic refinement of the
     time grid before evaluation.  It can be a single int (same for both paths)
     or a tuple ``(order_x, order_y)`` for asymmetric refinement.
+
+    The parameter ``static_kernel`` replaces the default ``⟨dx_i, dy_j⟩``
+    increment inner product with the discrete mixed-difference formula::
+
+        G[i,j] = k(x_{i+1}, y_{j+1}) - k(x_i, y_{j+1})
+               - k(x_{i+1}, y_j)   + k(x_i, y_j)
+
+    where ``x_i`` are the path nodes.  The default ``LinearKernel(scale=1.0)``
+    reproduces the classical signature kernel exactly.
     """
 
     backend: str = "scan"
     dyadic_order: DyadicOrder = 0
     core: object = None
     num_devices: int = 1
+    static_kernel: StaticKernel = LinearKernel(scale=1.0)
 
     def __call__(
             self,
@@ -78,6 +89,7 @@ class SigKernel(BaseKernel):
             core=self.core,
             increment_in=False,
             num_devices=self.num_devices,
+            static_kernel=self.static_kernel,
         )
 
     def _as_sample_batch(self, X):

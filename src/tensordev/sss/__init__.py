@@ -1,5 +1,6 @@
 from .coeffs import FSSKCoefficients
-from .kernels import FSSKKernel
+from .state import StateSpaceSignature
+from .kernel import FSSK
 from .lambdas import DenseLambda, JordanLambda, Lambda
 
 __all__ = [
@@ -7,5 +8,6 @@ __all__ = [
     "DenseLambda",
     "JordanLambda",
     "FSSKCoefficients",
-    "FSSKKernel",
+    "FSSK",
+    "StateSpaceSignature",
 ]

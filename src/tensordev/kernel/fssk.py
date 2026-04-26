@@ -2,15 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional
 import jax
 import jax.numpy as jnp
 
 from tensordev.kernel.base_kernel import BaseKernel
 from tensordev.kernel.parallel import pmap_solver_call
-from tensordev.kernel.static_kernels import StaticKernel
+from tensordev.kernel.static_kernels import LinearKernel, StaticKernel
 from tensordev.kernel.util import DyadicOrder, normalize_dyadic_order
-from tensordev.volterra.fssk.kernels import FSSKKernel
+from tensordev.sss.kernel import FSSK
 
 Array = jax.Array
 
@@ -26,7 +25,7 @@ class FSSKSigKernel(BaseKernel):
 
     Parameters
     ----------
-    kernel : FSSKKernel
+    kernel : FSSK
         Algebraic specification of the kernel (decay matrix Λ, projection
         tensors A, mixing weights b).
     dt_x, dt_y : float or Array
@@ -49,9 +48,14 @@ class FSSKSigKernel(BaseKernel):
         If ``True``, *X* and *Y* are already provided as increments
         ``(batch, intervals, dim)`` rather than as path values
         ``(batch, nodes, dim)``.
+    static_kernel : StaticKernel, default=LinearKernel(scale=1.0)
+        Static kernel used to build the coarse-grid gamma via the discrete
+        mixed-derivative formula.  The default ``LinearKernel(scale=1.0)``
+        (i.e. ``k(x,y)=⟨x,y⟩``) is mathematically equivalent to the
+        original increment-based projection.
     """
 
-    kernel: FSSKKernel
+    kernel: FSSK
     dt_x: Array | float
     dt_y: Array | float
     backend: str = "scan"
@@ -60,7 +64,7 @@ class FSSKSigKernel(BaseKernel):
     dyadic_order: DyadicOrder = 0
     increment_in: bool = False
     num_devices: int = 1
-    static_kernel: Optional[StaticKernel] = None
+    static_kernel: StaticKernel = LinearKernel(scale=1.0)
 
     def __call__(self, X, Y, *, evaluate="terminal", return_fg=False, pairwise=False):
         return fssk_sigkernel(
@@ -115,13 +119,6 @@ class CellData:
     B_nw: Array
 
     gamma_nw: Array
-    gamma_n: Array
-    gamma_w: Array
-    gamma_se: Array
-
-    @staticmethod
-    def move_scan_axis(x: Array) -> Array:
-        return jnp.moveaxis(x, 1, 0)
 
     @staticmethod
     def unmove_scan_axis(x: Array) -> Array:
@@ -178,7 +175,6 @@ class WaveState:
     B: Array
 
 
-
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class EmptyTransportParams:
@@ -198,14 +194,14 @@ class PrecomputedTransportParams:
 
 def fssk_sigkernel(
         X, Y, *,
-        kernel: FSSKKernel,
+        kernel: FSSK,
         dt_x: Array | float, dt_y: Array | float,
         evaluate: str = "terminal", return_fg: bool = False, pairwise: bool = False,
         backend: str = "scan", scheme: str = "heun",
         precompute_propagators: bool = False, dyadic_order: DyadicOrder = 0,
         increment_in: bool = False,
         num_devices: int = 1,
-        static_kernel: Optional[StaticKernel] = None,
+        static_kernel: StaticKernel = LinearKernel(scale=1.0),
 ):
     """Evaluate the beta PDE approximation of the FSSK signature kernel.
 
@@ -216,7 +212,7 @@ def fssk_sigkernel(
         When ``increment_in=True`` the second axis indexes intervals (length
         equals the number of increments); otherwise it indexes nodes (length
         equals number of time-points ≥ 2).
-    kernel : FSSKKernel
+    kernel : FSSK
         Algebraic kernel specification.
     dt_x, dt_y : float or Array
         Time-step size(s). Scalar for uniform grids, 1-D array for
@@ -250,9 +246,9 @@ def fssk_sigkernel(
             import jax
 
         See :mod:`tensordev.kernel.parallel` for details.
-    static_kernel : StaticKernel, optional
-        If provided, gamma is computed from projected path *nodes* using the
-        discrete mixed-derivative formula
+    static_kernel : StaticKernel, default=LinearKernel(scale=1.0)
+        Static kernel used to build the coarse-grid gamma via the discrete
+        mixed-derivative formula
 
         .. math::
             G_{q,p}^{i,j} = k(A_q X_{i+1}, A_p Y_{j+1})
@@ -262,8 +258,8 @@ def fssk_sigkernel(
 
         followed by contraction
         :math:`\\gamma[R,S] = \\sum_{q,p} b_{q,R}\\, G_{q,p}\\, b_{p,S}`.
-        When ``None`` (default) the original increment-based projection is
-        used instead.
+        The default ``LinearKernel(scale=1.0)`` is equivalent to the original
+        increment-based projection.
 
     Returns
     -------
@@ -286,25 +282,21 @@ def fssk_sigkernel(
     dyadic_order_x, dyadic_order_y = normalize_dyadic_order(dyadic_order)
 
     dim = kernel.path_dim
-    dX = _to_increments(X, path_dim=dim, name="X", increment_in=increment_in)
-    dY = _to_increments(Y, path_dim=dim, name="Y", increment_in=increment_in)
+    X_nodes = _to_nodes(X, path_dim=dim, name="X", increment_in=increment_in)
+    Y_nodes = _to_nodes(Y, path_dim=dim, name="Y", increment_in=increment_in)
 
-    dtype = jnp.result_type(dX.dtype, dY.dtype, kernel.A.dtype, kernel.b.dtype)
-    dt_x_arr, dt_x_uniform = _prepare_dt(dt_x, int(dX.shape[-2]), name="dt_x", dtype=dtype)
-    dt_y_arr, dt_y_uniform = _prepare_dt(dt_y, int(dY.shape[-2]), name="dt_y", dtype=dtype)
+    dtype = jnp.result_type(X_nodes.dtype, Y_nodes.dtype, kernel.A.dtype, kernel.b.dtype)
+    s_intervals = int(X_nodes.shape[-2]) - 1
+    t_intervals = int(Y_nodes.shape[-2]) - 1
+    dt_x_arr, dt_x_uniform = _prepare_dt(dt_x, s_intervals, name="dt_x", dtype=dtype)
+    dt_y_arr, dt_y_uniform = _prepare_dt(dt_y, t_intervals, name="dt_y", dtype=dtype)
 
     # Build gamma on the coarse grid; solvers index it via i >> dyadic_order.
-    if static_kernel is not None:
-        X_nodes = _to_nodes(X, path_dim=dim, name="X", increment_in=increment_in)
-        Y_nodes = _to_nodes(Y, path_dim=dim, name="Y", increment_in=increment_in)
-        gamma_coarse, batch_shape = _build_gamma_grid_static(
-            X_nodes, Y_nodes,
-            kernel=kernel, static_kernel=static_kernel,
-            pairwise=pairwise, dtype=dtype,
-        )
-    else:
-        proj = _state_projection_tensor(kernel, dtype=dtype)
-        gamma_coarse, batch_shape = _build_gamma_grid(dX, dY, proj=proj, pairwise=pairwise)
+    gamma_coarse, batch_shape = _build_gamma_grid_static(
+        X_nodes, Y_nodes,
+        kernel=kernel, static_kernel=static_kernel,
+        pairwise=pairwise, dtype=dtype,
+    )
 
     # Dyadic refinement: scale gamma (sub-cell increments are 1/2^k of coarse)
     # and build fine-grid dt. Coarse gamma shape is unchanged.
@@ -428,22 +420,6 @@ def _exact_step_precomputed(op, phi1, prev, src, *, side):
     return _right_apply(prev, op) + _right_apply(src, phi1)
 
 
-def _etd2_step_action(lambda_op, h, prev, src0, dsrc, *, side, dtype):
-    if side == "left":
-        return (lambda_op.expm_multiply_left(h, prev, dtype=dtype)
-                + lambda_op.phi1_multiply_left(h, src0, dtype=dtype)
-                + lambda_op.phi2_multiply_left(h, dsrc, dtype=dtype))
-    return (lambda_op.expm_multiply_right(h, prev, dtype=dtype)
-            + lambda_op.phi1_multiply_right(h, src0, dtype=dtype)
-            + lambda_op.phi2_multiply_right(h, dsrc, dtype=dtype))
-
-
-def _etd2_step_precomputed(op, phi1, phi2, prev, src0, dsrc, *, side):
-    if side == "left":
-        return _left_apply(op, prev) + _left_apply(phi1, src0) + _left_apply(phi2, dsrc)
-    return _right_apply(prev, op) + _right_apply(src0, phi1) + _right_apply(dsrc, phi2)
-
-
 def _transport_step_etd1(lambda_op, h, prev, src, *,
                          side, transport_params, precompute_propagators, step_index, dtype):
     """ETD1 (exact + phi1) transport, action or precomputed."""
@@ -451,15 +427,6 @@ def _transport_step_etd1(lambda_op, h, prev, src, *,
         return _exact_step_action(lambda_op, h, prev, src, side=side, dtype=dtype)
     ops = _get_precomputed_ops(transport_params, side, step_index)
     return _exact_step_precomputed(ops[0], ops[1], prev, src, side=side)
-
-
-def _transport_step_etd2(lambda_op, h, prev, src0, dsrc, *,
-                         side, transport_params, precompute_propagators, step_index, dtype):
-    """ETD2 (exact + phi1 + phi2) transport, action or precomputed."""
-    if not precompute_propagators:
-        return _etd2_step_action(lambda_op, h, prev, src0, dsrc, side=side, dtype=dtype)
-    ops = _get_precomputed_ops(transport_params, side, step_index)
-    return _etd2_step_precomputed(ops[0], ops[1], ops[2], prev, src0, dsrc, side=side)
 
 
 def _get_precomputed_ops(tp, side, idx):
@@ -608,8 +575,7 @@ def _make_scan_solver(cell_step, precompute_propagators, dyadic_order, terminal_
                     eta_w=eta_w, eta_n=north.eta[:, iy + 1], eta_nw=north.eta[:, iy],
                     A_w=A_w, A_n=north.A[:, iy + 1], A_nw=north.A[:, iy],
                     B_w=B_w, B_n=north.B[:, iy + 1], B_nw=north.B[:, iy],
-                    gamma_nw=_g(ix, iy), gamma_n=_g(ix, iy + 1),
-                    gamma_w=_g(ix + 1, iy), gamma_se=_g(ix + 1, iy + 1),
+                    gamma_nw=_g(ix, iy),
                 )
                 out = cell_step(
                     lambda_op, cell, transport_params,
@@ -709,8 +675,7 @@ def _make_wavefront_solver(cell_step, precompute_propagators, dyadic_order, term
                 eta_w=eta_p[k_w], eta_n=eta_p[k_n], eta_nw=eta_p2[k_nw],
                 A_w=A_p[k_w], A_n=A_p[k_n], A_nw=A_p2[k_nw],
                 B_w=B_p[k_w], B_n=B_p[k_n], B_nw=B_p2[k_nw],
-                gamma_nw=sw(_gc(im1, jm1)), gamma_n=sw(_gc(im1, j_int)),
-                gamma_w=sw(_gc(i_int, jm1)), gamma_se=sw(_gc(i_int, j_int)),
+                gamma_nw=sw(_gc(im1, jm1)),
             )
 
             K_new, eta_new, A_new, B_new = jax.vmap(
@@ -764,55 +729,8 @@ def _make_wavefront_solver(cell_step, precompute_propagators, dyadic_order, term
 
 
 # ---------------------------------------------------------------------------
-# Shared path/gamma helpers
+# Path / gamma helpers
 # ---------------------------------------------------------------------------
-
-
-def _build_gamma_grid(dX, dY, *, proj, pairwise):
-    """Build the increment-based gamma grid from path increments."""
-    sx = _project_increments(dX, proj=proj)
-    sy = _project_increments(dY, proj=proj)
-
-    if pairwise:
-        bx, by = int(dX.shape[0]), int(dY.shape[0])
-        gamma = jnp.einsum("biRm,cjSm->bcijRS", sx, sy)
-        return gamma.reshape((bx * by,) + gamma.shape[-4:]), (bx, by)
-
-    bx, by = int(dX.shape[0]), int(dY.shape[0])
-    if bx != by:
-        raise ValueError(f"Batchwise evaluation requires matching batch sizes; got {bx} and {by}.")
-    return jnp.einsum("biRm,bjSm->bijRS", sx, sy), (bx,)
-
-
-def _state_projection_tensor(kernel, *, dtype):
-    return jnp.einsum("qR,qmd->Rmd", kernel.b.astype(dtype), kernel.A.astype(dtype))
-
-
-def _project_increments(dX, *, proj):
-    """Project increments and repeat last to get node-aligned values."""
-    nodes = jnp.concatenate([dX, dX[:, -1:, :]], axis=-2)
-    return jnp.einsum("Rmd,bid->biRm", proj, nodes)
-
-
-def _to_increments(X, *, path_dim, name, increment_in):
-    """Normalize input to (batch, intervals, dim) increments."""
-    X = jnp.asarray(X)
-    if X.ndim == 2:
-        X = X[None, ...]
-    if X.ndim != 3:
-        raise ValueError(f"{name} must have shape (batch, length, dim) or (length, dim).")
-    if X.shape[-1] != path_dim:
-        raise ValueError(f"{name} must have terminal feature dimension {path_dim}, got {X.shape[-1]}.")
-    if increment_in:
-        if X.shape[-2] < 1:
-            raise ValueError(f"{name} must contain at least one interval.")
-        return X
-    if X.shape[-2] < 2:
-        raise ValueError(f"{name} must contain at least two time points.")
-    return jnp.diff(X, axis=-2)
-
-
-
 
 def _prepare_dt(dt, steps, *, name, dtype):
     dt_arr = jnp.asarray(dt, dtype=dtype)
@@ -825,13 +743,12 @@ def _prepare_dt(dt, steps, *, name, dtype):
     return dt_arr, False
 
 
-
 def _lambda_left_right(lambda_op, X, *, dtype):
     return lambda_op.lambda_multiply_right(lambda_op.lambda_multiply_left(X, dtype=dtype), dtype=dtype)
 
 
 # ---------------------------------------------------------------------------
-# Static-kernel gamma helpers
+# Static-kernel gamma
 # ---------------------------------------------------------------------------
 
 
@@ -877,9 +794,8 @@ def _build_gamma_grid_static(X_nodes, Y_nodes, *, kernel, static_kernel, pairwis
           \\bigr]\\,
           b_{p,S}.
 
-    The returned array has shape ``(batch, s_nodes, t_nodes, R, R)`` where
-    ``s_nodes = s_intervals + 1`` and the last row/column is zero-padded so
-    that the shape convention matches the increment-based ``_build_gamma_grid``.
+    The returned array has shape ``(batch, s_nodes, t_nodes, R, R)`` where the
+    last row/column is zero-padded (unused by the solver).
 
     Parameters
     ----------
@@ -891,59 +807,33 @@ def _build_gamma_grid_static(X_nodes, Y_nodes, *, kernel, static_kernel, pairwis
 
     bx, s_nodes = int(X_nodes.shape[0]), int(X_nodes.shape[1])
     by, t_nodes = int(Y_nodes.shape[0]), int(Y_nodes.shape[1])
-    q = int(A.shape[0])
-    m = int(A.shape[1])
-    R = int(b.shape[1])
-
-    s_intervals = s_nodes - 1
-    t_intervals = t_nodes - 1
+    q, m, R = int(A.shape[0]), int(A.shape[1]), int(b.shape[1])
 
     # Projected nodes: AX[b, i, q, :] = A[q] @ X_nodes[b, i, :]
     AX = jnp.einsum("qmd,bid->biqm", A, X_nodes.astype(dtype))  # (bx, s_nodes, q, m)
     AY = jnp.einsum("qmd,bjd->bjqm", A, Y_nodes.astype(dtype))  # (by, t_nodes, q, m)
-
-    # Flatten (node, component) axes so the static kernel sees (batch, length, dim)
-    AX_flat = AX.reshape(bx, s_nodes * q, m)   # (bx, s_nodes*q, m)
-    AY_flat = AY.reshape(by, t_nodes * q, m)   # (by, t_nodes*q, m)
+    AX_flat = AX.reshape(bx, s_nodes * q, m)
+    AY_flat = AY.reshape(by, t_nodes * q, m)
 
     if pairwise:
-        # K: (bx, by, s_nodes*q, t_nodes*q)
-        K = static_kernel.Gram_matrix(AX_flat, AY_flat)
-        K = K.reshape(bx, by, s_nodes, q, t_nodes, q)
-        K = jnp.transpose(K, (0, 1, 2, 4, 3, 5))  # (bx, by, s_nodes, t_nodes, q, q)
-        # Discrete mixed derivative: G[bx, by, i, j, q, p] for i<s_intervals, j<t_intervals
-        G = (K[:, :, 1:, 1:, :, :]
-             - K[:, :, :-1, 1:, :, :]
-             - K[:, :, 1:, :-1, :, :]
-             + K[:, :, :-1, :-1, :, :])  # (bx, by, s_intervals, t_intervals, q, q)
-        # Contract with b: gamma[R, S] = sum_{q,p} b[q,R] * G[q,p] * b[p,S]
-        gamma_cell = jnp.einsum("qR,bcijqp,pS->bcijRS", b, G, b)
-        # (bx, by, s_intervals, t_intervals, R, R)
-        # Zero-pad to (bx, by, s_nodes, t_nodes, R, R)
-        gamma_padded = jnp.pad(gamma_cell, ((0, 0), (0, 0), (0, 1), (0, 1), (0, 0), (0, 0)))
-        gamma = gamma_padded.reshape(bx * by, s_nodes, t_nodes, R, R)
-        return gamma, (bx, by)
+        batch_shape = (bx, by)
+        # Gram_matrix → (bx, by, s_nodes*q, t_nodes*q); merge outer batch dims
+        K = static_kernel.Gram_matrix(AX_flat, AY_flat).reshape(bx * by, s_nodes * q, t_nodes * q)
     else:
         if bx != by:
             raise ValueError(
                 f"Batchwise evaluation requires matching batch sizes; got {bx} and {by}."
             )
-        batch = bx
-        # K: (batch, s_nodes*q, t_nodes*q)
-        K = static_kernel.batch_kernel(AX_flat, AY_flat)
-        K = K.reshape(batch, s_nodes, q, t_nodes, q)
-        K = jnp.transpose(K, (0, 1, 3, 2, 4))  # (batch, s_nodes, t_nodes, q, q)
-        # Discrete mixed derivative
-        G = (K[:, 1:, 1:, :, :]
-             - K[:, :-1, 1:, :, :]
-             - K[:, 1:, :-1, :, :]
-             + K[:, :-1, :-1, :, :])   # (batch, s_intervals, t_intervals, q, q)
-        gamma_cell = jnp.einsum("qR,bijqp,pS->bijRS", b, G, b)
-        # (batch, s_intervals, t_intervals, R, R)
-        # Zero-pad to (batch, s_nodes, t_nodes, R, R)
-        gamma_padded = jnp.pad(gamma_cell, ((0, 0), (0, 1), (0, 1), (0, 0), (0, 0)))
-        return gamma_padded, (batch,)
+        batch_shape = (bx,)
+        K = static_kernel.batch_kernel(AX_flat, AY_flat)  # (bx, s_nodes*q, t_nodes*q)
+
+    # Reshape, transpose q-axes adjacent, apply discrete mixed derivative, contract with b
+    K = K.reshape(bx * by if pairwise else bx, s_nodes, q, t_nodes, q)
+    K = jnp.transpose(K, (0, 1, 3, 2, 4))             # (..., s_nodes, t_nodes, q, q)
+    G = K[:, 1:, 1:] - K[:, :-1, 1:] - K[:, 1:, :-1] + K[:, :-1, :-1]  # (..., s_iv, t_iv, q, q)
+    gamma_cell = jnp.einsum("qR,bijqp,pS->bijRS", b, G, b)
+    gamma_padded = jnp.pad(gamma_cell, ((0, 0), (0, 1), (0, 1), (0, 0), (0, 0)))
+    return gamma_padded, batch_shape
 
 
-__all__ = ["fssk_sigkernel", "FSSKSigKernel", "CellData", "RowState", "WaveState",
-           "_to_nodes", "_build_gamma_grid_static"]
+__all__ = ["fssk_sigkernel", "FSSKSigKernel", "CellData", "RowState", "WaveState"]

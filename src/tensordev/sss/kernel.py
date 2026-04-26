@@ -1,6 +1,6 @@
 """Finite-state-space Volterra kernels and coefficient builders.
 
-This module contains :class:`FSSKKernel`, the public kernel object for the
+This module contains :class:`FSSK`, the public kernel object for the
 finite-state-space family, together with the shared coefficient assembly
 routine used by both dense and Jordan state-space realizations.
 """
@@ -14,19 +14,18 @@ from typing import Optional
 import jax
 import jax.numpy as jnp
 
-from tensordev.volterra.combinatorics import build_multiindex_layout, num_multiindices_leq
-from tensordev.volterra.fssk.coeffs import FSSKCoefficients
-from tensordev.volterra.fssk.lambdas import DenseLambda, JordanLambda, Lambda
-
+from tensordev.util.combinatorics import build_multiindex_layout, num_multiindices_leq
+from tensordev.sss.coeffs import FSSKCoefficients
+from tensordev.sss.lambdas import DenseLambda, JordanLambda, Lambda
 
 Array = jax.Array
 
 
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True, slots=True)
-class FSSKKernel:
+class FSSK:
     r"""
-    Finite-state-space Volterra kernel.
+    Finite-state-space Volterra kernel data.
 
     This class represents kernels of the form
 
@@ -45,7 +44,7 @@ class FSSKKernel:
     Lambda: Lambda
     A: Array
     b: Array
-    quad_order: int = field(default=16, metadata={"static": True})
+    quad_order: int = field(default=32, metadata={"static": True})
 
     def __post_init__(self) -> None:
         """Validate and normalize the kernel arrays.
@@ -86,13 +85,13 @@ class FSSKKernel:
 
     @classmethod
     def from_matrix(
-        cls,
-        *,
-        Lambda: Array,
-        A: Array,
-        b: Array,
-        quad_order: int = 16,
-    ) -> "FSSKKernel":
+            cls,
+            *,
+            Lambda: Array,
+            A: Array,
+            b: Array,
+            quad_order: int = 32,
+    ) -> "FSSK":
         r"""Construct a kernel from a dense matrix realization.
 
         This constructor uses the finite-state-space representation
@@ -122,31 +121,31 @@ class FSSKKernel:
             Kernel matrices with shape ``(q, m, d)``.
         b : Array
             State vectors with shape ``(q, R)``.
-        quad_order : int, default=16
+        quad_order : int, default=32
             Number of contour quadrature nodes used by :meth:`coef`.
 
         Returns
         -------
-        FSSKKernel
+        FSSK
             Kernel using a :class:`DenseLambda` realization.
         """
         return cls(Lambda=DenseLambda(Lambda), A=A, b=b, quad_order=quad_order)
 
     @classmethod
     def from_prony(
-        cls,
-        *,
-        A: Array,
-        real_rates: Array = (),
-        real_sizes: Array = (),
-        osc_decays: Array = (),
-        osc_freqs: Array = (),
-        osc_sizes: Array = (),
-        alpha: Optional[Array] = None,
-        beta: Optional[Array] = None,
-        delta: Optional[Array] = None,
-        quad_order: int = 16,
-    ) -> "FSSKKernel":
+            cls,
+            *,
+            A: Array,
+            real_rates: Array = (),
+            real_sizes: Array = (),
+            osc_decays: Array = (),
+            osc_freqs: Array = (),
+            osc_sizes: Array = (),
+            alpha: Optional[Array] = None,
+            beta: Optional[Array] = None,
+            delta: Optional[Array] = None,
+            quad_order: int = 32,
+    ) -> "FSSK":
         r"""Construct a kernel from Jordan data and Prony coefficients.
 
         This constructor first builds a :class:`JordanLambda` from the
@@ -238,12 +237,12 @@ class FSSKKernel:
             - ``beta`` and ``delta`` must both have shape
               ``(q, sum(osc_sizes))`` when oscillatory blocks are present.
 
-        quad_order : int, default=16
+        quad_order : int, default=32
             Number of contour quadrature nodes used by :meth:`coef`.
 
         Returns
         -------
-        FSSKKernel
+        FSSK
             Kernel using a :class:`JordanLambda` realization with ``b``
             constructed from the supplied Prony coefficients.
         """
@@ -259,17 +258,17 @@ class FSSKKernel:
 
     @classmethod
     def from_jordan(
-        cls,
-        *,
-        A: Array,
-        b: Array,
-        real_rates: Array = (),
-        real_sizes: Array = (),
-        osc_decays: Array = (),
-        osc_freqs: Array = (),
-        osc_sizes: Array = (),
-        quad_order: int = 16,
-    ) -> "FSSKKernel":
+            cls,
+            *,
+            A: Array,
+            b: Array,
+            real_rates: Array = (),
+            real_sizes: Array = (),
+            osc_decays: Array = (),
+            osc_freqs: Array = (),
+            osc_sizes: Array = (),
+            quad_order: int = 32,
+    ) -> "FSSK":
         r"""Construct a kernel from Jordan block data and explicit state vectors.
 
         This constructor builds a :class:`JordanLambda` from the prescribed
@@ -305,12 +304,12 @@ class FSSKKernel:
         osc_decays, osc_freqs, osc_sizes : array-like
             Decays, frequencies and Jordan block sizes for oscillatory pole
             pairs.
-        quad_order : int, default=16
+        quad_order : int, default=32
             Number of contour quadrature nodes used by :meth:`coef`.
 
         Returns
         -------
-        FSSKKernel
+        FSSK
             Kernel using a :class:`JordanLambda` realization with explicitly
             provided Jordan-basis vectors ``b``.
         """
@@ -344,11 +343,11 @@ class FSSKKernel:
         return self.Lambda.state_dim
 
     def coef(
-        self,
-        dt: Array,
-        *,
-        trunc: int,
-        dtype: Optional[jnp.dtype] = None,
+            self,
+            dt: Array,
+            *,
+            trunc: int,
+            dtype: Optional[jnp.dtype] = None,
     ) -> FSSKCoefficients:
         """Build packed FSSK coefficients for a batch of time increments.
 
@@ -413,14 +412,14 @@ class FSSKKernel:
 
 @partial(jax.jit, static_argnames=("trunc", "quad_order", "dtype"))
 def _eval_phi_psi(
-    Lambda: Lambda,
-    b: Array,
-    dt: Array,
-    ell: Array,
-    *,
-    trunc: int,
-    quad_order: int,
-    dtype: jnp.dtype,
+        Lambda: Lambda,
+        b: Array,
+        dt: Array,
+        ell: Array,
+        *,
+        trunc: int,
+        quad_order: int,
+        dtype: jnp.dtype,
 ) -> tuple[Array, Array, Array]:
     """
     Evaluate normalized FSSK coefficients using the Laplace quadrature scheme.
@@ -449,16 +448,17 @@ def _eval_phi_psi(
     theta = (2.0 * j - 1.0) * pi / (2.0 * m)
 
     zeta = (2.0 * m) * (
-        jnp.asarray(0.1309, dtype=real_dtype)
-        - jnp.asarray(0.1194, dtype=real_dtype) * theta * theta
-        + jnp.asarray(0.25j, dtype=complex_dtype) * theta.astype(complex_dtype)
+            jnp.asarray(0.1309, dtype=real_dtype)
+            - jnp.asarray(0.1194, dtype=real_dtype) * theta * theta
+            + jnp.asarray(0.25j, dtype=complex_dtype) * theta.astype(complex_dtype)
     )
     slope = (
-        jnp.asarray(0.2388j, dtype=complex_dtype) * theta.astype(complex_dtype)
-        + jnp.asarray(0.25, dtype=complex_dtype)
+            jnp.asarray(0.2388j, dtype=complex_dtype) * theta.astype(complex_dtype)
+            + jnp.asarray(0.25, dtype=complex_dtype)
     )
-    omega = -jnp.exp(zeta.astype(complex_dtype)) * slope
-    tilde_omega = -_phi1(zeta.astype(complex_dtype)) * slope
+    omega = jnp.exp(zeta.astype(complex_dtype)) * slope
+    zeta_c = zeta.astype(complex_dtype)
+    tilde_omega = (jnp.exp(zeta_c) / zeta_c) * slope
 
     b_c = b.astype(complex_dtype)
     ones = jnp.ones((R, 1), dtype=complex_dtype)
@@ -483,16 +483,24 @@ def _eval_phi_psi(
         axis=-1,
     )  # (M, m, B)
 
-    psi = jnp.sum(
+    phi1_dt = Lambda.phi1(dt_flat, dtype=real_dtype)  # (B, R, R)
+    psi_empty = jnp.sum(phi1_dt, axis=-2)  # (B, R)
+
+    psi_tail = jnp.sum(
         2.0
         * jnp.real(
             tilde_omega[None, :, None, None]
-            * gamma[:, :, :, None]
+            * gamma[1:, :, :, None]
             * r[None, :, :, :]
         ),
         axis=1,
-    )  # (M, B, R)
-    psi = jnp.transpose(psi, (1, 0, 2))  # (B, M, R)
+    )  # (M - 1, B, R)
+    psi_tail = jnp.transpose(psi_tail, (1, 0, 2))  # (B, M - 1, R)
+
+    psi = jnp.concatenate(
+        [psi_empty[:, None, :], psi_tail],
+        axis=1,
+    )  # (B, M, R)
 
     outer = u[:, :, :, :, None] * r[:, :, None, None, :]  # (m, B, q, R, R)
     phi = jnp.sum(
@@ -513,15 +521,6 @@ def _eval_phi_psi(
     return E.astype(real_dtype), psi.astype(real_dtype), phi.astype(real_dtype)
 
 
-def _phi1(z: Array) -> Array:
-    eps = jnp.finfo(z.real.dtype).eps
-    small = jnp.abs(z) < jnp.sqrt(eps)
-    safe = jnp.where(small, jnp.ones_like(z), z)
-    out = (jnp.exp(z) - 1.0) / safe
-    series = 1.0 + z / 2.0 + z * z / 6.0
-    return jnp.where(small, series, out)
-
-
 def _complex_dtype_for(dtype: jnp.dtype) -> jnp.dtype:
     dtype = jnp.dtype(dtype)
     if dtype == jnp.float32:
@@ -529,4 +528,4 @@ def _complex_dtype_for(dtype: jnp.dtype) -> jnp.dtype:
     return jnp.dtype(jnp.complex128)
 
 
-__all__ = ["FSSKKernel"]
+__all__ = ["FSSK"]

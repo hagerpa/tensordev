@@ -5,11 +5,11 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 from tensordev.kernel.fssk import FSSKSigKernel, fssk_sigkernel
-from tensordev.volterra.fssk import FSSKKernel
+from tensordev.sss import FSSK
 
 
-def _make_scalar_identity_kernel(dim: int) -> FSSKKernel:
-    return FSSKKernel.from_matrix(
+def _make_scalar_identity_kernel(dim: int) -> FSSK:
+    return FSSK.from_matrix(
         Lambda=jnp.asarray([[0.0]]),
         A=jnp.eye(dim)[None, :, :],
         b=jnp.asarray([[1.0]]),

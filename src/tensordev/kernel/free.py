@@ -14,6 +14,7 @@ from tensordev import Jax
 from tensordev.core.universal import DenseElemFirstOn
 from tensordev.kernel.base_kernel import BaseKernel
 from tensordev.kernel.parallel import pmap_batch
+from tensordev.kernel.static_kernels import LinearKernel, StaticKernel
 from tensordev.kernel.util import DyadicOrder, normalize_dyadic_order
 
 JaxCore = Jax()
@@ -32,7 +33,7 @@ class FreeCellData:
 
     Bundles the three-corner stencil (nw, n, w) together with the driving
     increments so that the cell step function receives a single structured
-    input.  This is the free-kernel analogue of ``fssk.CellData``.
+    input.  This is the free-kernel analogue of ``sss.CellData``.
     """
 
     # driving increments
@@ -43,6 +44,11 @@ class FreeCellData:
     u_nw: Array   # (i-1, j-1)
     u_n: Array    # (i-1, j)
     u_w: Array    # (i, j-1)
+
+    # precomputed static-kernel mixed difference G for cell (i,j)
+    # k(x_i,y_j) - k(x_{i-1},y_j) - k(x_i,y_{j-1}) + k(x_{i-1},y_{j-1})
+    # shape: batch; used only in the M==N==1 fast path; 0.0 otherwise
+    gamma_nw: Array
 
     # left-adjoint (f) at three corners — n levels each
     f_nw: tuple
@@ -58,7 +64,7 @@ class FreeCellData:
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class FreeRowState:
-    """Full row of the 2-D grid — the free-kernel analogue of ``fssk.RowState``.
+    """Full row of the 2-D grid — the free-kernel analogue of ``sss.RowState``.
 
     Fields
     ------
@@ -74,7 +80,7 @@ class FreeRowState:
     f: tuple
     g: tuple
 
-    # -- assembly helpers (parallel to fssk.RowState) ----------------------
+    # -- assembly helpers (parallel to sss.RowState) ----------------------
 
     @classmethod
     def from_scan_hist(cls, *, west_u, west_f, west_g, hist):
@@ -154,7 +160,8 @@ def free_kernel(
         dyadic_order: DyadicOrder = 0,
         core=None,
         increment_in: bool = False,
-        num_devices: int = 1):
+        num_devices: int = 1,
+        static_kernel: StaticKernel = LinearKernel(scale=1.0)):
     """
     Compute the truncated kernel of free developments.
 
@@ -215,6 +222,20 @@ def free_kernel(
 
         See :mod:`tensordev.kernel.parallel` for details.
 
+    static_kernel : StaticKernel, default=LinearKernel(scale=1.0)
+        Static (pointwise) kernel used to compute the driving term ``G_ij`` in
+        the ``M == N == 1`` fast path via the discrete mixed-difference formula::
+
+            G[i,j] = k(x_{i+1}, y_{j+1}) - k(x_i, y_{j+1})
+                   - k(x_{i+1}, y_j)   + k(x_i, y_j)
+
+        where ``x_i`` are the cumulative-sum node values of the level-1
+        increments.  The default ``LinearKernel(scale=1.0)`` reproduces the
+        original increment-based inner-product formula ``G[i,j] = ⟨dx_i, dy_j⟩``
+        exactly, so existing behaviour is unchanged.
+
+        Has no effect when ``M > 1`` or ``N > 1``.
+
     Returns
     -------
     Depending on ``evaluate`` and ``return_fg``, returns either ``w`` or
@@ -229,10 +250,12 @@ def free_kernel(
     def _solve(dx_, dy_):
         if backend == "scan":
             return _solve_scan(dx_, dy_, evaluate=evaluate, return_fg=return_fg,
-                               dyadic_order=dyadic_order, core=core)
+                               dyadic_order=dyadic_order, core=core,
+                               static_kernel=static_kernel)
         if backend == "wavefront":
             return _solve_wavefront(dx_, dy_, evaluate=evaluate, return_fg=return_fg,
-                                    dyadic_order=dyadic_order, core=core)
+                                    dyadic_order=dyadic_order, core=core,
+                                    static_kernel=static_kernel)
         raise ValueError(f"Unknown backend={backend!r}.")
 
     if num_devices > 1:
@@ -506,7 +529,7 @@ def _swap_scan_output(
 def _free_cell_step(cell: FreeCellData, *, core, M, N, m, n, P, P_f, P_g):
     """Compute the SE corner ``(u_se, f_se, g_se)`` from a three-corner neighbourhood.
 
-    This is the free-kernel analogue of ``fssk._heun_cell_step``.  It
+    This is the free-kernel analogue of ``sss._heun_cell_step``.  It
     implements a Heun-like predictor–corrector scheme with a special fast
     path when ``M == N == 1`` (scalar-only, no tensor adjoint states).
 
@@ -551,17 +574,17 @@ def _free_cell_step(cell: FreeCellData, *, core, M, N, m, n, P, P_f, P_g):
     f_nw, f_n, f_w = cell.f_nw, cell.f_n, cell.f_w
     g_nw, g_n, g_w = cell.g_nw, cell.g_n, cell.g_w
 
-    G_ij = t_inner(dx_i[:P], dy_j[:P])
-
     # --- M == 1, N == 1 fast path (scalar-only, no adjoint states) --------
     if M == 1 and N == 1:
         kap = 1.0 / 12.0
+        G_ij = cell.gamma_nw
         G2_ij = G_ij * G_ij
         u_se = (u_n + u_w) * (1.0 + 0.5 * G_ij + kap * G2_ij) \
                - u_nw * (1.0 - kap * G2_ij)
         return u_se, f_n, g_w          # f, g are empty tuples — pass through
 
     # --- general Heun predictor–corrector ---------------------------------
+    G_ij = t_inner(dx_i[:P], dy_j[:P])
     dx_adj_dy = adj_right(dx_i, dy_j, trunc=n)
     dy_adj_dx = adj_right(dy_j, dx_i, trunc=m)
 
@@ -618,6 +641,50 @@ def _free_cell_step(cell: FreeCellData, *, core, M, N, m, n, P, P_f, P_g):
     return u_se, f_se, g_se
 
 
+def _precompute_G_coarse(dx, dy, *, static_kernel, dtype):
+    """Precompute the coarse-grid discrete mixed-difference kernel matrix.
+
+    For each coarse cell ``(i, j)`` computes::
+
+        G[i, j] = k(x_{i+1}, y_{j+1}) - k(x_i, y_{j+1})
+                - k(x_{i+1}, y_j)   + k(x_i, y_j)
+
+    where ``x_i`` / ``y_j`` are the cumulative-sum (node) values of the
+    level-1 increments ``dx[0]`` / ``dy[0]``, starting from a zero state.
+
+    Works for both batchwise and pairwise layouts because ``batch_kernel``
+    broadcasts over any leading axes via JAX's numpy semantics.
+
+    Parameters
+    ----------
+    dx, dy :
+        Coarse-grid increment tuples.  Only ``dx[0]`` and ``dy[0]`` are used.
+    static_kernel : StaticKernel
+    dtype : jnp dtype
+
+    Returns
+    -------
+    G : ``batch + (S_coarse, T_coarse)``
+    """
+    d_x = int(dx[0].shape[-1])
+    d_y = int(dy[0].shape[-1])
+    batch_x = dx[0].shape[:-2]
+    batch_y = dy[0].shape[:-2]
+
+    x_nodes = jnp.concatenate([
+        jnp.zeros(batch_x + (1, d_x), dtype=dtype),
+        jnp.cumsum(dx[0].astype(dtype), axis=-2),
+    ], axis=-2)
+
+    y_nodes = jnp.concatenate([
+        jnp.zeros(batch_y + (1, d_y), dtype=dtype),
+        jnp.cumsum(dy[0].astype(dtype), axis=-2),
+    ], axis=-2)
+
+    K = static_kernel.batch_kernel(x_nodes, y_nodes)
+    return K[..., 1:, 1:] - K[..., :-1, 1:] - K[..., 1:, :-1] + K[..., :-1, :-1]
+
+
 def _solve_scan(
         dx: DenseElemFirstOn,
         dy: DenseElemFirstOn,
@@ -626,6 +693,7 @@ def _solve_scan(
         return_fg: bool,
         dyadic_order: tuple[int, int],
         core,
+        static_kernel: StaticKernel,
 ):
     """
     Solve the truncated free-kernel system by a rowwise scan, using symmetry to
@@ -654,6 +722,9 @@ def _solve_scan(
     m, n = M - 1, N - 1
     P_f, P_g = min(M, n), min(N, m)
 
+    dtype = jnp.result_type(dx[0], dy[0])
+    batch_shape = jnp.broadcast_shapes(dx[0].shape[:-2], dy[0].shape[:-2])
+
     (
         initial_row,
         g_w_0,
@@ -664,6 +735,15 @@ def _solve_scan(
         S_coarse,
         T_coarse,
     ) = _build_scan_boundaries(dx, dy, dyadic_order=dyadic_order, core=core)
+
+    # Precompute the coarse G grid for the M==N==1 fast path.
+    if M == 1 and N == 1:
+        G_coarse = _precompute_G_coarse(dx, dy, static_kernel=static_kernel, dtype=dtype)
+        r_scale = float(r_x * r_y)
+        G_coarse_scaled = G_coarse / r_scale
+        G_coarse_idx = jnp.moveaxis(G_coarse_scaled, [-2, -1], [0, 1])
+        G_steps = jnp.moveaxis(G_coarse_scaled, -2, 0)
+    zero_gamma = jnp.zeros(batch_shape, dtype=dtype)
 
     def _idx_coarse_x(steps_coarse, fine_idx):
         """Index coarse driving data at fine-grid position ``fine_idx`` (x-axis)."""
@@ -691,6 +771,10 @@ def _solve_scan(
         ix, u_w0, f_w0 = data
         dx_i = _idx_coarse_x(dx_steps_coarse, ix)
 
+        if M == 1 and N == 1:
+            ci_x = jnp.minimum(ix >> dyadic_order_x, S_coarse - 1)
+            G_row = G_steps[ci_x]
+
         # Extract north (j+1) and northwest (j) columns for inner scan
         u_n = jnp.moveaxis(north.u[..., 1:], -1, 0)
         u_nw = jnp.moveaxis(north.u[..., :-1], -1, 0)
@@ -702,11 +786,18 @@ def _solve_scan(
             iy, u_nj, u_nwj, f_nj, f_nwj, g_nj, g_nwj = col_data
             dy_j = _idx_coarse_y(dy_steps_coarse, iy)
 
+            if M == 1 and N == 1:
+                ci_y = jnp.minimum(iy >> dyadic_order_y, T_coarse - 1)
+                gamma_nw = G_row[..., ci_y]
+            else:
+                gamma_nw = zero_gamma
+
             cell = FreeCellData(
                 dx_i=dx_i, dy_j=dy_j,
                 u_nw=u_nwj, u_n=u_nj, u_w=u_w,
                 f_nw=f_nwj, f_n=f_nj, f_w=f_w,
                 g_nw=g_nwj, g_n=g_nj, g_w=g_w,
+                gamma_nw=gamma_nw,
             )
             u_se, f_se, g_se = _free_cell_step(
                 cell, core=core, M=M, N=N, m=m, n=n, P=P, P_f=P_f, P_g=P_g,
@@ -789,6 +880,7 @@ def _solve_wavefront(
         return_fg: bool,
         dyadic_order: tuple[int, int],
         core,
+        static_kernel: StaticKernel,
 ):
     """Anti-diagonal wavefront solver for the free-kernel PDE.
 
@@ -816,6 +908,13 @@ def _solve_wavefront(
     batch_shape = jnp.broadcast_shapes(dx[0].shape[:-2], dy[0].shape[:-2])
     dtype = jnp.result_type(dx[0], dy[0])
     terminal_only = evaluate != "grid"
+
+    # Precompute the coarse G grid for the M==N==1 fast path.
+    if M == 1 and N == 1:
+        G_coarse = _precompute_G_coarse(dx, dy, static_kernel=static_kernel, dtype=dtype)
+        r_scale = float(r_x * r_y)
+        G_coarse_idx = jnp.moveaxis(G_coarse / r_scale, [-2, -1], [0, 1])
+    zero_gamma = jnp.zeros(batch_shape, dtype=dtype)
 
     # Scale coarse increments and move interval axis to position 0
     dx_sc = tuple(level / r_x for level in dx) if dyadic_order_x > 0 else dx
@@ -971,12 +1070,20 @@ def _solve_wavefront(
         dx_v = _idx_x(im1)
         dy_v = _idx_y(jm1)
 
+        if M == 1 and N == 1:
+            ci_x = jnp.minimum(im1 >> dyadic_order_x, S_coarse - 1)
+            ci_y = jnp.minimum(jm1 >> dyadic_order_y, T_coarse - 1)
+            gamma_nw_v = G_coarse_idx[ci_x, ci_y]
+        else:
+            gamma_nw_v = jnp.zeros((max_int_w,) + batch_shape, dtype=dtype)
+
         # Parallel cell step over the anti-diagonal
         cells = FreeCellData(
             dx_i=dx_v, dy_j=dy_v,
             u_nw=u_nw_v, u_n=u_n_v, u_w=u_w_v,
             f_nw=f_nw_v, f_n=f_n_v, f_w=f_w_v,
             g_nw=g_nw_v, g_n=g_n_v, g_w=g_w_v,
+            gamma_nw=gamma_nw_v,
         )
         u_new, f_new, g_new = jax.vmap(
             lambda c: _free_cell_step(
@@ -1103,6 +1210,7 @@ class FreeKernel(BaseKernel):
     increment_in: bool = False
     core: object = None
     num_devices: int = 1
+    static_kernel: StaticKernel = LinearKernel(scale=1.0)
 
     def __call__(
             self,
@@ -1125,6 +1233,7 @@ class FreeKernel(BaseKernel):
             core=self.core,
             increment_in=self.increment_in,
             num_devices=self.num_devices,
+            static_kernel=self.static_kernel,
         )
 
     def _as_sample_batch(self, X):

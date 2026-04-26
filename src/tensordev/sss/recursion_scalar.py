@@ -6,11 +6,11 @@ import jax
 import jax.numpy as jnp
 
 from tensordev.core.jax import Jax
-from tensordev.volterra.fssk.coeffs import FSSKCoefficients
+from tensordev.core.universal import DenseElem, DenseElemFirstOn
+from tensordev.sss.coeffs import FSSKCoefficients
 
 
 Array = jax.Array
-DenseElem = tuple[Array, ...]
 
 
 @partial(jax.jit, static_argnames=("core",))
@@ -18,7 +18,7 @@ def init_state(
         coef: FSSKCoefficients,
         *,
         core: Jax,
-) -> DenseElem:
+) -> DenseElemFirstOn:
     """
     Initialize the zero scalar FSSK state for a single-step coefficient object.
 
@@ -43,7 +43,7 @@ def init_state(
 
     Returns
     -------
-    DenseElem
+    DenseElemFirstOn
         Zero state as a matrix-valued dense element.
     """
     del core
@@ -51,10 +51,11 @@ def init_state(
     if coef.q != 1:
         raise ValueError(f"recursion_scalar requires coef.q == 1, got {coef.q}.")
 
+    # First-on format: trunc levels, index r = degree r+1 (degree-0 is always zero).
     batch_shape = coef.E.shape[:-2]
     return tuple(
-        jnp.zeros(batch_shape + (1, 1, coef.R, coef.m ** r), dtype=coef.E.dtype)
-        for r in range(coef.trunc + 1)
+        jnp.zeros(batch_shape + (1, 1, coef.R, coef.m ** (r + 1)), dtype=coef.E.dtype)
+        for r in range(coef.trunc)
     )
 
 
@@ -133,17 +134,15 @@ def eval_fg(
     psi = coef.psi
     phi = coef.phi[..., 0, :, :, :] if N > 1 else None
 
-    y_elem: DenseElem = (
-        jnp.zeros(y.shape[:-1] + (1,), dtype=y.dtype),
-        y,
-    )
-
     f: DenseElem = (psi[..., N - 1, :][..., None, :, None],)
     for n in range(N - 2, -1, -1):
-        f = core.tensor_summation(
-            (psi[..., n, :][..., None, :, None],),
-            core.tensor_product(f, y_elem, trunc=N - 1),
+        f = (
+            psi[..., n, :][..., None, :, None],
+        ) + core.tensor_product(
+            f,
+            (y[..., None, None, :],),
             trunc=N - 1,
+            b_first_on=True,
         )
 
     if N == 1:
@@ -156,10 +155,13 @@ def eval_fg(
     else:
         G: DenseElem = (phi[..., N - 2, :, :][..., None, :, :, None],)
         for n in range(N - 3, -1, -1):
-            G = core.tensor_summation(
-                (phi[..., n, :, :][..., None, :, :, None],),
-                core.tensor_product(G, y_elem, trunc=N - 1),
+            G = (
+                phi[..., n, :, :][..., None, :, :, None],
+            ) + core.tensor_product(
+                G,
+                (y[..., None, None, None, :],),
                 trunc=N - 1,
+                b_first_on=True,
             )
 
     return f, G
@@ -167,12 +169,12 @@ def eval_fg(
 
 @partial(jax.jit, static_argnames=("core",))
 def update_state(
-        Z: DenseElem,
+        Z: DenseElemFirstOn,
         y: Array,
         coef: FSSKCoefficients,
         *,
         core: Jax,
-) -> DenseElem:
+) -> DenseElemFirstOn:
     """
     Perform one scalar FSSK state update.
 
@@ -180,21 +182,19 @@ def update_state(
     ``coef.psi`` and ``coef.phi`` carry only ordinary leading batch axes.
     Those batch axes may broadcast against the batch axes of ``y`` and ``Z``.
 
-    The state is kept in the same representation as in the non-scalar module,
-    namely with an explicit singleton family axis. If ``Z[r]`` has shape
+    The state is stored in **first-on format**: the degree-0 level is always
+    identically zero and is not stored.  ``Z[r]`` carries degree ``r+1``, so
+    each homogeneous level has shape
 
-        ``batch + (1, 1, R, m**r)``,
+        ``batch + (1, 1, R, m**(r+1))``,
 
-    then the updated state has the same shape.
+    for ``r = 0, ..., trunc - 1``.
 
     Parameters
     ----------
-    Z : DenseElem
-        Current state with homogeneous levels shaped
-
-            ``batch + (1, 1, R, m**r)``,
-
-        for ``r = 0, ..., trunc``.
+    Z : DenseElemFirstOn
+        First-on state with ``trunc`` homogeneous levels:
+        level ``r`` has shape ``batch + (1, 1, R, m**(r+1))``.
     y : Array
         Projected path increment with shape ``batch + (m,)``.
     coef : FSSKCoefficients
@@ -205,14 +205,14 @@ def update_state(
 
     Returns
     -------
-    DenseElem
+    DenseElemFirstOn
         Updated state in the same representation as ``Z``.
     """
     if coef.q != 1:
         raise ValueError(f"recursion_scalar requires coef.q == 1, got {coef.q}.")
-    if len(Z) != coef.trunc + 1:
+    if len(Z) != coef.trunc:
         raise ValueError(
-            f"Z must have {coef.trunc + 1} homogeneous levels, got {len(Z)}."
+            f"Z must have {coef.trunc} homogeneous levels (first-on), got {len(Z)}."
         )
     if y.shape[-1] != coef.m:
         raise ValueError(
@@ -221,14 +221,20 @@ def update_state(
 
     f, G = eval_fg(y, coef, core=core)
 
+    # Lift first-on Z to dense by prepending the degree-0 zero level.
+    # Degree-0 is always zero, so this adds no information and costs no compute
+    # beyond one zero allocation that XLA can eliminate.
+    zero_level = jnp.zeros(Z[0].shape[:-1] + (1,), dtype=Z[0].dtype)
+    Z_dense = (zero_level,) + tuple(Z)
+
     ZE = core.tensor_matrix_product_right(
-        Z,
-        coef.E,
+        Z_dense,
+        coef.E[..., None, :, :],
         trunc=coef.trunc,
     )
 
     ZG = core.tensor_matrix_product(
-        Z,
+        Z_dense,
         G,
         trunc=coef.trunc - 1,
     )
@@ -239,20 +245,19 @@ def update_state(
         trunc=coef.trunc - 1,
     )
 
-    y_elem: DenseElem = (
-        jnp.zeros(y.shape[:-1] + (1,), dtype=y.dtype),
-        y,
-    )
-    By = tuple(
+    By = (jnp.zeros_like(Z_dense[0]),) + tuple(
         jnp.expand_dims(level, axis=-3)
-        for level in core.tensor_product(B, y_elem, trunc=coef.trunc)
+        for level in core.tensor_product(
+            B,
+            (y[..., None, None, :],),
+            trunc=coef.trunc,
+            b_first_on=True,
+        )
     )
 
-    return core.tensor_summation(
-        ZE,
-        By,
-        trunc=coef.trunc,
-    )
+    result_dense = core.tensor_summation(ZE, By, trunc=coef.trunc)
+    # Return first-on: the degree-0 level is zero by construction, drop it.
+    return result_dense[1:]
 
 
 __all__ = [

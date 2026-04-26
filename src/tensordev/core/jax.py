@@ -1,4 +1,5 @@
 # ---- JAX backend ----
+#TODO: abstract axes!
 from __future__ import annotations
 
 import types
@@ -10,6 +11,7 @@ from jax import numpy as jnp
 
 from tensordev.core.utils.annotations import iter_class_jittables
 from .einsum import Einsum
+from .shuffle import ShuffleCore
 from .universal import *
 
 JAX_JIT_PARAMETERS = {
@@ -22,6 +24,9 @@ class Jax(Einsum[jnp.ndarray]):
 
     def __init__(self):
         super().__init__(jnp)
+
+        # Cache for JAX-converted shuffle operators: (d, i, j) -> (meta, jax_arrays)
+        self._jax_operators_cache = {}
 
         for name, fn, kw in iter_class_jittables(type(self)):
             jax_kw = {k: v for k, v in kw.items() if k in JAX_JIT_PARAMETERS}
@@ -89,10 +94,76 @@ class Jax(Einsum[jnp.ndarray]):
 
         return scan_fn
 
-    @partial(jax.jit, static_argnums=(0,))
-    def sparse_einsum(self, Ai, Bj, operator):
-        # Unpack operator
-        _, Q = operator
+    def _get_jax_operator(self, d: int, i: int, j: int):
+        """
+        Convert numpy shuffle operator to JAX arrays, with caching.
+
+        Parameters
+        ----------
+        d : int
+            Base dimension.
+        i, j : int
+            Operator degrees.
+
+        Returns
+        -------
+        tuple
+            ``(meta, (segment_ids, rows, cols, data))`` with JAX arrays.
+
+        Notes
+        -----
+        Conversion happens once per ``(d, i, j)`` outside of JIT trace.
+        Cached JAX arrays become compile-time constants when this method is
+        called with static ``d, i, j`` from within a JIT-compiled function.
+        """
+        key = (d, i, j)
+        if key not in self._jax_operators_cache:
+            # Retrieve numpy operator from parent cache
+            np_operator = self._shuffle_cache[d].operators[(i, j)]
+            meta, (seg, rows, cols, data) = np_operator
+            # Convert to JAX arrays and cache
+            self._jax_operators_cache[key] = (
+                meta,
+                (
+                    jnp.asarray(seg),
+                    jnp.asarray(rows),
+                    jnp.asarray(cols),
+                    jnp.asarray(data),
+                ),
+            )
+        return self._jax_operators_cache[key]
+
+    @partial(jax.jit, static_argnums=(0, 3, 4, 5))  # self, d, i, j are static
+    def sparse_einsum(self, Ai, Bj, d: int, i: int, j: int):
+        """
+        JAX-optimized sparse bilinear product.
+
+        Parameters
+        ----------
+        Ai : jnp.ndarray
+            Left factor with shape ``(batch, d**i)``.
+        Bj : jnp.ndarray
+            Right factor with shape ``(batch, d**j)``.
+        d : int (static)
+            Base dimension of the tensor algebra.
+        i : int (static)
+            Degree of ``Ai`` (must satisfy ``i >= j``).
+        j : int (static)
+            Degree of ``Bj``.
+
+        Returns
+        -------
+        jnp.ndarray
+            Result with shape ``(batch, d**(i+j))``.
+
+        Notes
+        -----
+        The operator arrays are retrieved via ``_get_jax_operator`` at trace time.
+        Since ``d, i, j`` are static arguments, the operator arrays become
+        compile-time constants in the JIT-compiled function.
+        """
+        # Retrieve JAX operator (happens once at trace time with static d, i, j)
+        _, Q = self._get_jax_operator(d, i, j)
         idx, idy, idz, data = Q
 
         def single_batch_op(Ai_s, Bj_s):
@@ -101,3 +172,36 @@ class Jax(Einsum[jnp.ndarray]):
 
         # Use vmap to handle batch dimension
         return jax.vmap(single_batch_op)(Ai, Bj)
+
+
+class JaxShuffleCore(ShuffleCore[jnp.ndarray]):
+    """
+    JAX-optimized shuffle product engine.
+
+    Operators are precomputed as numpy arrays at construction, then immediately
+    converted to JAX arrays.  All ``@dummy_jit``-decorated methods are
+    auto-compiled with ``jax.jit`` using the same pattern as ``Jax``.
+    """
+
+    def __init__(self, d: int, trunc: int) -> None:
+        super().__init__(jnp, d, trunc)
+        # Convert all precomputed numpy operators to JAX arrays once.
+        self._jax_operators: dict = {
+            (i, j): (meta, tuple(jnp.asarray(arr) for arr in Q))
+            for (i, j), (meta, Q) in self.operators.items()
+        }
+        for name, fn, kw in iter_class_jittables(type(self)):
+            jax_kw = {k: v for k, v in kw.items() if k in JAX_JIT_PARAMETERS}
+            setattr(self, name, types.MethodType(jax.jit(fn, **jax_kw), self))
+
+    @partial(jax.jit, static_argnums=(0, 3, 4))
+    def sparse_einsum(self, Ai, Bj, i: int, j: int):
+        """JAX override: vmap over batch + segment_sum for the sparse contraction."""
+        _, Q = self._jax_operators[(i, j)]
+        idx, idy, idz, data = Q
+
+        def single(Ai_s, Bj_s):
+            vals = data * Ai_s[idy] * Bj_s[idz]
+            return jax.ops.segment_sum(vals, idx, num_segments=Ai.shape[-1] * Bj.shape[-1])
+
+        return jax.vmap(single)(Ai, Bj)
