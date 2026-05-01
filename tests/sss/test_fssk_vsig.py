@@ -1,6 +1,8 @@
 """Tests for tensordev.volterra.sss.vsig."""
 from __future__ import annotations
 
+from multiprocessing.managers import State
+
 import jax
 
 jax.config.update("jax_enable_x64", True)
@@ -8,15 +10,12 @@ import jax.numpy as jnp
 import pytest
 
 from tensordev.kernel.fssk import fssk_sigkernel
-from tensordev.sss import DenseLambda, FSSK, FSSK
-from tensordev.sss import (
+from tensordev.sss import DenseLambda, FSSK, FSSK, StateSpaceSignature
+from tensordev.sss.state_update import (
     fssk_readout,
     fssk_state,
     fssk_state_from_coef,
-)
-from tensordev.sss import (
-    fssk_vsig,
-    fssk_vsig_from_state,
+    fssk_vsig
 )
 
 
@@ -68,7 +67,7 @@ def test_fssk_vsig_matches_state_readout():
 
     direct = fssk_vsig(X, kernel=ker, dt=0.1, trunc=trunc, tau_dt=lag)
     state = fssk_state(X, kernel=ker, dt=0.1, trunc=trunc)
-    via_state = fssk_vsig_from_state(state, kernel=ker, tau_dt=lag)
+    via_state = fssk_readout(state, kernel=ker, tau_dt=lag)
     readout = fssk_readout(state, kernel=ker, tau_dt=lag)
 
     for r in range(trunc + 1):
@@ -165,77 +164,15 @@ def test_fssk_class_vsig_matches_function_and_saves_state():
     ker = _make_kernel()
     X = _linear_path(S=6)
     trunc = 3
-    model = FSSK(ker, dt=0.1, trunc=trunc, save_state=True)
+    model = StateSpaceSignature(ker, trunc=trunc)
+    model = model.update_with_path(X, dt=0.1)
+    sig = model.readout(tau_dt=0.25)
 
-    sig = model.vsig(X, tau_dt=0.25)
     expected_sig = fssk_vsig(X, kernel=ker, dt=0.1, trunc=trunc, tau_dt=0.25)
     expected_state = fssk_state(X, kernel=ker, dt=0.1, trunc=trunc)
 
-    assert model.saved_state is not None
+    assert model.state is not None
     for r in range(trunc + 1):
         _allclose(sig[r], expected_sig[r])
-        _allclose(model.saved_state[r], expected_state[r])
-
-
-def test_fssk_class_continue_vsig_matches_single_run():
-    ker = _make_kernel()
-    X = _linear_path(S=8)
-    trunc = 3
-    model = FSSK(ker, dt=0.1, trunc=trunc, save_state=True)
-
-    model.vsig(X[:5])
-    continued = model.continue_vsig(X[4:])
-    full = fssk_vsig(X, kernel=ker, dt=0.1, trunc=trunc)
-
-    for r in range(trunc + 1):
-        _allclose(continued[r], full[r])
-
-
-def test_fssk_class_continue_requires_saved_state():
-    ker = _make_kernel()
-    model = FSSK(ker, dt=0.1, trunc=2)
-
-    with pytest.raises(ValueError, match="saved state"):
-        model.continue_vsig(_linear_path(S=3))
-
-
-def test_fssk_class_state_from_coef_then_readout():
-    ker = _make_kernel()
-    X = _linear_path(S=5)
-    trunc = 3
-    dt = jnp.full((5,), 0.1)
-    coef = ker.coef(dt, trunc=trunc)
-    y = _project_increments(ker, X)
-    model = FSSK(ker, save_state=True)
-
-    states = model.state_from_coef(y, coef=coef, save_state=True)
-    expected_states = fssk_state_from_coef(y, coef=coef, axis=0)
-    expected_sig = fssk_vsig(X, kernel=ker, dt=dt, trunc=trunc)
-    sig = model.readout()
-
-    for r in range(trunc + 1):
-        _allclose(states[r], expected_states[r])
-        _allclose(sig[r], expected_sig[r])
-
-
-def test_fssk_class_vsig_kernel_matches_function():
-    ker = _make_identity_kernel(dim=2)
-    X = jnp.asarray(
-        [
-            [[0.0, 0.0], [1.0, 0.0], [1.5, 0.5]],
-            [[0.0, 0.0], [0.0, 1.0], [0.5, 1.5]],
-        ]
-    )
-    Y = jnp.asarray(
-        [
-            [[0.0, 0.0], [0.5, 0.5], [1.0, 0.5]],
-            [[0.0, 0.0], [0.5, -0.5], [1.0, -1.0]],
-        ]
-    )
-    dt = jnp.asarray([0.3, 0.7])
-    model = FSSK(ker, dt=dt, trunc=2)
-
-    actual = model.vsig_kernel(X, Y, pairwise=True)
-    expected = fssk_sigkernel(X, Y, kernel=ker, dt_x=dt, dt_y=dt, pairwise=True)
-
-    _allclose(actual, expected)
+    for r in range(trunc):
+        _allclose(model.state[r], expected_state[r])

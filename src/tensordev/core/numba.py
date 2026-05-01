@@ -40,12 +40,7 @@ class Numba(Universal[np.ndarray]):
     shuffle product inner kernel.
 
     Other operations (tensor_product, tensor_exponential, …) remain as the
-    numpy implementations from ``Universal``; JIT-compiling them with numba is
-    left for future work (see TODOs below).
-
-    TODO: compile main tensor ops (product, sum, fmexp, log, …) with numba.
-    TODO: investigate whether dummy_jit can auto-generate one compiled function
-          per (trunc, input-degree) combo to eliminate Python-level dispatch.
+    numpy implementations from ``Universal``.
     """
 
     def __init__(self) -> None:
@@ -101,8 +96,8 @@ class NumbaShuffleCore(ShuffleCore[np.ndarray]):
     def sparse_einsum(self, Ai, Bj, i: int, j: int):
         _, Q = self.operators[(i, j)]
         segment_ids, rows, cols, data = Q
-        return _sparse_einsum_nb(
-            np.asarray(Ai, dtype=np.float64),
-            np.asarray(Bj, dtype=np.float64),
-            segment_ids, rows, cols, data,
-        )
+        batch = np.broadcast_shapes(Ai.shape[:-1], Bj.shape[:-1])
+        Ai_flat = np.broadcast_to(np.asarray(Ai, dtype=np.float64), batch + (Ai.shape[-1],)).reshape(-1, Ai.shape[-1])
+        Bj_flat = np.broadcast_to(np.asarray(Bj, dtype=np.float64), batch + (Bj.shape[-1],)).reshape(-1, Bj.shape[-1])
+        out_flat = _sparse_einsum_nb(Ai_flat, Bj_flat, segment_ids, rows, cols, data)
+        return out_flat.reshape(batch + (out_flat.shape[-1],))

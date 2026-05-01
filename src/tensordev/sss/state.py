@@ -25,12 +25,12 @@ class StateSpaceSignature:
     kernel:
         The underlying finite-state-space Volterra kernel.
     trunc:
-        Tensor truncation level.  Required.  Static (changes cause retracing).
+        Tensor truncation level. Required. Static (changes cause retracing).
     state:
         Hidden recursion seed in **first-on format**: ``trunc`` levels where
         level ``r`` carries degree ``r+1`` and has trailing shape
-        ``(q, 1, R, m**(r+1))``.  Type: :data:`DenseElemFirstOn`.
-        Defaults to ``None``.
+        ``(q, 1, R, m**(r+1))``. Type: :data:`DenseElemFirstOn`.
+        Defaults to ``None``, in which case a zero state is created.
     """
 
     kernel: FSSK
@@ -38,6 +38,9 @@ class StateSpaceSignature:
     state: DenseElemFirstOn | None = field(default=None)
 
     def __post_init__(self) -> None:
+        if self.trunc < 0:
+            raise ValueError(f"trunc must be non-negative, got {self.trunc}.")
+
         if self.state is None:
             # Auto-initialise zero state from kernel dimensions.
             q, m, R = self.kernel.q, self.kernel.m, self.kernel.state_dim
@@ -47,40 +50,76 @@ class StateSpaceSignature:
                 for r in range(self.trunc)
             )
             object.__setattr__(self, "state", zero_state)
-            return
-
-        # Validate an explicitly supplied state.
-        levels = tuple(self.state)
-        if not levels:
-            raise ValueError("state must not be empty.")
-        m = self.kernel.m
-        for r, z in enumerate(levels):
-            expected = m ** (r + 1)
-            if z.shape[-1] != expected:
+        else:
+            # Validate an explicitly supplied state.
+            levels = tuple(self.state)
+            if not levels and self.trunc > 0:
+                raise ValueError("state must not be empty when trunc > 0.")
+            if len(levels) != self.trunc:
                 raise ValueError(
-                    f"state[{r}] has incompatible trailing dimension: "
-                    f"expected m**(r+1) = {m}**{r+1} = {expected}, "
-                    f"got {z.shape[-1]}."
+                    f"state must have exactly trunc={self.trunc} levels; "
+                    f"got {len(levels)}."
                 )
+
+            q = self.kernel.q
+            R = self.kernel.state_dim
+            m = self.kernel.m
+            for r, z in enumerate(levels):
+                expected_tail = (q, 1, R, m ** (r + 1))
+                if z.shape[-4:] != expected_tail:
+                    raise ValueError(
+                        f"state[{r}] has incompatible trailing shape: "
+                        f"expected {expected_tail}, got {z.shape[-4:]}."
+                    )
 
     # ------------------------------------------------------------------
     # Convenience constructors — thin wrappers around FSSK factories.
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_matrix(cls, *, trunc: int, state: DenseElemFirstOn | None = None, **kwargs) -> StateSpaceSignature:
-        """Construct from a dense Lambda matrix.  Forwards all kwargs to :meth:`FSSK.from_matrix`."""
-        return cls(kernel=FSSK.from_matrix(**kwargs), trunc=trunc, state=state)
+    def from_matrix(
+            cls,
+            *,
+            trunc: int,
+            state: DenseElemFirstOn | None = None,
+            **kwargs,
+    ) -> StateSpaceSignature:
+        """Construct from a dense Lambda matrix. Forwards all kwargs to :meth:`FSSK.from_matrix`."""
+        return cls(
+            kernel=FSSK.from_matrix(**kwargs),
+            trunc=trunc,
+            state=state,
+        )
 
     @classmethod
-    def from_jordan(cls, *, trunc: int, state: DenseElemFirstOn | None = None, **kwargs) -> StateSpaceSignature:
-        """Construct from Jordan block data.  Forwards all kwargs to :meth:`FSSK.from_jordan`."""
-        return cls(kernel=FSSK.from_jordan(**kwargs), trunc=trunc, state=state)
+    def from_jordan(
+            cls,
+            *,
+            trunc: int,
+            state: DenseElemFirstOn | None = None,
+            **kwargs,
+    ) -> StateSpaceSignature:
+        """Construct from Jordan block data. Forwards all kwargs to :meth:`FSSK.from_jordan`."""
+        return cls(
+            kernel=FSSK.from_jordan(**kwargs),
+            trunc=trunc,
+            state=state,
+        )
 
     @classmethod
-    def from_prony(cls, *, trunc: int, state: DenseElemFirstOn | None = None, **kwargs) -> StateSpaceSignature:
-        """Construct from Prony coefficients.  Forwards all kwargs to :meth:`FSSK.from_prony`."""
-        return cls(kernel=FSSK.from_prony(**kwargs), trunc=trunc, state=state)
+    def from_prony(
+            cls,
+            *,
+            trunc: int,
+            state: DenseElemFirstOn | None = None,
+            **kwargs,
+    ) -> StateSpaceSignature:
+        """Construct from Prony coefficients. Forwards all kwargs to :meth:`FSSK.from_prony`."""
+        return cls(
+            kernel=FSSK.from_prony(**kwargs),
+            trunc=trunc,
+            state=state,
+        )
 
     # ------------------------------------------------------------------
     # State update
@@ -98,7 +137,7 @@ class StateSpaceSignature:
 
         Takes the current ``state`` as the seed, runs the FSSK recursion over
         all steps of ``X``, and stores the resulting terminal state in the
-        returned instance.  All other kernel parameters (``kernel``, ``trunc``)
+        returned instance. All other kernel parameters (``kernel``, ``trunc``
         are preserved unchanged.
 
         Parameters
@@ -136,7 +175,8 @@ class StateSpaceSignature:
         )
         return replace(self, state=terminal)
 
-    def update_with_increment(            self,
+    def update_with_increment(
+            self,
             dx: Array,
             *,
             dt: Array | float,
@@ -150,7 +190,7 @@ class StateSpaceSignature:
         ----------
         dx:
             A single path increment with shape ``(..., d)`` where ``d`` must
-            match ``self.kernel.path_dim``.  No step axis is expected.
+            match ``self.kernel.path_dim``. No step axis is expected.
         dt:
             Scalar step size for this increment.
 
@@ -159,7 +199,7 @@ class StateSpaceSignature:
         StateSpaceSignature
             New instance with ``state`` advanced by one step.
         """
-        # Insert a singleton step axis: (..., d) → (..., 1, d).
+        # Insert a singleton step axis: (..., d) -> (..., 1, d).
         dx = jnp.asarray(dx)
         return self.update_with_path(
             dx[..., None, :],
@@ -177,20 +217,20 @@ class StateSpaceSignature:
 
         Evaluates the linear readout
 
-            ``1 + Σ_p  Z^p · exp(-Λ · tau_dt) · b_p``
+            ``1 + sum_p Z^p · exp(-Lambda · tau_dt) · b_p``
 
         where ``Z^p`` are the stored hidden state levels.
 
         Parameters
         ----------
         tau_dt:
-            Non-negative readout lag ``τ - t``.  Scalar or arbitrary batch
+            Non-negative readout lag ``tau - t``. Scalar or arbitrary batch
             shape; broadcasts against the state leading axes.
 
         Returns
         -------
         DenseElem
-            Truncated Volterra signature.  Level ``r`` has trailing shape
+            Truncated Volterra signature. Level ``r`` has trailing shape
             ``(m**r,)``; level 0 is always the scalar unit ``1``.
         """
 
@@ -202,9 +242,8 @@ class StateSpaceSignature:
         Parameters
         ----------
         new_state:
-            Replacement state in first-on format.  When ``None`` (default)
-            the state is reset to zeros (same shape and dtype as the current
-            state).
+            Replacement state in first-on format. When ``None`` (default)
+            the state is reset to zeros via :meth:`__post_init__`.
 
         Returns
         -------
@@ -231,8 +270,8 @@ class StateSpaceSignature:
     ) -> DenseElemFirstOn:
         """Return the hidden-state trajectory over ``X``.
 
-        A thin, read-only wrapper around :func:`fssk_state`.  ``self.state``
-        is used as the recursion seed by default but is **never** modified.
+        A thin, read-only wrapper around :func:`fssk_state`. ``self.state`` is
+        used as the recursion seed by default but is **never** modified.
 
         Parameters
         ----------
@@ -243,12 +282,12 @@ class StateSpaceSignature:
         axis:
             Step axis of ``X`` (default ``-2``).
         block_size:
-            Steps per emitted state block.  ``None`` (default) emits a single
+            Steps per emitted state block. ``None`` (default) emits a single
             block covering the full sequence.
         accumulate:
             Carry hidden state across blocks (default ``True``).
         initial_state:
-            Explicit seed in first-on format.  Defaults to ``self.state``.
+            Explicit seed in first-on format. Defaults to ``self.state``.
         output_starting_state:
             Prepend the seed state to the output (default ``True``).
         increment_input:
@@ -288,12 +327,12 @@ class StateSpaceSignature:
     ) -> DenseElem:
         """Compute the Volterra signature of ``X``.
 
-        Runs the FSSK recursion and applies the linear readout.
-        ``self.state`` is **never** modified.
+        Runs the FSSK recursion and applies the linear readout. ``self.state``
+        is **never** modified.
 
         When ``block_size`` is ``None`` (default) and
         ``output_starting_state=False``, returns the signature at the single
-        terminal time.  Set ``block_size=1`` and ``output_starting_state=True``
+        terminal time. Set ``block_size=1`` and ``output_starting_state=True``
         to obtain a full per-step signature trajectory.
 
         Parameters
@@ -305,23 +344,23 @@ class StateSpaceSignature:
         axis:
             Step axis of ``X`` (default ``-2``).
         block_size:
-            Steps per emitted block.  ``None`` = full sequence.
+            Steps per emitted block. ``None`` = full sequence.
         accumulate:
             Carry hidden state across blocks (default ``True``).
         initial_state:
-            Explicit seed in first-on format.  Defaults to ``self.state``.
+            Explicit seed in first-on format. Defaults to ``self.state``.
         output_starting_state:
             Include the readout of the seed state (default ``False``).
         tau_dt:
-            Non-negative readout lag ``τ - t``; broadcasts against batch axes.
+            Non-negative readout lag ``tau - t``; broadcasts against batch axes.
         increment_input:
             ``True`` if ``X`` already contains increments.
 
         Returns
         -------
         DenseElem
-            Volterra signature.  Without blocking, level ``r`` has trailing
-            shape ``(m**r,)``.  With blocking, an extra block/time axis
+            Volterra signature. Without blocking, level ``r`` has trailing
+            shape ``(m**r,)``. With blocking, an extra block/time axis
             appears at ``axis``.
         """
         hidden = fssk_state(

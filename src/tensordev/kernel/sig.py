@@ -4,14 +4,12 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 
-from tensordev import Jax
 from tensordev.kernel.free import free_kernel
 from tensordev.kernel.base_kernel import BaseKernel
 from tensordev.kernel.static_kernels import LinearKernel, StaticKernel
 from tensordev.kernel.util import DyadicOrder
 
 Array = jnp.ndarray
-JaxCore = Jax()
 
 
 @dataclass(frozen=True)
@@ -44,7 +42,6 @@ class SigKernel(BaseKernel):
 
     backend: str = "scan"
     dyadic_order: DyadicOrder = 0
-    core: object = None
     num_devices: int = 1
     static_kernel: StaticKernel = LinearKernel(scale=1.0)
 
@@ -86,7 +83,6 @@ class SigKernel(BaseKernel):
             pairwise=pairwise,
             backend=self.backend,
             dyadic_order=self.dyadic_order,
-            core=self.core,
             increment_in=False,
             num_devices=self.num_devices,
             static_kernel=self.static_kernel,

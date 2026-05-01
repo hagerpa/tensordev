@@ -4,7 +4,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import pytest
 from tensordev.sss import DenseLambda, FSSK
-from tensordev.sss import fssk_readout, fssk_state, fssk_state_from_coef
+from tensordev.sss.state_update import fssk_readout, fssk_state, fssk_state_from_coef
 
 
 def _allclose(a, b, *, atol=1e-10, rtol=1e-10):
@@ -274,3 +274,4 @@ def test_raises_for_invalid_1d_dt():
     ker = _make_kernel()
     with pytest.raises(ValueError, match="length 1 or S"):
         fssk_state(_linear_path(S=4), kernel=ker, dt=jnp.array([0.1, 0.2, 0.3]), trunc=2)
+

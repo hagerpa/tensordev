@@ -2,11 +2,16 @@ from jax import config
 
 config.update("jax_enable_x64", True)
 
+from functools import partial
+
 import jax.numpy as jnp
 
 from tensordev import Jax
+from tensordev.core.jax import JaxSequentialCore
+from tensordev.development.free import free_development
 
 CORE = Jax()
+SEQ = JaxSequentialCore()
 
 
 def _random_first_on_elem(key, *, dim, trunc, batch_shape=(), scale=0.10):
@@ -69,14 +74,9 @@ def _stepwise_fmexp_scan(increments, *, trunc):
     )
 
 
-from jax import config
-
-config.update("jax_enable_x64", True)
-
 import numpy as np
 import pytest
 import jax.random as jr
-import jax.numpy as jnp
 
 from tensordev import Jax
 
@@ -364,14 +364,8 @@ def test_tensor_development_single_step_matches_tensor_exponential(dim, trunc, b
         scale=0.08,
     )
 
-    dev = CORE.tensor_development(
-        X,
-        axis=-2,
-        trunc=trunc,
-        accumulate=False,
-        output_starting_point=False,
-        increment_input=True,
-    )
+    dev = free_development(X, increment_input=True, seq_core=SEQ, trunc=trunc, axis=-2, accumulate=False,
+                           output_starting_point=False, core=CORE)
 
     ref = CORE.tensor_exponential(
         tuple(level[..., 0, :] for level in X),
@@ -404,14 +398,8 @@ def test_tensor_development_terminal_matches_stepwise_fmexp_scan(dim, trunc, ste
         scale=0.08,
     )
 
-    dev_terminal = CORE.tensor_development(
-        X,
-        axis=-2,
-        trunc=trunc,
-        accumulate=False,
-        output_starting_point=False,
-        increment_input=True,
-    )
+    dev_terminal = free_development(X, increment_input=True, seq_core=SEQ, trunc=trunc, axis=-2, accumulate=False,
+                                    output_starting_point=False, core=CORE)
 
     ref_terminal, _ = _stepwise_fmexp_scan(X, trunc=trunc)
 
@@ -443,24 +431,10 @@ def test_tensor_development_accumulate_has_no_effect_for_single_block(dim, trunc
         scale=0.08,
     )
 
-    dev_no_acc = CORE.tensor_development(
-        X,
-        axis=-2,
-        trunc=trunc,
-        block_size=None,  # one single block
-        accumulate=False,
-        output_starting_point=False,
-        increment_input=True,
-    )
-    dev_acc = CORE.tensor_development(
-        X,
-        axis=-2,
-        trunc=trunc,
-        block_size=None,  # one single block
-        accumulate=True,
-        output_starting_point=False,
-        increment_input=True,
-    )
+    dev_no_acc = free_development(X, increment_input=True, seq_core=SEQ, trunc=trunc, axis=-2, block_size=None,
+                                  accumulate=False, output_starting_point=False, core=CORE)
+    dev_acc = free_development(X, increment_input=True, seq_core=SEQ, trunc=trunc, axis=-2, block_size=None,
+                               accumulate=True, output_starting_point=False, core=CORE)
 
     _assert_tuple_allclose(dev_acc, dev_no_acc)
 
@@ -496,32 +470,21 @@ def test_tensor_development_accumulate_returns_block_prefix_developments(
         scale=0.08,
     )
 
-    block_devs = CORE.tensor_development(
-        X,
-        axis=-2,
-        trunc=trunc,
-        block_size=block_size,
-        accumulate=False,
-        output_starting_point=False,
-        increment_input=True,
-    )
+    block_devs = free_development(X, increment_input=True, seq_core=SEQ, trunc=trunc, axis=-2, block_size=block_size,
+                                  accumulate=False, output_starting_point=False, core=CORE)
 
-    dev_prefixes = CORE.tensor_development(
-        X,
-        axis=-2,
-        trunc=trunc,
-        block_size=block_size,
-        accumulate=True,
-        output_starting_point=False,
-        increment_input=True,
-    )
+    dev_prefixes = free_development(X, increment_input=True, seq_core=SEQ, trunc=trunc, axis=-2, block_size=block_size,
+                                    accumulate=True, output_starting_point=False, core=CORE)
 
-    ref_prefixes = CORE.tensor_abra(
+    zero1 = CORE.xp.zeros_like(block_devs[1][..., 0, :])
+    neutral = CORE.tensor_exponential((zero1,), trunc=trunc, output_zero_level=True)
+    ref_prefixes = SEQ.tensor_abra(
         block_devs,
-        op="product",
+        reduce_op=partial(CORE.tensor_product, trunc=trunc),
+        acc_op=partial(CORE.tensor_product, trunc=trunc),
+        neutral=neutral,
         axis=-2,
-        trunc=trunc,
-        block_size=1,  # treat each emitted block-development as one step
+        block_size=1,
         accumulate=True,
         output_starting_point=False,
     )
@@ -553,15 +516,8 @@ def test_tensor_development_nonaccumulate_returns_block_developments(
         scale=0.08,
     )
 
-    out = CORE.tensor_development(
-        X,
-        axis=-2,
-        trunc=trunc,
-        block_size=block_size,
-        accumulate=False,
-        output_starting_point=False,
-        increment_input=True,
-    )
+    out = free_development(X, increment_input=True, seq_core=SEQ, trunc=trunc, axis=-2, block_size=block_size,
+                           accumulate=False, output_starting_point=False, core=CORE)
 
     n_blocks = steps // block_size
     ref_blocks = []
@@ -609,14 +565,8 @@ def test_tensor_development_level1_matches_first_level_increment():
         [ 0.6,  1.1, -0.4,  0.8, -0.7,  0.2,  1.4, -0.1],
     ], dtype=float)
 
-    dev = CORE.tensor_development(
-        (dX1, dX2, dX3),
-        axis=-2,
-        trunc=3,
-        accumulate=False,
-        output_starting_point=False,
-        increment_input=True,
-    )
+    dev = free_development((dX1, dX2, dX3), increment_input=True, seq_core=SEQ, trunc=3, axis=-2, accumulate=False,
+                           output_starting_point=False, core=CORE)
 
     expected_level1 = dX1.sum(axis=0)
     actual_level1 = np.asarray(dev[1], dtype=float)
@@ -643,13 +593,7 @@ def test_tensor_development_higher_levels_do_not_create_level1():
         [1.0, 0.5, 0.0, 1.0, 2.0, 1.5, 0.3, 0.9],
     ], dtype=float)
 
-    dev = CORE.tensor_development(
-        (dX1, dX2, dX3),
-        axis=-2,
-        trunc=3,
-        accumulate=False,
-        output_starting_point=False,
-        increment_input=True,
-    )
+    dev = free_development((dX1, dX2, dX3), increment_input=True, seq_core=SEQ, trunc=3, axis=-2, accumulate=False,
+                           output_starting_point=False, core=CORE)
 
     np.testing.assert_allclose(np.asarray(dev[1], dtype=float), 0.0, atol=1e-12, rtol=1e-12)

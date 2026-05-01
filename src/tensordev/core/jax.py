@@ -1,5 +1,4 @@
 # ---- JAX backend ----
-#TODO: abstract axes!
 from __future__ import annotations
 
 import types
@@ -11,6 +10,7 @@ from jax import numpy as jnp
 
 from tensordev.core.utils.annotations import iter_class_jittables
 from .einsum import Einsum
+from .sequential import SequentialCore, DenseElem
 from .shuffle import ShuffleCore
 from .universal import *
 
@@ -185,10 +185,19 @@ class JaxShuffleCore(ShuffleCore[jnp.ndarray]):
 
     def __init__(self, d: int, trunc: int) -> None:
         super().__init__(jnp, d, trunc)
-        # Convert all precomputed numpy operators to JAX arrays once.
+        # Convert numpy operators to JAX arrays once, fusing (rows, cols) into a
+        # single flat index into the outer product (shape d^i × d^j) so that
+        # sparse_einsum needs only one gather instead of two.
         self._jax_operators: dict = {
-            (i, j): (meta, tuple(jnp.asarray(arr) for arr in Q))
-            for (i, j), (meta, Q) in self.operators.items()
+            (i, j): (
+                meta,
+                (
+                    jnp.asarray(segment_ids),
+                    jnp.asarray(rows * (d ** j) + cols),  # combined flat index
+                    jnp.asarray(data),
+                ),
+            )
+            for (i, j), (meta, (segment_ids, rows, cols, data)) in self.operators.items()
         }
         for name, fn, kw in iter_class_jittables(type(self)):
             jax_kw = {k: v for k, v in kw.items() if k in JAX_JIT_PARAMETERS}
@@ -196,12 +205,99 @@ class JaxShuffleCore(ShuffleCore[jnp.ndarray]):
 
     @partial(jax.jit, static_argnums=(0, 3, 4))
     def sparse_einsum(self, Ai, Bj, i: int, j: int):
-        """JAX override: vmap over batch + segment_sum for the sparse contraction."""
+        """JAX override: outer-product first, then one gather + segment_sum."""
         _, Q = self._jax_operators[(i, j)]
-        idx, idy, idz, data = Q
+        idx, combined_ij, data = Q
 
-        def single(Ai_s, Bj_s):
-            vals = data * Ai_s[idy] * Bj_s[idz]
-            return jax.ops.segment_sum(vals, idx, num_segments=Ai.shape[-1] * Bj.shape[-1])
+        batch = jnp.broadcast_shapes(Ai.shape[:-1], Bj.shape[:-1])
+        d_i, d_j = Ai.shape[-1], Bj.shape[-1]
+        out_size = d_i * d_j
 
-        return jax.vmap(single)(Ai, Bj)
+        Ai_flat = jnp.broadcast_to(Ai, batch + (d_i,)).reshape(-1, d_i)
+        Bj_flat = jnp.broadcast_to(Bj, batch + (d_j,)).reshape(-1, d_j)
+        B = Ai_flat.shape[0]
+
+        # One fused XLA op replaces two length-nnz gathers.
+        P = (Ai_flat[:, :, None] * Bj_flat[:, None, :]).reshape(B, -1)  # (B, d^{i+j})
+        weighted = P[:, combined_ij] * data                               # (B, nnz)
+        out_flat = jax.vmap(lambda w: jax.ops.segment_sum(w, idx, num_segments=out_size))(weighted)
+        return out_flat.reshape(batch + (out_size,))
+
+
+class JaxSequentialCore(SequentialCore[jnp.ndarray]):
+    """
+    JAX-native SequentialCore.
+
+    Replaces every Python loop in the base class with a JAX primitive:
+      - _mapper    → jax.vmap         (parallel map over the block axis)
+      - _reducer   → lax.scan  or  lax.associative_scan  (in_tree=True)
+      - _accumulator → lax.scan  or  lax.associative_scan + vmap seed broadcast
+    """
+
+    def __init__(self, default_time_axis: int = -2):
+        super().__init__(jnp, default_time_axis)
+        for name, fn, kw in iter_class_jittables(type(self)):
+            jax_kw = {k: v for k, v in kw.items() if k in JAX_JIT_PARAMETERS}
+            setattr(self, name, types.MethodType(jax.jit(fn, **jax_kw), self))
+
+    # ------------------------------------------------------------------
+    # Core primitives
+    # ------------------------------------------------------------------
+
+    def _mapper(self, fun: Callable[[DenseElem], DenseElem]) -> Callable[[DenseElem], DenseElem]:
+        """vmap fun over the leading (block) axis of every level in the DenseElem."""
+        vmapped = jax.vmap(fun)
+        return vmapped
+
+    def _reducer(
+            self,
+            fun: Callable[[DenseElem, DenseElem], DenseElem],
+            *,
+            neutral: DenseElem,
+            seed: DenseElem,
+            in_tree: bool = False,
+    ) -> Callable[[DenseElem], DenseElem]:
+        if not in_tree:
+            @jax.jit
+            def reduce_fn(X):
+                def body(carry, step):
+                    return fun(carry, step), None
+                final, _ = lax.scan(body, seed, X)
+                return final
+            return reduce_fn
+
+        @jax.jit
+        def reduce_fn(X):
+            # Parallel prefix, then fold seed into the global result.
+            prefixes = lax.associative_scan(fun, X, axis=0)
+            last = jax.tree.map(lambda a: a[-1], prefixes)
+            return fun(seed, last)
+        return reduce_fn
+
+    def _accumulator(
+            self,
+            fun: Callable[[DenseElem, DenseElem], DenseElem],
+            *,
+            neutral: DenseElem,
+            seed: DenseElem,
+            in_tree: bool = False,
+    ) -> Callable[[DenseElem], tuple[DenseElem, DenseElem]]:
+        if not in_tree:
+            @jax.jit
+            def scan_fn(X):
+                def body(carry, step):
+                    y = fun(carry, step)
+                    return y, y
+                final, ys = lax.scan(body, seed, X)
+                return final, ys
+            return scan_fn
+
+        @jax.jit
+        def scan_fn(X):
+            # All-parallel prefix scan; then broadcast seed into every prefix.
+            prefixes = lax.associative_scan(fun, X, axis=0)
+            ys = jax.vmap(lambda p: fun(seed, p))(prefixes)
+            final = jax.tree.map(lambda a: a[-1], ys)
+            return final, ys
+        return scan_fn
+

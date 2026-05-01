@@ -57,6 +57,7 @@ class MultiIndexLayout:
     minus: Array
     factorial: Array
     inv_factorial: Array
+    backward_transition: Array
 
     @property
     def size(self) -> int:
@@ -215,6 +216,17 @@ def build_multiindex_layout(q: int, trunc: int) -> MultiIndexLayout:
     factorial = jnp.asarray(factorial_np)
     inv_factorial = 1.0 / factorial
 
+    backward_transition_np = []
+    for multi in tuples:
+        total = sum(multi)
+        row = []
+        for r in range(q):
+            if total < trunc:
+                row.append((int(multi[r]) + 1.0) / (total + 1.0))
+            else:
+                row.append(0.0)
+        backward_transition_np.append(row)
+
     return MultiIndexLayout(
         q=q,
         trunc=trunc,
@@ -225,6 +237,7 @@ def build_multiindex_layout(q: int, trunc: int) -> MultiIndexLayout:
         minus=jnp.asarray(minus_np, dtype=jnp.int32),
         factorial=factorial,
         inv_factorial=inv_factorial,
+        backward_transition=jnp.asarray(backward_transition_np),
     )
 
 

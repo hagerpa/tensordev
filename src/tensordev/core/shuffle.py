@@ -3,11 +3,10 @@ from __future__ import annotations
 import numpy as np
 from typing import Optional, Tuple, Union, List, TypeVar, Generic
 
-import array_api._2023_12 as array_types
-
+from tensordev.core.universal import _Array, _ArrayNamespace
 from tensordev.core.utils.annotations import jit as dummy_jit
 
-Array = TypeVar("Array", bound=array_types.Array)
+Array = TypeVar("Array", bound=_Array)
 DenseElem = Tuple[Array, ...]
 DenseElemFirstOn = Tuple[Array, ...]
 
@@ -37,7 +36,7 @@ class ShuffleCore(Generic[Array]):
     JAX ``static_argnums`` argument without triggering spurious retraces.
     """
 
-    def __init__(self, xp: array_types.ArrayNamespace, d: int, trunc: int) -> None:
+    def __init__(self, xp: _ArrayNamespace, d: int, trunc: int) -> None:
         self.xp = xp
         self.d = d
         self.trunc = trunc
@@ -66,7 +65,7 @@ class ShuffleCore(Generic[Array]):
                 segment_ids = np.repeat(idx_, idx_sizes)
                 self.operators[(i, j)] = meta, (segment_ids, rows, cols, data)
 
-    @dummy_jit(static_argnums=(0, 3, 4), dynamic_batchtime=("Ai", "Bj"))
+    @dummy_jit(static_argnums=(0, 3, 4), dynamic_batch=("Ai", "Bj"))
     def sparse_einsum(self, Ai, Bj, i: int, j: int):
         """
         Sparse bilinear product ``C = einsum('bi,bj,ijl->bl', Ai, Bj, Q)``
@@ -76,12 +75,13 @@ class ShuffleCore(Generic[Array]):
         """
         _, Q = self.operators[(i, j)]
         segment_ids, rows, cols, data = Q
-        res = self.xp.zeros((Ai.shape[0], Ai.shape[1] * Bj.shape[1]), dtype=Ai.dtype)
+        batch = np.broadcast_shapes(Ai.shape[:-1], Bj.shape[:-1])
+        res = self.xp.zeros(batch + (Ai.shape[-1] * Bj.shape[-1],), dtype=Ai.dtype)
         for k in range(len(segment_ids)):
-            res[:, segment_ids[k]] += Ai[:, rows[k]] * Bj[:, cols[k]] * data[k]
+            res[..., segment_ids[k]] += Ai[..., rows[k]] * Bj[..., cols[k]] * data[k]
         return res
 
-    @dummy_jit(static_argnums=(0, 3, 4), dynamic_batchtime=("Ai", "Bj"))
+    @dummy_jit(static_argnums=(0, 3, 4), dynamic_batch=("Ai", "Bj"))
     def tensor_shuffle_product_homogeneous(self, Ai: Array, Bj: Array, i: int, j: int) -> Array:
         """
         Homogeneous shuffle product ``(A_i ⊔ B_j)_{i+j}``.
@@ -98,7 +98,7 @@ class ShuffleCore(Generic[Array]):
     @dummy_jit(
         static_argnums=(0,),
         static_argnames=("trunc", "a_first_on", "b_first_on", "first_on_out"),
-        dynamic_batchtime=("A", "B"),
+        dynamic_batch=("A", "B"),
     )
     def tensor_shuffle_product(
             self,

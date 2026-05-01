@@ -6,12 +6,15 @@ from typing import Literal, Union
 import jax.numpy as jnp
 
 from tensordev import Jax
+from tensordev.core.jax import JaxSequentialCore
 from tensordev.core.universal import DenseElemFirstOn
+from tensordev.development.free import free_development
 from tensordev.kernel.free import free_kernel
 from tensordev.kernel.base_kernel import BaseKernel
 from tensordev.kernel.util import DyadicOrder
 
-JaxCore = Jax()
+_CORE = Jax()
+_SEQ_CORE = JaxSequentialCore()
 Array = jnp.ndarray
 PathInput = Union[Array, DenseElemFirstOn]
 
@@ -28,7 +31,6 @@ def higher_order_kernel(
         backend: Literal["scan", "wavefront"] = "scan",
         dyadic_order: DyadicOrder = 0,
         increment_input: bool = False,
-        core=None,
         num_devices: int = 1,
 ):
     """
@@ -92,8 +94,6 @@ def higher_order_kernel(
     -------
     Whatever ``free_kernel`` returns for the piecewise log-linear approximations.
     """
-    core = JaxCore if core is None else core
-
     log_steps_x, log_steps_y = log_steps
     log_degree_x, log_degree_y = log_degree
     # log_degree_x, log_degree_y = max(log_degree_x + 1, 0), max(log_degree_y + 1, 0)
@@ -130,31 +130,17 @@ def higher_order_kernel(
             f"log_steps[1]={log_steps_y} must divide the number of Y-intervals {sy}."
         )
 
-    sig_x = core.tensor_development(
-        dx,
-        axis=-2,
-        trunc=log_degree_x,
-        block_size=log_steps_x,
-        accumulate=False,
-        output_starting_point=False,
-        increment_input=True,
-    )
-    sig_y = core.tensor_development(
-        dy,
-        axis=-2,
-        trunc=log_degree_y,
-        block_size=log_steps_y,
-        accumulate=False,
-        output_starting_point=False,
-        increment_input=True,
-    )
+    sig_x = free_development(dx, increment_input=True, seq_core=_SEQ_CORE, trunc=log_degree_x, axis=-2,
+                             block_size=log_steps_x, accumulate=False, output_starting_point=False, core=_CORE)
+    sig_y = free_development(dy, increment_input=True, seq_core=_SEQ_CORE, trunc=log_degree_y, axis=-2,
+                             block_size=log_steps_y, accumulate=False, output_starting_point=False, core=_CORE)
 
-    log_x = core.tensor_logarithm(
+    log_x = _CORE.tensor_logarithm(
         sig_x[1:],
         trunc=log_degree_x,
         output_zero_level=False,
     )
-    log_y = core.tensor_logarithm(
+    log_y = _CORE.tensor_logarithm(
         sig_y[1:],
         trunc=log_degree_y,
         output_zero_level=False,
@@ -167,7 +153,7 @@ def higher_order_kernel(
 
     return free_kernel(log_x, log_y, evaluate=evaluate, return_fg=return_fg, pairwise=pairwise,
                        backend=backend, dyadic_order=dyadic_order,
-                       core=core, increment_in=True, num_devices=num_devices)
+                       increment_in=True, num_devices=num_devices)
 
 
 @dataclass(frozen=True)
@@ -196,7 +182,6 @@ class HigherOrderKernel(BaseKernel):
     backend: str = "scan"
     dyadic_order: DyadicOrder = 0
     increment_input: bool = False
-    core: object = None
     num_devices: int = 1
 
     def __call__(
@@ -240,7 +225,6 @@ class HigherOrderKernel(BaseKernel):
             backend=self.backend,
             dyadic_order=self.dyadic_order,
             increment_input=self.increment_input,
-            core=self.core,
             num_devices=self.num_devices,
         )
 

@@ -2,35 +2,86 @@ from __future__ import annotations
 
 import functools
 import itertools
-import numpy as np
-from typing import Optional, Sequence, Tuple, Union, Literal, List, TypeVar, Generic, Callable
-
-import array_api._2023_12 as array_types
+from typing import Optional, Sequence, Tuple, Union, Literal, List, TypeVar, Generic, Callable, Protocol, Any
 
 from tensordev.core.utils.annotations import jit as dummy_jit
 
-Array = TypeVar("Array", bound=array_types.Array)
+
+class _Array(Protocol):
+    @property
+    def shape(self) -> tuple[int, ...]: ...
+
+    @property
+    def ndim(self) -> int: ...
+
+    @property
+    def dtype(self) -> Any: ...
+
+    def __getitem__(self, key: Any) -> _Array: ...
+
+    def __add__(self, other: Any) -> _Array: ...
+
+    def __radd__(self, other: Any) -> _Array: ...
+
+    def __mul__(self, other: Any) -> _Array: ...
+
+    def __rmul__(self, other: Any) -> _Array: ...
+
+    def __pow__(self, other: Any) -> _Array: ...
+
+    def sum(self, *args: Any, **kwargs: Any) -> _Array: ...
+
+    def reshape(self, *args: Any, **kwargs: Any) -> _Array: ...
+
+
+class _ArrayNamespace(Protocol):
+    def stack(self, arrays: Sequence[Any], axis: int = 0) -> _Array: ...
+
+    def moveaxis(self, x: _Array, source: Any, destination: Any) -> _Array: ...
+
+    def expand_dims(self, x: _Array, axis: int) -> _Array: ...
+
+    def reshape(self, x: _Array, shape: tuple[int, ...]) -> _Array: ...
+
+    def broadcast_shapes(self, *shapes: tuple[int, ...]) -> tuple[int, ...]: ...
+
+    def broadcast_to(self, x: _Array, shape: tuple[int, ...]) -> _Array: ...
+
+    def zeros(self, shape: tuple[int, ...], dtype: Any = None) -> _Array: ...
+
+    def zeros_like(self, x: _Array) -> _Array: ...
+
+    def ones_like(self, x: _Array) -> _Array: ...
+
+    def asarray(self, obj: Any, dtype: Any = None) -> _Array: ...
+
+    def diff(self, x: _Array, axis: int) -> _Array: ...
+
+    def concat(self, arrays: Sequence[Any], axis: int = 0) -> _Array: ...
+
+
+Array = TypeVar("Array", bound=_Array)
 Elem = Sequence[Optional[Array]]  # one tensor-algebra element (level-list)
 DenseElem = Tuple[Array, ...]  # level k has last dim d**k stating at level k=0; no Nones; shared batch shape
 DenseElemFirstOn = Tuple[Array, ...]  # level k has last dim d**k starting at level k=1 no Nones; shared batch shape,
 
 
 class Universal(Generic[Array]):
-    def __init__(self, xp: array_types.ArrayNamespace):
+    def __init__(self, xp: _ArrayNamespace):
         self.xp = xp
 
     # ----------------------------------------------------------------------
     # Axes iteration and reduction utilites
     # ----------------------------------------------------------------------
 
-    @dummy_jit(static_argnums=0, static_argnames=("axis",), dynamic_batchtime=("X",))
+    @dummy_jit(static_argnums=0, static_argnames=("axis",), dynamic_batch=("X",))
     def tensor_stack(self, X: List[DenseElem], *, axis: int) -> tuple:
         L = len(X[-1])
         ndim = X[-1][-1].ndim
         stack_axis = axis if axis >= 0 else (ndim + 1 + axis)
         return tuple(self.xp.stack([e[k] for e in X], axis=stack_axis) for k in range(L))
 
-    @dummy_jit(static_argnums=0, static_argnames=("source", "destination"), dynamic_batchtime=("X",))
+    @dummy_jit(static_argnums=0, static_argnames=("source", "destination"), dynamic_batch=("X",))
     def tensor_moveaxis(
             self,
             X: DenseElem,
@@ -103,7 +154,7 @@ class Universal(Generic[Array]):
     # Single & Binary Operations
     # ----------------------------------------------------------------------
 
-    @dummy_jit(static_argnums=0, static_argnames=("trunc",), dynamic_batchtime=("A", "B"))
+    @dummy_jit(static_argnums=0, static_argnames=("trunc",), dynamic_batch=("A", "B"))
     def tensor_summation(self, A: DenseElem, B: DenseElem, trunc: Optional[int] = None) -> DenseElem:
         """
         Level-wise sum ``C = A + B`` (with implicit zero-padding if degrees differ).
@@ -136,7 +187,7 @@ class Universal(Generic[Array]):
                 out.append(B[k])
         return tuple(out)
 
-    @dummy_jit(static_argnums=0, dynamic_batchtime=("Ai", "Bj"))
+    @dummy_jit(static_argnums=0, dynamic_batch=("Ai", "Bj"))
     def tensor_product_homogeneous(self, Ai: Array, Bj: Array) -> Array:
         """
         Homogeneous-degree tensor (Chen) product on the last axis.
@@ -151,8 +202,86 @@ class Universal(Generic[Array]):
         tmp = self.xp.expand_dims(Ai, -1) * self.xp.expand_dims(Bj, -2)
         return self.xp.reshape(tmp, tmp.shape[:-2] + (tmp.shape[-2] * tmp.shape[-1],))
 
+    @dummy_jit(static_argnums=(0, 3), dynamic_batch=("Ai", "v"))
+    def tensor_shuffle_vector_homogeneous(self, Ai: Array, v: Array, i: int) -> Array:
+        """
+        Homogeneous shuffle product ``(A_i ⊔ v)_{i+1}`` where ``v`` is degree-1.
+
+        For each output word ``(l_0, ..., l_i)`` the result is:
+            sum_{p=0}^{i} A_i[l_0,...,l_{p-1},l_{p+1},...,l_i] * v[l_p]
+
+        Parameters
+        ----------
+        Ai : Array, shape ``batch + (d**i,)``
+        v : Array, shape ``batch + (d,)`` — batch shapes are broadcast.
+        i : int
+            Degree of ``Ai``.
+
+        Returns
+        -------
+        Array, shape ``batch + (d**(i+1),)``
+        """
+        xp = self.xp
+        d = v.shape[-1]
+        batch = xp.broadcast_shapes(Ai.shape[:-1], v.shape[:-1])
+        A = xp.broadcast_to(Ai, batch + (d ** i,)).reshape(batch + (d,) * i)
+        v_ = xp.broadcast_to(v, batch + (d,))
+        result = xp.zeros(batch + (d,) * (i + 1), dtype=Ai.dtype)
+        for p in range(i + 1):
+            A_exp = xp.expand_dims(A, axis=len(batch) + p)
+            v_exp = v_.reshape(batch + (1,) * p + (d,) + (1,) * (i - p))
+            result = result + A_exp * v_exp
+        return result.reshape(batch + (d ** (i + 1),))
+
+    @dummy_jit(static_argnums=0, static_argnames=("trunc", "a_first_on"), dynamic_batch=("A", "v"))
+    def tensor_shuffle_vector(
+            self,
+            A: Union[DenseElem, DenseElemFirstOn],
+            v: Array,
+            *,
+            trunc: Optional[int] = None,
+            a_first_on: bool = False,
+    ) -> DenseElemFirstOn:
+        """
+        Graded shuffle product ``C = A ⊔ v`` where ``v`` is degree-1.
+
+        Output is in first-on format (degrees 1, 2, ...):
+            C_n = A_{n-1} ⊔ v   for n = 1, ..., min(NA + 1, trunc)
+
+        Parameters
+        ----------
+        A : DenseElem or DenseElemFirstOn
+            Graded element. If ``a_first_on=True``, starts at degree 1.
+        v : Array, shape ``batch + (d,)``
+            Degree-1 vector; batch shapes are broadcast per level.
+        trunc : int, optional
+            Maximum output degree.
+        a_first_on : bool, default False
+            Whether ``A`` starts at degree 1.
+
+        Returns
+        -------
+        DenseElemFirstOn
+            Output levels starting at degree 1.
+        """
+        A = tuple(A)
+        if not A:
+            return tuple()
+        a0 = 1 if a_first_on else 0
+        NA = len(A) + a0 - 1
+        N = NA + 1
+        if trunc is not None:
+            N = min(N, trunc)
+        out: List[Array] = []
+        for n in range(1, N + 1):
+            i = n - 1
+            if i < a0 or i > NA:
+                continue
+            out.append(self.tensor_shuffle_vector_homogeneous(A[i - a0], v, i))
+        return tuple(out)
+
     @dummy_jit(static_argnums=0, static_argnames=("trunc", "a_first_on", "b_first_on"),
-               dynamic_batchtime=("A", "B"))
+               dynamic_batch=("A", "B"))
     def tensor_product(
             self,
             A: Union[DenseElem, DenseElemFirstOn],
@@ -227,7 +356,7 @@ class Universal(Generic[Array]):
 
         return tuple(out)
 
-    @dummy_jit(static_argnums=0, dynamic_batchtime=("A",), full_dynamic=("alpha",))
+    @dummy_jit(static_argnums=0, dynamic_batch=("A",), full_dynamic=("alpha",))
     def tensor_scalar_multiply(self, A: DenseElem, alpha: Union[Array, float]) -> DenseElem:
         """
         Uniform scalar multiply: ``Y = a * X``.
@@ -252,7 +381,7 @@ class Universal(Generic[Array]):
         a0 = self.xp.asarray(alpha, dtype=A[0].dtype)
         return tuple(Ak * self.xp.expand_dims(a0, axis=-1) for Ak in A)
 
-    @dummy_jit(static_argnums=0, dynamic_batchtime=("A",), full_dynamic=("c",))
+    @dummy_jit(static_argnums=0, dynamic_batch=("A",), full_dynamic=("c",))
     def tensor_dilation(self, A: DenseElem, c: Union[Array, float]) -> DenseElem:
         """Dense version of `tensor_dilation`. See `tensor_dilation` for details; here we assume dense.
         Scales level k by c**k; optional `trunc` limits levels."""
@@ -266,7 +395,7 @@ class Universal(Generic[Array]):
             out.append(Xk * scale_k)
         return tuple(out)
 
-    @dummy_jit(static_argnums=0, dynamic_batchtime=("Ak", "Bk"))
+    @dummy_jit(static_argnums=0, dynamic_batch=("Ak", "Bk"))
     def tensor_inner_product_homogeneous(self, Ak: Array, Bk: Array) -> Array:
         """
         Level-wise (homogeneous) Euclidean inner product over the last axis.
@@ -283,7 +412,7 @@ class Universal(Generic[Array]):
         """
         return (Ak * Bk).sum(-1)
 
-    @dummy_jit(static_argnums=0, dynamic_batchtime=("A", "B"))
+    @dummy_jit(static_argnums=0, dynamic_batch=("A", "B"))
     def tensor_inner_product(
             self,
             A: Union[DenseElem, DenseElemFirstOn],
@@ -313,7 +442,7 @@ class Universal(Generic[Array]):
             acc = acc + self.tensor_inner_product_homogeneous(A[k], B[k])
         return acc
 
-    @dummy_jit(static_argnums=0, dynamic_batchtime=("Ai", "Yni"))
+    @dummy_jit(static_argnums=0, dynamic_batch=("Ai", "Yni"))
     def tensor_adjoint_left_homogeneous(sefl, Ai: Array, Yni: Array) -> Array:
         """
         Homogeneous left-adjoint contraction for degree i.
@@ -327,7 +456,7 @@ class Universal(Generic[Array]):
         y = Yni.reshape((*Yni.shape[:-1], Ai.shape[-1], -1))  # (..., i, N)
         return (Ai[..., :, None] * y).sum(axis=-2)  # contract over i → (..., N)
 
-    @dummy_jit(static_argnums=0, dynamic_batchtime=("Bj", "Ynj"))
+    @dummy_jit(static_argnums=0, dynamic_batch=("Bj", "Ynj"))
     def tensor_adjoint_right_homogeneous(self, Bj: Array, Ynj: Array) -> Array:
         """
         Homogeneous right-adjoint contraction for degree j.
@@ -497,7 +626,7 @@ class Universal(Generic[Array]):
     # Polynomial / Series Operations
     # ----------------------------------------------------------------------
 
-    @dummy_jit(static_argnums=0, static_argnames=("trunc", "output_zero_level"), dynamic_batchtime=("g", "X"))
+    @dummy_jit(static_argnums=0, static_argnames=("trunc", "output_zero_level"), dynamic_batch=("g", "X"))
     def tensor_fmexp(
             self,
             g: DenseElem,  # graded element with explicit level-0
@@ -589,7 +718,7 @@ class Universal(Generic[Array]):
         Y = self.tensor_product(g, E, trunc=trunc)
         return Y if output_zero_level else Y[1:]
 
-    @dummy_jit(static_argnums=0, static_argnames=("trunc", "output_zero_level"), dynamic_batchtime=("X",))
+    @dummy_jit(static_argnums=0, static_argnames=("trunc", "output_zero_level"), dynamic_batch=("X",))
     def tensor_exponential(
             self, X: DenseElemFirstOn, *, trunc: int, output_zero_level: bool = True
     ) -> Tuple[Array, ...]:
@@ -609,7 +738,7 @@ class Universal(Generic[Array]):
         I: DenseElem = (self.xp.ones_like(X[0][..., :1]),)  # level-0 only
         return self.tensor_fmexp(I, X, trunc=trunc, output_zero_level=output_zero_level)
 
-    @dummy_jit(static_argnums=0, static_argnames=("trunc", "output_zero_level"), dynamic_batchtime=("X",))
+    @dummy_jit(static_argnums=0, static_argnames=("trunc", "output_zero_level"), dynamic_batch=("X",))
     def tensor_logarithm(self, X: DenseElemFirstOn, *, trunc: int, output_zero_level: bool = True) -> Tuple[Array, ...]:
         """
         Algebra logarithm with input levels starting at 1.
@@ -655,468 +784,6 @@ class Universal(Generic[Array]):
                 term = self.tensor_product(term, H, trunc=trunc)
 
         return res if output_zero_level else res[1:]
-
-    # ----------------------------------------------------------------------
-    # Sequential Operations (Reductions & Developments)
-    # ----------------------------------------------------------------------
-
-    def _pre_processing_for_sequential(
-            self,
-            len_X: int,
-            *,
-            op: Literal["product", "sum", "fmexp"] = "product",
-            trunc: Optional[int] = None,
-            memory_consumption: Literal["high", "low"] = "low",
-    ) -> Tuple[
-        int,  # N
-        Callable,  # reduce_op
-        Callable,  # acc_op
-        Callable[[DenseElem], DenseElem],  # neutral_gen(X) -> neutral
-        Callable[[DenseElem, Optional[DenseElem]], DenseElem],  # seed_gen(neutral, starting_point) -> seed
-        Callable[[DenseElem], DenseElem],
-    ]:
-        K = len_X - 1
-
-        if op == "sum":
-            N = min(K, trunc) if trunc is not None else K
-            reduce_op = functools.partial(self.tensor_summation, trunc=N)
-            acc_op = reduce_op
-
-            def neutral_gen(X: DenseElem) -> DenseElem:
-                step0 = tuple(a[0] for a in X)
-                return self.tensor_logarithm(
-                    (self.xp.zeros_like(step0[1]),), trunc=N, output_zero_level=True
-                )
-
-        elif op == "fmexp":
-            if trunc is None:
-                raise ValueError("`trunc` is required for op='fmexp'.")
-            N = trunc
-            if memory_consumption == "high":
-                reduce_op = functools.partial(self.tensor_product, trunc=N)
-            elif memory_consumption == "low":
-                reduce_op = functools.partial(self.tensor_fmexp, trunc=N, output_zero_level=True)
-            else:
-                raise ValueError("`memory_consumption` must be 'high' or 'low'.")
-            acc_op = functools.partial(self.tensor_product, trunc=N)
-
-            def neutral_gen(X: DenseElem) -> DenseElem:
-                step0 = tuple(a[0] for a in X)
-                return self.tensor_exponential(
-                    (self.xp.zeros_like(step0[0]),), trunc=N, output_zero_level=True
-                )
-
-        elif op == "product":
-            N = K if trunc is None else trunc
-            reduce_op = functools.partial(self.tensor_product, trunc=N)
-            acc_op = reduce_op
-
-            def neutral_gen(X: DenseElem) -> DenseElem:
-                step0 = tuple(a[0] for a in X)
-                return self.tensor_exponential(
-                    (self.xp.zeros_like(step0[1]),), trunc=N, output_zero_level=True
-                )
-
-        else:
-            raise ValueError("`op` must be one of {'sum','product','fmexp'}.")
-
-        def seed_gen(neutral: DenseElem, starting_point: Optional[DenseElem] = None) -> DenseElem:
-            return acc_op(starting_point, neutral) if starting_point is not None else neutral
-
-        def truncator(X: DenseElem) -> DenseElem:
-            return X[: min(N + 1, len(X) + (op == "fmexp"))]
-
-        return N, reduce_op, acc_op, neutral_gen, seed_gen, truncator
-
-    @dummy_jit(static_argnums=0, static_argnames=("op", "axis", "trunc", "memory_consumption"),
-               dynamic_batchtime=("X",))
-    def tensor_reduce(
-            self,
-            X: DenseElem | DenseElemFirstOn,
-            *,
-            op: Literal["product", "sum", "fmexp"] = "product",
-            axis: int = -2,
-            trunc: Optional[int] = None,
-            memory_consumption: Literal["high", "low"] = "low",
-    ):
-        """
-        Reduce a **packed graded element** `X` along `axis`.
-
-        Modes
-        -----
-        - ``"sum"``     : degree-wise addition (cap degrees via `_resolve_truncation`).
-        - ``"product"`` : Chen/tensor product (cap as above).
-        - ``"fmexp"``   : per-step *formal multiplicative exponential* (requires `trunc`):
-            • ``memory_consumption="low"``  → fused streaming via ``tensor_fmexp(carry, step, trunc)``;
-            • ``memory_consumption="high"`` → pre-map per-step exponentials
-              ``step ↦ tensor_exponential(step, trunc)`` and then plain product.
-          In all cases we start from the degree-0 **neutral** (zeros for sum, ones for product/fmexp).
-
-        Returns
-        -------
-        DenseElem or []  (empty if there are no steps).
-        """
-        N, reduce_op, _, neutral_gen, seed_gen, truncator = self._pre_processing_for_sequential(len(X), op=op,
-                                                                                                trunc=trunc,
-                                                                                                memory_consumption=memory_consumption)
-        X = self.tensor_moveaxis(truncator(X), source=axis, destination=0)
-        neutral = neutral_gen(X)
-        seed = seed_gen(neutral, None)
-
-        associative = not (op == "fmexp" and memory_consumption == "low")
-        if op == "fmexp" and memory_consumption == "high":
-            X = self.tensor_exponential(X, trunc=N)
-        return self._reducer(reduce_op, neutral=neutral, seed=seed, associative=associative)(X)
-
-    @dummy_jit(static_argnums=0, static_argnames=("op", "axis", "trunc", "memory_consumption", "starting_point",
-                                                  "output_starting_point"), dynamic_batchtime=("X",))
-    def tensor_accumulate(
-            self,
-            X,
-            *,
-            op: Literal["product", "sum", "fmexp"] = "product",
-            axis: int = -2,
-            trunc: Optional[int] = None,
-            memory_consumption: Literal["high", "low"] = "low",
-            starting_point: Optional[tuple] = None,
-            output_starting_point: bool = False,
-    ):
-        """
-        Inclusive prefixes along `axis`, with optional `starting_point` and
-        `output_starting_point`. Always returns a **packed** graded element stacked
-        on `axis` (no Python list return).
-
-        - sum/product: associative prefix scan (optionally seeded).
-        - fmexp/low:   fused streaming via `tensor_fmexp`.
-        - fmexp/high:  vectorized `tensor_exponential` then associative product scan.
-        """
-        N, reduce_op, _, neutral_gen, seed_gen, truncator = self._pre_processing_for_sequential(len(X), op=op,
-                                                                                                trunc=trunc,
-                                                                                                memory_consumption=memory_consumption)
-        X = self.tensor_moveaxis(truncator(X), source=axis, destination=0)
-        neutral = neutral_gen(X)
-        seed = seed_gen(neutral, starting_point)
-
-        associative = not (op == "fmexp" and memory_consumption == "low")
-        if op == "fmexp" and memory_consumption == "high":
-            X = self.tensor_exponential(X, trunc=N)
-        accumulator = self._accumulator(reduce_op, neutral=neutral, seed=seed, associative=associative)
-        stacked = tuple(self.xp.stack([seed[k], *(X[k])], axis=0) for k in range(N + 1))
-        _, zs = accumulator(stacked)
-        if not output_starting_point:
-            zs = tuple(a[1:] for a in zs)
-        return self.tensor_moveaxis(zs, source=0, destination=axis)
-
-    @dummy_jit(static_argnums=0, static_argnames=("op", "axis", "trunc", "block_size", "accumulate", "starting_point",
-                                                  "output_starting_point", "memory_consumption"),
-               dynamic_batchtime=("X",))
-    def tensor_abra(
-            self,
-            X: DenseElem | DenseElemFirstOn,
-            *,
-            op: Literal["product", "sum", "fmexp"] = "product",
-            axis: int = -2,
-            trunc: Optional[int] = None,
-            block_size: Optional[int] = None,
-            accumulate: bool = False,
-            starting_point: Optional[DenseElem] = None,
-            output_starting_point: bool = False,
-            memory_consumption: Literal["high", "low"] = "low",
-    ) -> DenseElem:
-        """
-        Apply, Block, Reduce and Accumulate (ABRA) a **packed graded element**
-        along a steps axis and return an **already-packed** graded element.
-
-        Ops
-        ---
-        - ``"product"`` : left-fold Chen/tensor product over steps.
-        - ``"sum"``     : levelwise sum over steps.
-        - ``"fmexp"``   : per-step algebra exponential, then product.
-
-        Input (dense, flat levels)
-        --------------------------
-        ``X = (X₀, X₁, …, X_K)`` (or X = (X₁, …, X_K) in case of ``"fmexp"``) with flat last axis (width ``d**k``).
-        The **steps axis** is at ``axis`` (default ``-2``):
-          • for ``k ≥ 1``:  ``X_k.shape == batch + (S, d**k)``
-          • for ``k = 0``:  either ``batch + (S, 1)`` or ``batch + (1,)``
-
-        Truncation
-        ----------
-        - ``op="sum"``     → degree cap ``N = K`` (or ``min(K, trunc)`` if ``trunc`` given).
-        - ``op="product"`` → degree cap ``N = trunc`` if provided, else ``N = K``.
-        - ``op="fmexp"``   → **requires** ``trunc`` and uses ``N = trunc``.
-
-        What gets computed
-        ------------------
-        Given the per-step graded elements (slicing along ``axis``),
-        - ``"product"``:  ``acc ← acc ⊗ step``
-        - ``"sum"``:      ``acc ← acc + step``  (levelwise)
-        - ``"fmexp"``:    ``acc ← acc ⊗ exp(step)`` (algebra exponential per step)
-
-        Blocking
-        --------
-        If ``block_size`` is ``None``/``-1``, the whole steps axis is a single block.
-        Otherwise, it must divide ``S``; blocks are contiguous slices of length
-        ``block_size``.
-
-        Accumulation (prefixes) & starting point
-        ----------------------------------------
-        - If ``accumulate=False``:
-            * ``output_starting_point=False`` → emit per-block reductions: ``[B₀, B₁, …]``.
-            * ``output_starting_point=True``  → emit the **head** then the blocks:
-              ``[g, B₀, B₁, …]`` if ``starting_point=g`` is given,
-              else ``[I, B₀, B₁, …]`` (neutral; degree-0 identity for product/fmexp, zero for sum).
-        - If ``accumulate=True`` (streamed prefixes):
-            * First block starts from the **seed** (``g`` if given, otherwise the neutral).
-            * Each subsequent block starts from the **previous block’s outcome**.
-            * ``output_starting_point=False`` → ``[g⊗B₀, g⊗B₀⊗B₁, …]`` if ``g`` given,
-              else ``[B₀, B₀⊗B₁, …]``.
-            * ``output_starting_point=True``  → prepend the seed:
-              ``[g, g⊗B₀, g⊗B₀⊗B₁, …]`` (or ``[I, B₀, B₀⊗B₁, …]`` if no ``g``).
-
-        Memory consumption (relevant for "fmexp" only)
-        ----------------------------------------------
-        - "high": Within each block, compute per-step exponentials G_t = exp(ΔX_t) in batch (via vmap)
-            and then reduce them with an associative prefix/product. This maximizes parallelism and is
-            typically fastest, but materializes the entire block of G_t (higher peak memory).
-        - "low": Stream within each block using fmexp inside a scan, so G_t is never materialized
-            (lowest peak memory). This is strictly sequential within a block and can be slower.
-
-        Output packing
-        --------------
-        - If **exactly one** item is emitted, return that single graded element
-          (no block axis).
-        - Otherwise, each degree is stacked with a **block axis at `axis`**. The number
-          of returned degrees equals the maximum number present among the outputs
-          (we don’t fabricate higher empty degrees).
-
-        Parameters
-        ----------
-        X : DenseElem | DenseElemFirstOn
-            Packed input graded element with a steps axis at ``axis``.
-        op : {"product","sum","fmexp"}, default: "product"
-            Reduction mode (see above).
-        axis : int, default: -2
-            Steps axis (and the position where the block axis will be inserted).
-        trunc : int, optional
-            Degree cap (inclusive). Required for ``"fmexp"``.
-        block_size : int or None, optional
-            ``None/-1`` → one block. Otherwise must divide the number of steps ``S``.
-        accumulate : bool, default: False
-            If ``True``, emit streaming prefixes across blocks.
-        starting_point : DenseElem, optional
-            Seed ``g`` for streaming/decoration (see behavior above).
-        output_starting_point : bool, default: False
-            If ``True``, emit the seed as the first item (``g`` if provided, otherwise neutral).
-        memory_consumption : {"high","low"}, default: "high"
-            Decider on whether to materialize per-step exponentials for "fmexp" (high) or
-
-        Returns
-        -------
-        DenseElem
-            Either a single graded element (if one item emitted) or a graded element
-            whose levels carry a new **block axis at `axis`**.
-
-        Notes
-        -----
-        • Dense backend only; last axis is the flat width ``d**k``.
-        • No axis reordering during reduction; only a new block axis is inserted at the end.
-        • Uses helper ops: ``tensor_product``, ``tensor_summation``, ``tensor_exponential``.
-        """
-        # TODO: add a sequential option when block and accumulate as this would often be much faster
-        N, reduce_op, acc_op, neutral_gen, seed_gen, truncator = self._pre_processing_for_sequential(len(X), op=op,
-                                                                                                     trunc=trunc,
-                                                                                                     memory_consumption=memory_consumption)
-        X = self.tensor_moveaxis(truncator(X), source=axis, destination=0)
-        neutral = neutral_gen(X)
-        seed = seed_gen(neutral, starting_point)
-
-        # 1) make blocks
-        S = X[0].shape[0]
-        B = S if (block_size in (None, -1)) else int(block_size)
-        q, r = divmod(S, B)
-        if r: raise ValueError(f"tensor_abra: block_size={B} must divide S={S}.")
-        X_blocks = tuple(L.reshape(q, B, *L.shape[1:]) for L in X)
-
-        # 2) reduce blocks
-        associative = not (op == "fmexp" and memory_consumption == "low")
-        base_reducer = self._reducer(reduce_op, neutral=neutral, seed=neutral, associative=associative)
-        if op == "fmexp" and memory_consumption == "high":
-            def reducer(block):
-                # Compute exp(step) for every step in the block, then reduce with the product.
-                return base_reducer(self.tensor_exponential(block, trunc=N))
-        else:
-            reducer = base_reducer
-        blocks = self._mapper(reducer)(X_blocks)
-
-        if not accumulate:
-            if output_starting_point:
-                return tuple(self.xp.stack([seed[k], *(blocks[k])], axis=axis) for k in range(N + 1))
-            else:
-                if q == 1: return tuple(a[0] for a in blocks)
-                return self.tensor_moveaxis(blocks, source=0, destination=axis)
-
-        # 3) accumulate (acc_op is assumed to be associative)
-        accumulator = self._accumulator(acc_op, neutral=neutral, seed=seed, associative=True)
-        stacked = tuple(self.xp.stack([seed[k], *(blocks[k])], axis=0) for k in range(N + 1))
-        _, zs = accumulator(stacked)
-        if not output_starting_point:
-            if q == 1: return tuple(a[1] for a in zs)
-            zs = tuple(a[1:] for a in zs)
-        return self.tensor_moveaxis(zs, source=0, destination=axis)
-
-    @dummy_jit(static_argnums=0, static_argnames=("axis", "trunc", "block_size", "accumulate", "starting_point",
-                                                  "output_starting_point", "memory_consumption", "increment_input"),
-               dynamic_batchtime=("X",))
-    def tensor_development(
-            self,
-            X: DenseElemFirstOn,  # [X₁, X₂, …] with steps axis at `axis`
-            *,
-            axis: int = -2,
-            trunc: int,
-            block_size: Optional[int] = None,  # None/-1 → one block
-            accumulate: bool = True,
-            starting_point: Optional[DenseElem] = None,
-            output_starting_point: bool = False,
-            memory_consumption: Literal["high", "low"] = "low",
-            increment_input: bool = False,
-    ) -> DenseElem:
-        """
-        Tensor/free development from a **path whose levels start at degree 1**:
-            X = [X₁, X₂, …], each with a steps axis at `axis`.
-
-        Input & convention
-        ------------------
-        • Xₖ has shape `(..., S_axis, d**k)` with steps on `axis` and width `d**k` last.
-        • By default, we first pass to increments along `axis`:
-              ΔXₖ[j] = Xₖ[..., j+1, :] - Xₖ[..., j, :],   k ≥ 1.
-        • If `increment_input=True`, then `X` is already interpreted as the increment array
-          `ΔX = (ΔX₁, ΔX₂, …)` and no differencing is applied.
-
-        Development
-        -----------
-        Write
-            S(X) := ∏_j exp(ΔX[j]),
-        where the product is the Chen/tensor product taken in step order, truncated at
-        degree `trunc`.
-
-        Thus this routine computes the truncated tensor development
-            S(X).
-
-        Blocking
-        --------
-        If the steps are split into contiguous blocks
-            B₀, B₁, ..., B_{L-1},
-        then the emitted block values are the blockwise developments
-            S(B_ℓ) := ∏_{j in B_ℓ} exp(ΔX[j]).
-
-        Accumulation
-        ------------
-        The keyword `accumulate` refers only to **accumulation across blocks**, not within
-        a block.
-
-        More precisely:
-
-        • `accumulate=False`:
-              emit
-                  [S(B₀), S(B₁), ..., S(B_{L-1})].
-
-        • `accumulate=True`:
-              emit the block-prefix developments
-                  [S(B₀), S(B₀)⊗S(B₁), ..., S(B₀)⊗...⊗S(B_{L-1})].
-
-        Therefore, if there is only one block and no nontrivial `starting_point`, then
-        `accumulate=True` and `accumulate=False` give the same result.
-
-        Starting point
-        --------------
-        If a starting point `g` is supplied, then the outputs are left-multiplied by `g`:
-
-        • `accumulate=False`:
-              [g⊗S(B₀), g⊗S(B₁), ..., g⊗S(B_{L-1})]
-
-        • `accumulate=True`:
-              [g⊗S(B₀), g⊗S(B₀)⊗S(B₁), ..., g⊗S(B₀)⊗...⊗S(B_{L-1})].
-
-        If `output_starting_point=True`, then the seed `g` itself is prepended; if no
-        starting point is given, the neutral element is prepended.
-
-        Implementation
-        --------------
-        • `memory_consumption="low"`:
-              call `tensor_abra(..., op="fmexp", ...)`, so exponentials are streamed
-              within each block.
-
-        • `memory_consumption="high"`:
-              first compute the per-step exponentials
-                  exp(ΔX[j]),
-              packed as a graded element along the steps axis, and then call
-              `tensor_abra(..., op="product", ...)`.
-
-        Output
-        ------
-        Exactly as in `tensor_abra`:
-
-        • If exactly one item is emitted, return a single graded element.
-        • Otherwise, return packed levels with a block axis inserted at `axis`.
-        """
-        X = tuple(X)
-        if not X:
-            raise ValueError("tensor_development: X must contain at least X₁.")
-        N = min(trunc, len(X))
-
-        if increment_input:
-            dX = X[:N]
-        else:
-            # Increments ΔX along `axis` (degrees 1..N)
-            dX = tuple(self.xp.diff(L, axis=axis) for L in X[:N])
-
-        if memory_consumption == "low":
-            return self.tensor_abra(
-                dX,
-                op="fmexp",
-                axis=axis,
-                trunc=trunc,
-                block_size=block_size,
-                accumulate=accumulate,
-                starting_point=starting_point,
-                output_starting_point=output_starting_point,
-            )
-
-        # memory_consumption == "high": batched exponential over steps, then product reduce
-        E = self.tensor_exponential(dX, trunc=trunc, output_zero_level=True)  # keeps `axis`
-        return self.tensor_abra(
-            E,
-            op="product",
-            axis=axis,
-            trunc=trunc,
-            block_size=block_size,
-            accumulate=accumulate,
-            starting_point=starting_point,
-            output_starting_point=output_starting_point,
-        )
-
-    @dummy_jit(static_argnums=0, static_argnames=("axis", "trunc", "block_size", "accumulate", "starting_point",
-                                                  "output_starting_point", "memory_consumption"),
-               dynamic_batchtime=("X",))
-    def tensor_path_signature(
-            self,
-            x: Array,
-            *,
-            axis: int = -2,
-            trunc: int,
-            block_size: Optional[int] = None,  # None/-1 → one block
-            accumulate: bool = True,
-            starting_point: Optional[DenseElem] = None,
-            output_starting_point: bool = False,
-            memory_consumption: Literal["high", "low"] = "low",
-    ) -> DenseElem:
-        """
-        Calculate the signature of a given path (X[..., i, ...])_{i in axis} and return as a graded element.
-        """
-        return self.tensor_development((x,), axis=axis, trunc=trunc, block_size=block_size, accumulate=accumulate,
-                                       starting_point=starting_point, output_starting_point=output_starting_point,
-                                       memory_consumption=memory_consumption)
 
     # ----------------------------------------------------------------------
     # API Transformers (from_flat / to_flat / densify)
@@ -1207,7 +874,7 @@ class Universal(Generic[Array]):
                 out.append(self.xp.zeros_like(ref_max[..., :w]))
         return tuple(out)
 
-    @dummy_jit(static_argnums=0, static_argnames=("dim", "insert_zero_level"), dynamic_batchtime=("X",))
+    @dummy_jit(static_argnums=0, static_argnames=("dim", "insert_zero_level"), dynamic_batch=("X",))
     def tensor_from_flat(
             self,
             flat: Array,
@@ -1290,7 +957,7 @@ class Universal(Generic[Array]):
 
         return (X0,) + tuple(parts)
 
-    @dummy_jit(static_argnums=0, static_argnames=("start_at_level_one",), dynamic_batchtime=("levels",))
+    @dummy_jit(static_argnums=0, static_argnames=("start_at_level_one",), dynamic_batch=("levels",))
     def tensor_to_flat(self, levels: DenseElem, *, start_at_level_one: bool = False) -> Array:
         """
         Concatenate per-degree levels into a single flattened representation.
@@ -1365,7 +1032,7 @@ class Universal(Generic[Array]):
         """
         return self.xp.moveaxis(X, (-3, -2), (row_axis, col_axis))
 
-    @dummy_jit(static_argnums=0, static_argnames=("row_axis", "col_axis"), dynamic_batchtime=("A",),
+    @dummy_jit(static_argnums=0, static_argnames=("row_axis", "col_axis"), dynamic_batch=("A",),
                full_dynamic=("M",))
     def tensor_matrix_product_right_homogeneous(
             self,
@@ -1410,7 +1077,7 @@ class Universal(Generic[Array]):
 
         return self._restore_matrix_axes(out, row_axis, col_axis)
 
-    @dummy_jit(static_argnums=0, static_argnames=("row_axis", "col_axis"), dynamic_batchtime=("A",),
+    @dummy_jit(static_argnums=0, static_argnames=("row_axis", "col_axis"), dynamic_batch=("A",),
                full_dynamic=("M",))
     def tensor_matrix_product_left_homogeneous(
             self,
@@ -1455,7 +1122,7 @@ class Universal(Generic[Array]):
 
         return self._restore_matrix_axes(out, row_axis, col_axis)
 
-    @dummy_jit(static_argnums=0, static_argnames=("row_axis", "col_axis"), dynamic_batchtime=("A", "B"))
+    @dummy_jit(static_argnums=0, static_argnames=("row_axis", "col_axis"), dynamic_batch=("A", "B"))
     def tensor_matrix_product_homogeneous(
             self,
             A: Array,
@@ -1495,7 +1162,7 @@ class Universal(Generic[Array]):
 
         return self._restore_matrix_axes(out, row_axis, col_axis)
 
-    @dummy_jit(static_argnums=0, static_argnames=("trunc", "row_axis", "col_axis"), dynamic_batchtime=("A",),
+    @dummy_jit(static_argnums=0, static_argnames=("trunc", "row_axis", "col_axis"), dynamic_batch=("A",),
                full_dynamic=("M",))
     def tensor_matrix_product_right(
             self,
@@ -1546,7 +1213,7 @@ class Universal(Generic[Array]):
             for r in range(N + 1)
         )
 
-    @dummy_jit(static_argnums=0, static_argnames=("trunc", "row_axis", "col_axis"), dynamic_batchtime=("A",),
+    @dummy_jit(static_argnums=0, static_argnames=("trunc", "row_axis", "col_axis"), dynamic_batch=("A",),
                full_dynamic=("M",))
     def tensor_matrix_product_left(
             self,
@@ -1597,7 +1264,7 @@ class Universal(Generic[Array]):
             for r in range(N + 1)
         )
 
-    @dummy_jit(static_argnums=0, static_argnames=("trunc", "row_axis", "col_axis"), dynamic_batchtime=("A", "B"))
+    @dummy_jit(static_argnums=0, static_argnames=("trunc", "row_axis", "col_axis"), dynamic_batch=("A", "B"))
     def tensor_matrix_product(
             self,
             A: DenseElem,

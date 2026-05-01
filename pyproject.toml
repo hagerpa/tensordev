@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tensordev"
-version = "0.0.1"
+version = "0.0.2"
 description = "Framework-flexible tensor algebra: signatures and kernels."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -12,13 +12,13 @@ license = {text = "Proprietary"}
 authors = [
     {name = "Paul Hager"},
     {name = "Julian Pachschwoell"},
+    {name = "Luca Pelizzari"},
 ]
 dependencies = [
     "jax>=0.4.20",
     "jaxlib>=0.4.20",
     "numpy>=1.24",
     "numba>=0.58",
-    "array-api>=1.0",
 ]
 
 [project.optional-dependencies]

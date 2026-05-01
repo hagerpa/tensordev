@@ -156,9 +156,9 @@ class RowState:
         )
 
     @classmethod
-    def stack_history(cls, initial: "RowState", hist: "RowState") -> "WaveState":
+    def stack_history(cls, initial: "RowState", hist: "RowState") -> "GridState":
         um = CellData.unmove_scan_axis
-        return WaveState(
+        return GridState(
             eta=jnp.concatenate([initial.eta[:, None, :], um(hist.eta)], axis=1),
             K=jnp.concatenate([initial.K[:, None], um(hist.K)], axis=1),
             A=jnp.concatenate([initial.A[:, None], um(hist.A)], axis=1),
@@ -168,11 +168,31 @@ class RowState:
 
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
-class WaveState:
+class GridState:
     eta: Array
     K: Array
     A: Array
     B: Array
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class FrontierState:
+    """Padded anti-diagonal buffer for the wavefront traversal carry."""
+
+    eta: Array
+    K: Array
+    A: Array
+    B: Array
+
+    @classmethod
+    def zeros(cls, W: int, batch: int, r: int, dtype) -> "FrontierState":
+        return cls(
+            eta=jnp.ones((W, batch), dtype=dtype),
+            K=jnp.zeros((W, batch, r, r), dtype=dtype),
+            A=jnp.zeros((W, batch, r, r), dtype=dtype),
+            B=jnp.zeros((W, batch, r, r), dtype=dtype),
+        )
 
 
 @jax.tree_util.register_dataclass
@@ -621,29 +641,26 @@ def _make_wavefront_solver(cell_step, precompute_propagators, dyadic_order, term
         W = min(s_steps, t_steps) + 1
         max_int_w = max(min(s_steps, t_steps), 1)
 
-        def _zeros_buf():
-            return (
-                jnp.ones((W, batch), dtype=dtype),
-                jnp.zeros((W, batch, r, r), dtype=dtype),
-                jnp.zeros((W, batch, r, r), dtype=dtype),
-                jnp.zeros((W, batch, r, r), dtype=dtype),
-            )
-
-        buf_d0 = _zeros_buf()
-        buf_d1 = _zeros_buf()
+        buf_d0 = FrontierState.zeros(W, batch, r, dtype)
+        buf_d1 = FrontierState.zeros(W, batch, r, dtype)
 
         n_diags = s_steps + t_steps - 1
         if n_diags <= 0:
+            if terminal_only:
+                return (
+                    jnp.ones((batch,), dtype=dtype),
+                    jnp.zeros((batch, r, r), dtype=dtype),
+                    jnp.zeros((batch, r, r), dtype=dtype),
+                    jnp.zeros((batch, r, r), dtype=dtype),
+                )
             eta_grid = jnp.ones((batch, s_nodes, t_nodes), dtype=dtype)
             z = jnp.zeros((batch, s_nodes, t_nodes, r, r), dtype=dtype)
-            return eta_grid, z, z.copy(), z.copy()
+            return eta_grid, z, z, z
 
         d_arr = jnp.arange(2, s_steps + t_steps + 1, dtype=jnp.int32)
 
         def diag_step(carry, d):
             buf_prev, buf_prev2 = carry
-            eta_p, K_p, A_p, B_p = buf_prev
-            eta_p2, K_p2, A_p2, B_p2 = buf_prev2
 
             ext_lo = jnp.maximum(0, d - t_steps)
             ext_lo_p = jnp.maximum(0, d - 1 - t_steps)
@@ -671,10 +688,10 @@ def _make_wavefront_solver(cell_step, precompute_propagators, dyadic_order, term
 
             cells = CellData(
                 hx=dt_x[im1], hy=dt_y[jm1],
-                K_w=K_p[k_w], K_n=K_p[k_n], K_nw=K_p2[k_nw],
-                eta_w=eta_p[k_w], eta_n=eta_p[k_n], eta_nw=eta_p2[k_nw],
-                A_w=A_p[k_w], A_n=A_p[k_n], A_nw=A_p2[k_nw],
-                B_w=B_p[k_w], B_n=B_p[k_n], B_nw=B_p2[k_nw],
+                K_w=buf_prev.K[k_w], K_n=buf_prev.K[k_n], K_nw=buf_prev2.K[k_nw],
+                eta_w=buf_prev.eta[k_w], eta_n=buf_prev.eta[k_n], eta_nw=buf_prev2.eta[k_nw],
+                A_w=buf_prev.A[k_w], A_n=buf_prev.A[k_n], A_nw=buf_prev2.A[k_nw],
+                B_w=buf_prev.B[k_w], B_n=buf_prev.B[k_n], B_nw=buf_prev2.B[k_nw],
                 gamma_nw=sw(_gc(im1, jm1)),
             )
 
@@ -685,33 +702,31 @@ def _make_wavefront_solver(cell_step, precompute_propagators, dyadic_order, term
                 ), in_axes=(0, 0, 0),
             )(cells, im1, jm1)
 
-            new_eta, new_K, new_A, new_B = _zeros_buf()
-
+            init = FrontierState.zeros(W, batch, r, dtype)
             int_pos = jnp.clip(int_lo - ext_lo + offsets, 0, W - 1)
             vmask, vmask_rr = valid[:, None], valid[:, None, None, None]
-            new_eta = new_eta.at[int_pos].set(jnp.where(vmask, eta_new, new_eta[int_pos]))
-            new_K = new_K.at[int_pos].set(jnp.where(vmask_rr, K_new, new_K[int_pos]))
-            new_A = new_A.at[int_pos].set(jnp.where(vmask_rr, A_new, new_A[int_pos]))
-            new_B = new_B.at[int_pos].set(jnp.where(vmask_rr, B_new, new_B[int_pos]))
+            new_buf = FrontierState(
+                eta=init.eta.at[int_pos].set(jnp.where(vmask, eta_new, init.eta[int_pos])),
+                K=init.K.at[int_pos].set(jnp.where(vmask_rr, K_new, init.K[int_pos])),
+                A=init.A.at[int_pos].set(jnp.where(vmask_rr, A_new, init.A[int_pos])),
+                B=init.B.at[int_pos].set(jnp.where(vmask_rr, B_new, init.B[int_pos])),
+            )
 
-            return ((new_eta, new_K, new_A, new_B), buf_prev), \
+            return (new_buf, buf_prev), \
                 None if terminal_only else (i_safe, j_safe, valid, eta_new, K_new, A_new, B_new)
 
         (last_buf, _), all_out = jax.lax.scan(diag_step, (buf_d1, buf_d0), d_arr)
 
         if terminal_only:
-            # Terminal cell (s_steps, t_steps) is always the last element of the last diagonal buffer
-            eta_last, K_last, A_last, B_last = last_buf
-            # The terminal cell is at position 0 in the last diagonal's buffer
-            # (last diagonal has width 1 containing only the terminal cell)
-            return eta_last[0], K_last[0], A_last[0], B_last[0]
+            # The last diagonal has width 1, so the terminal cell sits at buffer position 0.
+            return last_buf.eta[0], last_buf.K[0], last_buf.A[0], last_buf.B[0]
 
         i_all, j_all, valid_all, eta_all, K_all, A_all, B_all = all_out
 
         # Reconstruct full grid
         eta_grid = jnp.ones((batch, s_nodes, t_nodes), dtype=dtype)
         z = jnp.zeros((batch, s_nodes, t_nodes, r, r), dtype=dtype)
-        K_grid, A_grid, B_grid = z, z.copy(), z.copy()
+        K_grid, A_grid, B_grid = z, z, z
 
         i_flat, j_flat, v_flat = i_all.reshape(-1), j_all.reshape(-1), valid_all.reshape(-1)
         mv = lambda a: jnp.moveaxis(a.reshape(-1, *a.shape[2:]), 0, 1)
@@ -836,4 +851,4 @@ def _build_gamma_grid_static(X_nodes, Y_nodes, *, kernel, static_kernel, pairwis
     return gamma_padded, batch_shape
 
 
-__all__ = ["fssk_sigkernel", "FSSKSigKernel", "CellData", "RowState", "WaveState"]
+__all__ = ["fssk_sigkernel", "FSSKSigKernel", "CellData", "RowState", "GridState", "FrontierState"]

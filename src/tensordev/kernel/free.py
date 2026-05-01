@@ -1,5 +1,3 @@
-# TODO: Abstract this to general cores using tensor_abra etc...
-
 from __future__ import annotations
 
 from functools import partial
@@ -11,13 +9,16 @@ from jax import lax
 from dataclasses import dataclass
 
 from tensordev import Jax
+from tensordev.core.jax import JaxSequentialCore
 from tensordev.core.universal import DenseElemFirstOn
+from tensordev.development.free import free_development
 from tensordev.kernel.base_kernel import BaseKernel
 from tensordev.kernel.parallel import pmap_batch
 from tensordev.kernel.static_kernels import LinearKernel, StaticKernel
 from tensordev.kernel.util import DyadicOrder, normalize_dyadic_order
 
-JaxCore = Jax()
+_CORE = Jax()
+_SEQ_CORE = JaxSequentialCore()
 Array = jnp.ndarray
 
 
@@ -150,16 +151,16 @@ class FreeRowState:
 
 
 def free_kernel(
-        x: DenseElemFirstOn,
-        y: DenseElemFirstOn,
+        x,
+        y,
         *,
         evaluate: Literal["terminal", "grid"] = "terminal",
         return_fg: bool = False,
         pairwise: bool = False,
         backend: Literal["scan", "wavefront"] = "scan",
         dyadic_order: DyadicOrder = 0,
-        core=None,
         increment_in: bool = False,
+        quadrature: Literal["left", "midpoint", "trapezoid"] = "left",
         num_devices: int = 1,
         static_kernel: StaticKernel = LinearKernel(scale=1.0)):
     """
@@ -195,9 +196,6 @@ def free_kernel(
         for ``x`` and ``y``.  Each coarse interval is split into
         ``2**order`` sub-intervals; driving data is stored on the coarse grid
         and indexed lazily (memory-efficient).
-
-    core : optional
-        Tensor algebra backend. If ``None``, the default ``Jax()`` backend is used.
 
     increment_in : bool, default=False
         Whether tensor-valued inputs ``x`` and ``y`` are already given as interval
@@ -242,20 +240,17 @@ def free_kernel(
     ``(w, f, g)``, either at the terminal point or on the full discrete grid.
     """
     dyadic_order = normalize_dyadic_order(dyadic_order)
-    core = JaxCore if core is None else core
 
-    dx = _to_increments(x, increment_in=increment_in)
-    dy = _to_increments(y, increment_in=increment_in)
+    dx = _to_increments(x, increment_in=increment_in, quadrature=quadrature)
+    dy = _to_increments(y, increment_in=increment_in, quadrature=quadrature)
 
     def _solve(dx_, dy_):
         if backend == "scan":
             return _solve_scan(dx_, dy_, evaluate=evaluate, return_fg=return_fg,
-                               dyadic_order=dyadic_order, core=core,
-                               static_kernel=static_kernel)
+                               dyadic_order=dyadic_order, static_kernel=static_kernel)
         if backend == "wavefront":
             return _solve_wavefront(dx_, dy_, evaluate=evaluate, return_fg=return_fg,
-                                    dyadic_order=dyadic_order, core=core,
-                                    static_kernel=static_kernel)
+                                    dyadic_order=dyadic_order, static_kernel=static_kernel)
         raise ValueError(f"Unknown backend={backend!r}.")
 
     if num_devices > 1:
@@ -277,16 +272,70 @@ def free_kernel(
     return _solve(dx, dy)
 
 
+def _callable_to_increments(
+        velocity_fn,
+        grid: Array,
+        *,
+        quadrature: str,
+) -> DenseElemFirstOn:
+    """Integrate a velocity callable over intervals defined by ``grid``.
+
+    ``velocity_fn(t)`` must return a tuple of arrays of shape
+    ``t.shape + (d**k,)`` for each level k.  ``grid`` is a 1-D array of
+    length S+1 defining S intervals.
+
+    Supported quadrature rules: ``"left"``, ``"midpoint"``, ``"trapezoid"``.
+    """
+    grid = jnp.asarray(grid, dtype=jnp.float64)
+    dt = jnp.diff(grid)  # (S,)
+    if quadrature == "left":
+        velocities = velocity_fn(grid[:-1])
+        return tuple(dt[:, None] * v for v in velocities)
+    if quadrature == "midpoint":
+        t_mid = 0.5 * (grid[:-1] + grid[1:])
+        velocities = velocity_fn(t_mid)
+        return tuple(dt[:, None] * v for v in velocities)
+    if quadrature == "trapezoid":
+        v_left = velocity_fn(grid[:-1])
+        v_right = velocity_fn(grid[1:])
+        return tuple(0.5 * dt[:, None] * (vl + vr) for vl, vr in zip(v_left, v_right))
+    raise ValueError(f"Unknown quadrature={quadrature!r}. Expected 'left', 'midpoint', or 'trapezoid'.")
+
+
 def _to_increments(
-        arg: DenseElemFirstOn,
+        arg,
         *,
         increment_in: bool,
+        quadrature: str = "left",
 ) -> DenseElemFirstOn:
     """Normalize tensor-level input into interval increments (coarse grid).
 
+    ``arg`` may be:
+    - a tuple/list of tensor levels (path or increment arrays),
+    - a single array (level-1 path or increment),
+    - a ``(callable, grid)`` pair where the callable is a velocity function.
+
     If ``increment_in=False``, path values are differenced along axis ``-2``.
     If ``increment_in=True``, the levels are returned as-is after validation.
+    For callable inputs, ``quadrature`` determines the integration rule.
     """
+    if callable(arg):
+        raise ValueError(
+            "Callable input requires a (callable, grid) tuple; got a bare callable."
+        )
+
+    if isinstance(arg, tuple) and len(arg) == 2 and callable(arg[0]):
+        velocity_fn, grid = arg
+        normalized = _callable_to_increments(velocity_fn, grid, quadrature=quadrature)
+        S = int(normalized[0].shape[-2])
+        for k, lvl in enumerate(normalized, start=1):
+            if lvl.shape[-2] != S:
+                raise ValueError(
+                    f"All tensor levels from callable must have the same interval axis length. "
+                    f"Level 1 has {S}, level {k} has {lvl.shape[-2]}."
+                )
+        return normalized
+
     levels = tuple(arg)
     if not levels:
         raise ValueError("Expected at least one positive tensor level.")
@@ -352,7 +401,6 @@ def _build_scan_boundaries(
         dy: DenseElemFirstOn,
         *,
         dyadic_order: tuple[int, int],
-        core,
 ):
     """
     Build the exact boundary data for the rowwise scan solver.
@@ -400,15 +448,8 @@ def _build_scan_boundaries(
                 for k in range(out_trunc)
             )
 
-        boundary_full = core.tensor_development(
-            driving,
-            axis=-2,
-            trunc=out_trunc,
-            block_size=1,
-            accumulate=True,
-            output_starting_point=True,
-            increment_input=True,
-        )
+        boundary_full = free_development(driving, increment_input=True, seq_core=_SEQ_CORE, trunc=out_trunc, axis=-2,
+                                         block_size=1, accumulate=True, output_starting_point=True, core=_CORE)
         return tuple(
             jnp.broadcast_to(
                 boundary_full[k + 1],
@@ -471,8 +512,8 @@ def _build_scan_boundaries(
     dy_scaled = tuple(level / r_y for level in dy) if dyadic_order_y > 0 else dy
 
     # Move interval axis to position 0 for scanning (coarse grid)
-    dx_steps_coarse = core.tensor_moveaxis(dx_scaled, source=-2, destination=0)
-    dy_steps_coarse = core.tensor_moveaxis(dy_scaled, source=-2, destination=0)
+    dx_steps_coarse = _CORE.tensor_moveaxis(dx_scaled, source=-2, destination=0)
+    dy_steps_coarse = _CORE.tensor_moveaxis(dy_scaled, source=-2, destination=0)
 
     # West boundary values for rows i = 1, ..., S_fine
     w_boundary_steps = jnp.moveaxis(w_col_0[..., 1:], -1, 0)
@@ -480,7 +521,7 @@ def _build_scan_boundaries(
     # West f-boundary values for rows i = 1, ..., S_fine
     # Expand coarse f_boundary to fine grid, then extract rows 1..S_fine
     f_boundary_fine = _expand_boundary_to_fine(f_boundary_coarse, S_fine + 1, dyadic_order_x)
-    f_boundary_steps = core.tensor_moveaxis(
+    f_boundary_steps = _CORE.tensor_moveaxis(
         tuple(level[..., 1:, :] for level in f_boundary_fine),
         source=-2,
         destination=0,
@@ -526,7 +567,7 @@ def _swap_scan_output(
     )
 
 
-def _free_cell_step(cell: FreeCellData, *, core, M, N, m, n, P, P_f, P_g):
+def _free_cell_step(cell: FreeCellData, *, M, N, m, n, P, P_f, P_g):
     """Compute the SE corner ``(u_se, f_se, g_se)`` from a three-corner neighbourhood.
 
     This is the free-kernel analogue of ``sss._heun_cell_step``.  It
@@ -537,8 +578,6 @@ def _free_cell_step(cell: FreeCellData, *, core, M, N, m, n, P, P_f, P_g):
     ----------
     cell : FreeCellData
         Three-corner stencil + driving increments.
-    core : tensor algebra backend
-        Provides ``tensor_inner_product``, ``tensor_adjoint_product``, etc.
     M, N : int
         Number of x- / y-levels (including level 0 if it were present; here
         ``M = len(dx)``, ``N = len(dy)``).
@@ -557,17 +596,17 @@ def _free_cell_step(cell: FreeCellData, *, core, M, N, m, n, P, P_f, P_g):
         Right-adjoint tensor at the SE corner (``m`` levels).
     """
     adj_left = partial(
-        core.tensor_adjoint_product,
+        _CORE.tensor_adjoint_product,
         side="left", w_first_on=True, y_first_on=True, first_on_out=True,
     )
     adj_right = partial(
-        core.tensor_adjoint_product,
+        _CORE.tensor_adjoint_product,
         side="right", w_first_on=True, y_first_on=True, first_on_out=True,
     )
-    t_prod = partial(core.tensor_product, a_first_on=True, b_first_on=True)
-    t_sum = core.tensor_summation
-    t_scal = core.tensor_scalar_multiply
-    t_inner = core.tensor_inner_product
+    t_prod = partial(_CORE.tensor_product, a_first_on=True, b_first_on=True)
+    t_sum = _CORE.tensor_summation
+    t_scal = _CORE.tensor_scalar_multiply
+    t_inner = _CORE.tensor_inner_product
 
     dx_i, dy_j = cell.dx_i, cell.dy_j
     u_nw, u_n, u_w = cell.u_nw, cell.u_n, cell.u_w
@@ -692,7 +731,6 @@ def _solve_scan(
         evaluate: Literal["terminal", "grid"],
         return_fg: bool,
         dyadic_order: tuple[int, int],
-        core,
         static_kernel: StaticKernel,
 ):
     """
@@ -734,7 +772,7 @@ def _solve_scan(
         f_w_steps,
         S_coarse,
         T_coarse,
-    ) = _build_scan_boundaries(dx, dy, dyadic_order=dyadic_order, core=core)
+    ) = _build_scan_boundaries(dx, dy, dyadic_order=dyadic_order)
 
     # Precompute the coarse G grid for the M==N==1 fast path.
     if M == 1 and N == 1:
@@ -757,11 +795,11 @@ def _solve_scan(
 
     def _split_tensor_row(some_row):
         """Split a tensor-row into (north j+1, northwest j) with scan axis at 0."""
-        some_n = core.tensor_moveaxis(
+        some_n = _CORE.tensor_moveaxis(
             tuple(level[..., 1:, :] for level in some_row),
             source=-2, destination=0,
         )
-        some_nw = core.tensor_moveaxis(
+        some_nw = _CORE.tensor_moveaxis(
             tuple(level[..., :-1, :] for level in some_row),
             source=-2, destination=0,
         )
@@ -800,7 +838,7 @@ def _solve_scan(
                 gamma_nw=gamma_nw,
             )
             u_se, f_se, g_se = _free_cell_step(
-                cell, core=core, M=M, N=N, m=m, n=n, P=P, P_f=P_f, P_g=P_g,
+                cell, M=M, N=N, m=m, n=n, P=P, P_f=P_f, P_g=P_g,
             )
             return (u_se, f_se, g_se), (u_se, f_se, g_se)
 
@@ -879,7 +917,6 @@ def _solve_wavefront(
         evaluate: Literal["terminal", "grid"],
         return_fg: bool,
         dyadic_order: tuple[int, int],
-        core,
         static_kernel: StaticKernel,
 ):
     """Anti-diagonal wavefront solver for the free-kernel PDE.
@@ -919,18 +956,16 @@ def _solve_wavefront(
     # Scale coarse increments and move interval axis to position 0
     dx_sc = tuple(level / r_x for level in dx) if dyadic_order_x > 0 else dx
     dy_sc = tuple(level / r_y for level in dy) if dyadic_order_y > 0 else dy
-    dx_steps = core.tensor_moveaxis(dx_sc, source=-2, destination=0)
-    dy_steps = core.tensor_moveaxis(dy_sc, source=-2, destination=0)
+    dx_steps = _CORE.tensor_moveaxis(dx_sc, source=-2, destination=0)
+    dy_steps = _CORE.tensor_moveaxis(dy_sc, source=-2, destination=0)
 
     # --- Boundary developments on the fine grid ---
 
     def _bdev(driving, *, out_trunc):
         if out_trunc == 0:
             return tuple()
-        bnd = core.tensor_development(
-            driving, axis=-2, trunc=out_trunc, block_size=1,
-            accumulate=True, output_starting_point=True, increment_input=True,
-        )
+        bnd = free_development(driving, increment_input=True, seq_core=_SEQ_CORE, trunc=out_trunc, axis=-2,
+                               block_size=1, accumulate=True, output_starting_point=True, core=_CORE)
         return tuple(
             jnp.broadcast_to(bnd[k + 1], batch_shape + bnd[k + 1].shape[-2:])
             for k in range(out_trunc)
@@ -1006,17 +1041,22 @@ def _solve_wavefront(
 
     n_diags = S_fine + T_fine - 1
     if n_diags <= 0:
+        if terminal_only:
+            u_term = jnp.ones(batch_shape, dtype=dtype)
+            if return_fg:
+                return (
+                    u_term,
+                    tuple(jnp.zeros(batch_shape + (dy[k].shape[-1],), dtype=dtype) for k in range(n)),
+                    tuple(jnp.zeros(batch_shape + (dx[k].shape[-1],), dtype=dtype) for k in range(m)),
+                )
+            return u_term
         out_u = jnp.ones(batch_shape + (s_nodes, t_nodes), dtype=dtype)
         if return_fg:
-            out_f = tuple(
-                jnp.zeros(batch_shape + (s_nodes, t_nodes, dy[k].shape[-1],), dtype=dtype)
-                for k in range(n)
+            return (
+                out_u,
+                tuple(jnp.zeros(batch_shape + (s_nodes, t_nodes, dy[k].shape[-1]), dtype=dtype) for k in range(n)),
+                tuple(jnp.zeros(batch_shape + (s_nodes, t_nodes, dx[k].shape[-1]), dtype=dtype) for k in range(m)),
             )
-            out_g = tuple(
-                jnp.zeros(batch_shape + (s_nodes, t_nodes, dx[k].shape[-1],), dtype=dtype)
-                for k in range(m)
-            )
-            return out_u, out_f, out_g
         return out_u
 
     d_arr = jnp.arange(2, S_fine + T_fine + 1, dtype=jnp.int32)
@@ -1087,7 +1127,7 @@ def _solve_wavefront(
         )
         u_new, f_new, g_new = jax.vmap(
             lambda c: _free_cell_step(
-                c, core=core, M=M, N=N, m=m, n=n, P=P, P_f=P_f, P_g=P_g,
+                c, M=M, N=N, m=m, n=n, P=P, P_f=P_f, P_g=P_g,
             )
         )(cells)
 
@@ -1208,7 +1248,6 @@ class FreeKernel(BaseKernel):
     backend: Literal["scan", "wavefront"] = "scan"
     dyadic_order: DyadicOrder = 0
     increment_in: bool = False
-    core: object = None
     num_devices: int = 1
     static_kernel: StaticKernel = LinearKernel(scale=1.0)
 
@@ -1230,7 +1269,6 @@ class FreeKernel(BaseKernel):
             pairwise=pairwise,
             backend=self.backend,
             dyadic_order=self.dyadic_order,
-            core=self.core,
             increment_in=self.increment_in,
             num_devices=self.num_devices,
             static_kernel=self.static_kernel,

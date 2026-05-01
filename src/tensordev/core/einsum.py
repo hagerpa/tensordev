@@ -6,10 +6,9 @@ from .universal import *
 class Einsum(Universal[Array]):
     @wraps(Universal.tensor_product_homogeneous)
     def tensor_product_homogeneous(self, Ai: Array, Bj: Array) -> Array:
-        return self.xp.einsum(
-            "...i,...j->...ij",
-            Ai, Bj
-        ).reshape(Ai.shape[:-1] + (Ai.shape[-1] * Bj.shape[-1],))
+        out = self.xp.einsum("...i,...j->...ij", Ai, Bj)
+        batch = self.xp.broadcast_shapes(Ai.shape[:-1], Bj.shape[:-1])
+        return out.reshape(batch + (Ai.shape[-1] * Bj.shape[-1],))
 
     @wraps(Universal.tensor_inner_product_homogeneous)
     def tensor_inner_product_homogeneous(self, Ak: Array, Bk: Array) -> Array:
@@ -61,7 +60,7 @@ class Einsum(Universal[Array]):
             row_axis: int = -3,
             col_axis: int = -2,
     ) -> Array:
-        A, row_axis, col_axis = self._canonicalize_matrix_axes(A, row_axis, col_axis)
+        A, _, _ = self._canonicalize_matrix_axes(A, row_axis, col_axis)
         B, _, _ = self._canonicalize_matrix_axes(B, row_axis, col_axis)
 
         out = self.xp.einsum("...nka,...klb->...nlab", A, B)

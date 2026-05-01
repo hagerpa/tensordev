@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools as _itertools
 from dataclasses import replace
 from functools import partial
 
@@ -12,10 +13,10 @@ from tensordev.core.universal import DenseElem, DenseElemFirstOn
 from tensordev.sss.coeffs import FSSKCoefficients
 from tensordev.sss.kernel import FSSK
 from tensordev.sss.recursion_scalar import update_state as update_state_scalar
+from tensordev.sss.recursion_general import update_state as update_state_general
 
 Array = jax.Array
 
-# TODO: thread the core through the public API rather than a module-level singleton.
 _CORE = Jax()
 
 
@@ -253,9 +254,91 @@ def _update_state(
     """Per-step state transition dispatcher."""
     if coef.q == 1:
         return update_state_scalar(Z, y, coef, core=_CORE)
-    raise NotImplementedError(
-        f"Per-step update not implemented for q={coef.q}."
+    return update_state_general(Z, y, coef, core=_CORE)
+
+
+@partial(
+    jax.jit,
+    static_argnames=(
+            "trunc",
+            "axis",
+            "block_size",
+            "accumulate",
+            "output_starting_state",
+            "increment_input",
+    ),
+)
+def fssk_vsig(
+        X: Array,
+        *,
+        kernel: FSSK,
+        dt: Array | float,
+        trunc: int,
+        axis: int = -2,
+        block_size: int | None = None,
+        accumulate: bool = True,
+        initial_state: DenseElemFirstOn | None = None,
+        output_starting_state: bool = False,
+        tau_dt: Array | float = 0.0,
+        increment_input: bool = False,
+) -> DenseElem:
+    """
+    Compute the Volterra signature of a path via the FSSK recursion.
+
+    Equivalent to calling :func:`fssk_state` followed by :func:`fssk_readout`.
+    When ``block_size`` is ``None`` (default) and ``output_starting_state=False``,
+    returns the signature at the single terminal time.  Set ``block_size=1`` and
+    ``output_starting_state=True`` to obtain a full per-step signature trajectory.
+
+    Parameters
+    ----------
+    X:
+        Path nodes or increments. Trailing axis is the coordinate dim
+        ``kernel.path_dim``; ``axis`` is the step axis.  Set
+        ``increment_input=True`` to skip :func:`jnp.diff`.
+    kernel:
+        Finite-state-space Volterra kernel.
+    dt:
+        Step size(s). Accepted shapes: scalar, ``(1,)``, ``(S,)``, or
+        matching batch/step axes of ``X`` without the trailing coordinate axis.
+    trunc:
+        Tensor truncation level (positive integer).
+    axis:
+        Step axis of ``X`` (default ``-2``).
+    block_size:
+        Steps per emitted block (``None`` = full sequence).
+    accumulate:
+        Carry hidden state across blocks (default ``True``).
+    initial_state:
+        Optional seed in first-on format: ``trunc`` levels where level ``r``
+        has trailing shape ``(q, 1, R, m**(r+1))``.
+    output_starting_state:
+        Include the readout of the seed state (default ``False``).
+    tau_dt:
+        Non-negative readout lag ``tau - t``; broadcasts against batch axes.
+    increment_input:
+        Treat ``X`` as increments rather than path nodes.
+
+    Returns
+    -------
+    DenseElem
+        Volterra signature levels.  Without blocking, level ``r`` has trailing
+        shape ``(m**r,)``.  With blocking, an extra block/time axis appears at
+        ``axis``.
+    """
+    hidden = fssk_state(
+        X,
+        kernel=kernel,
+        dt=dt,
+        trunc=trunc,
+        axis=axis,
+        block_size=block_size,
+        accumulate=accumulate,
+        initial_state=initial_state,
+        output_starting_state=output_starting_state,
+        increment_input=increment_input,
     )
+    return fssk_readout(hidden, kernel=kernel, tau_dt=tau_dt)
 
 
 @jax.jit
@@ -439,4 +522,5 @@ __all__ = [
     "fssk_readout",
     "fssk_state",
     "fssk_state_from_coef",
+    "fssk_vsig",
 ]

@@ -1,13 +1,11 @@
-from .combinatorics import (
-    MultiIndexLayout,
-    build_multiindex_layout,
-    num_multiindices_exact,
-    num_multiindices_leq,
-)
+from .coeffs import VolterraCoefficients
+from .kernel import VolterraKernel
+from .signature import VolterraSignature
+from .iteration import vsig
 
 __all__ = [
-    "MultiIndexLayout",
-    "build_multiindex_layout",
-    "num_multiindices_exact",
-    "num_multiindices_leq",
+    "VolterraCoefficients",
+    "VolterraKernel",
+    "VolterraSignature",
+    "vsig",
 ]
