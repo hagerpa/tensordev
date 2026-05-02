@@ -206,6 +206,86 @@ def random_trigonometric_polynomial_paths_first_on(
     return tuple(levels)
 
 
+def deterministic_trigonometric_path_pair(grid, dim):
+    """
+    Two complementary deterministic trigonometric paths on a shared time grid,
+    intended as fixed base signals for kernel experiments and benchmarks.
+
+    The two paths ``x`` and ``w`` use different hard-coded frequency/phase
+    parameters so they are structurally distinct but comparably smooth.
+
+    Parameters
+    ----------
+    grid : Array, shape ``(length,)``
+        Uniform time grid, e.g. ``jnp.linspace(0, 1, 101)``.
+    dim : int
+        Path dimension.
+
+    Returns
+    -------
+    x : Array, shape ``(length, dim)``
+    w : Array, shape ``(length, dim)``
+    """
+    grid = jnp.asarray(grid)
+    idx = jnp.arange(1, dim + 1, dtype=grid.dtype)
+
+    x = (
+        0.35 * jnp.sin(2.0 * jnp.pi * grid[:, None] * (0.6 + 0.03 * idx) + 0.11 * idx)
+        + 0.25 * jnp.cos(2.0 * jnp.pi * grid[:, None] * (1.0 + 0.02 * idx) - 0.05 * idx)
+        + 0.08 * (idx / dim) * grid[:, None]
+        + 0.04 * (1.0 - idx / dim) * grid[:, None] ** 2
+    )
+
+    w = (
+        0.30 * jnp.sin(2.0 * jnp.pi * grid[:, None] * (0.8 + 0.025 * idx) - 0.09 * idx)
+        + 0.28 * jnp.cos(2.0 * jnp.pi * grid[:, None] * (1.1 + 0.015 * idx) + 0.03 * idx)
+        + 0.07 * (idx / dim) * grid[:, None]
+        + 0.05 * (1.0 - idx / dim) * grid[:, None] ** 2
+    )
+
+    return x, w
+
+
+def perturb_path_batch(base_path, batch_size, grid):
+    """
+    Build a batch of paths by adding small deterministic trigonometric perturbations
+    to a single base path.
+
+    The perturbation amplitudes grow linearly with batch index so that paths are
+    spread out progressively further from the base.
+
+    Parameters
+    ----------
+    base_path : Array, shape ``(length, d)``
+        The reference path around which to perturb.
+    batch_size : int
+        Number of paths in the returned batch.
+    grid : Array, shape ``(length,)``
+        Time grid shared by ``base_path``.
+
+    Returns
+    -------
+    Array, shape ``(batch, length, d)``
+        Batch of perturbed paths; ``result[0]`` is the smallest perturbation.
+    """
+    _, d_loc = base_path.shape
+    idx_loc = jnp.arange(1, d_loc + 1, dtype=base_path.dtype)
+    k = jnp.arange(batch_size, dtype=base_path.dtype)
+
+    freq1 = 0.5 + 0.03 * idx_loc[None, :] + 0.02 * k[:, None]   # (batch, d)
+    freq2 = 0.9 + 0.02 * idx_loc[None, :] + 0.015 * k[:, None]
+    phase = 0.07 * idx_loc[None, :] + 0.03 * k[:, None]
+    a_b   = (0.010 * (k + 1.0) / batch_size)[None, :, None]       # (1, batch, 1)
+    b_b   = (0.008 * (k + 1.0) / batch_size)[None, :, None]
+
+    g = grid[:, None, None]                                        # (length, 1, 1)
+    perturb = (
+        a_b * jnp.sin(2.0 * jnp.pi * g * freq1[None] + phase[None])
+        + b_b * jnp.cos(2.0 * jnp.pi * g * freq2[None] - 0.5 * phase[None])
+    )                                                              # (length, batch, d)
+    return base_path[None] + jnp.swapaxes(perturb, 0, 1)          # (batch, length, d)
+
+
 import numpy as np
 from numba import njit
 

@@ -12,3 +12,30 @@ dist/
 *.egg-info/
 .eggs/
 pip-wheel-metadata/
+
+# Local Jupyter/kernel config
+.jupyter_kernel_singlethread/
+start_jupyter_singlethread.sh
+
+# Test / coverage caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+tdvenv/
+
+# IDE/editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local scratch
+tmp/
+temp/
+*.log
