@@ -15,7 +15,7 @@ from tensordev.development.free import free_development
 from tensordev.kernel.base_kernel import BaseKernel
 from tensordev.kernel.parallel import pmap_batch
 from tensordev.kernel.static_kernels import LinearKernel, StaticKernel
-from tensordev.kernel.util import DyadicOrder, normalize_dyadic_order
+from tensordev.util.path_preprocessing import DyadicOrder, normalize_dyadic_order
 
 _CORE = Jax()
 _SEQ_CORE = JaxSequentialCore()

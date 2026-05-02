@@ -52,6 +52,17 @@ class ShuffleCore(Generic[Array]):
     def __repr__(self) -> str:
         return f"{type(self).__name__}(d={self.d}, trunc={self.trunc})"
 
+    def memory_bytes(self) -> int:
+        """Total bytes occupied by the precomputed sparse shuffle operators."""
+        return sum(
+            seg.nbytes + rows.nbytes + cols.nbytes + data.nbytes
+            for _, (seg, rows, cols, data) in self.operators.values()
+        )
+
+    def memory_mb(self) -> float:
+        """Precomputed operator memory in megabytes."""
+        return self.memory_bytes() / 1024 ** 2
+
     def _precompute(self) -> None:
         from tensordev.core.utils.shuffle_precalculation import assemble_shuffle_algebra_homogeneous
         for t in range(self.trunc + 1):

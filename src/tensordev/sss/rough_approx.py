@@ -99,11 +99,11 @@ def fractional_fssk(
     weights_arr = jnp.asarray(weights, dtype=real_dtype)
 
     q = int(A_arr.shape[0])
-    Lambda = jnp.diag(nodes_arr)
     b = jnp.broadcast_to(weights_arr[None, :], (q, R))
 
-    return FSSK.from_matrix(
-        Lambda=Lambda,
+    return FSSK.from_jordan(
+        real_rates=nodes_arr,
+        real_sizes=(1,) * R,
         A=A_arr,
         b=b,
         quad_order=int(coef_quad_order),

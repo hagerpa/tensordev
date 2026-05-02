@@ -8,7 +8,7 @@ import jax.numpy as jnp
 from tensordev.kernel.base_kernel import BaseKernel
 from tensordev.kernel.parallel import pmap_solver_call
 from tensordev.kernel.static_kernels import LinearKernel, StaticKernel
-from tensordev.kernel.util import DyadicOrder, normalize_dyadic_order
+from tensordev.util.path_preprocessing import DyadicOrder, normalize_dyadic_order
 from tensordev.sss.kernel import FSSK
 
 Array = jax.Array

@@ -1,15 +1,17 @@
 # tensordev
 
-JAX-based tensor algebra library for signature kernels and Volterra signature methods.
+JAX-based tensor algebra library for signatures, free developments, Volterra signatures and inner product-kernels thereof.
 
 ## Status
 
 Active development. The core tensor algebra, signature development, state-space kernels, Volterra signatures, and free/higher-order kernels are implemented and tested. Multi-backend support (PyTorch, TensorFlow, Numba) is planned but not yet implemented.
 
+Everything is end-to-end differentiable via JAX — from elementary tensor operations and path signatures through to signature kernel evaluations and Volterra kernel parameters.
+
 ## Installation
 
 ```bash
-pip install -e .
+pip install git+https://github.com/hagerpa/tensordev.git
 ```
 
 ## Package structure
@@ -18,94 +20,172 @@ pip install -e .
 tensordev/
 ├── core/           # Tensor algebra backends
 ├── development/    # Signature development (free and classical)
-├── sss/            # Finite-state-space Volterra kernels (FSSK)
-├── volterra/       # Volterra signature (non-Markovian, quadratic recursion)
-├── kernel/         # Signature kernels (Gram matrices, MMD, scoring rules)
+├── sss/            # State-space signatures (aka Volterra signatures for finite state space kernels (FSSK))
+├── volterra/       # Volterra signature (fractional, gamma, piecewise-constant kernels)
+├── kernel/         # Signature kernels (classical, free, FSSK, higher-order)
 └── util/           # Path generators and combinatorics
 ```
 
-### `tensordev.core` — tensor algebra backends
+### `tensordev.core` — tensor algebra operations
 
-The central abstraction is a *core object* that provides all tensor algebra operations (products, exponentials, logarithms, shuffles, path developments) over a chosen array framework.
-
-| Class | Backend | Status |
-|---|---|---|
-| `Jax` | JAX (JIT-compiled) | stable |
-| `Universal` | any array-API namespace | stable |
-| `Einsum` | base class for einsum-based cores | stable |
-| `JaxSequentialCore` | JAX scan/lax.associative_scan | stable |
-| `Numba` | Numba | stub |
-| `Torch` / `TensorFlow` | PyTorch / TensorFlow | stub |
+A *core object* exposes all tensor algebra operations over a chosen array backend. The default is `Jax()`. Operations are also available directly on the `tensordev` module:
 
 ```python
-from tensordev import Jax, Universal
-import numpy as np
+# If desired, enable float64 — must be set before importing JAX or tensordev.
+import jax
+jax.config.update("jax_enable_x64", True)
 
-core = Jax()
-# or: core = Universal(np)
+import tensordev as td
+import jax.numpy as jnp
+
+# two elements of the truncated tensor algebra, levels 0..3
+A = (jnp.ones((1,)), jnp.ones((2,)), jnp.ones((4,)), jnp.ones((8,)))
+B = (jnp.ones((1,)), jnp.ones((2,)), jnp.ones((4,)), jnp.ones((8,)))
+
+# Chen (tensor / concatenation) product
+C = td.tensor_product(A, B, trunc=3)
+
+# level-wise sum
+S = td.tensor_summation(A, B)
+
+# truncated exponential and logarithm (inputs start at level 1)
+E = td.tensor_exponential(A[1:], trunc=3)
+L = td.tensor_logarithm(A[1:], trunc=3)
+
+# inner product
+ip = td.tensor_inner_product(A, B)
 ```
 
-All cores expose the same API: `tensor_product`, `tensor_summation`, `tensor_exponential`, `tensor_logarithm`, `tensor_development`, `tensor_path_signature`, `shuffle_product`, etc.
+For the shuffle (commutative) product, create a `ShuffleCore` for a fixed base dimension and truncation. All shuffle operators are precomputed at construction time as sparse arrays, so repeated calls are pure compute with no reallocation. 
+
+```python
+sc = td.shuffle_core(d=2, trunc=3)
+C = sc.tensor_shuffle_product(A, B, trunc=3)
+```
+Use `shuffle_core_expected_memory` to check the memory budget before constructing at large `d` or `trunc` — it returns an upper bound (actual usage is typically 20–40% less):
+```python
+td.shuffle_core_expected_memory(d=2, trunc=8)   # →   1.63 MB  (actual  0.52 MB)
+td.shuffle_core_expected_memory(d=4, trunc=6)   # →   5.85 MB  (actual  4.07 MB)
+td.shuffle_core_expected_memory(d=4, trunc=8)   # → 363.85 MB  (actual 218.93 MB)
+td.shuffle_core_expected_memory(d=8, trunc=6)   # → 353.44 MB  (actual 297.57 MB)
+```
+
 
 ### `tensordev.development` — signature development
 
-High-level functions that compute the (free or classical) signature of a path, with optional blocking, parallelism, and batching.
+Compute truncated signatures with optional blocking. `block_size` splits the path into chunks and chains them via Chen's identity internally — useful for long sequences where the full path does not fit in memory at once.
 
 ```python
-from tensordev import path_signature, Signature
+import numpy as np
+from tensordev.util import random_trigonometric_polynomial_paths
 
-# functional
-sig = path_signature(X, trunc=4, core=core)
+X = random_trigonometric_polynomial_paths(batch=4, steps=32, dim=2, key=0)
 
-# class-based (binds core + trunc)
-sig_fn = Signature(trunc=4)
-sig = sig_fn(X)
+sig = td.path_signature(X, trunc=4)  # one shot
+
+# signature on two consecutive intervals
+sig_blocked = td.path_signature(X, trunc=4, block_size=16, accumulate=False)
+
+# Chen's identity: sig = sig_a ⊗ sig_b
+sig_a = td.tensor_slice(sig_blocked)[:, 0]
+sig_b = td.tensor_slice(sig_blocked)[:, 1]
+sig_c = td.tensor_product(sig_a, sig_b, trunc=4)
+np.testing.assert_allclose(td.tensor_to_flat(sig), td.tensor_to_flat(sig_c), atol=1e-12)  # ✓
+
+# shuffle identity: <sig, a ⊔ b> = <sig, a> · <sig, b>
+# a, b are fixed basis vectors — broadcast over the batch dimension
+e1 = td.tensor_densify((None, jnp.array([1., 0.])))
+e2 = td.tensor_densify((None, jnp.array([0., 1.])))
+sc = td.shuffle_core(d=2, trunc=4)
+np.testing.assert_allclose(
+    td.tensor_inner_product(sig, sc.tensor_shuffle_product(e1, e2, trunc=4)),
+    td.tensor_inner_product(sig, e1) * td.tensor_inner_product(sig, e2),
+    atol=1e-10,
+)  # ✓
 ```
 
-For tensor-valued paths (packed positive-level form):
+`free_development` generalises this to tensor-valued paths and adds block-level control. The example below computes per-block signatures and their tensor logarithms — the piecewise log-linear approximation that `HigherOrderKernel` uses internally:
 
 ```python
-from tensordev.development import free_development, FreeDevelopment
+from tensordev.development import free_development
 
-sig = free_development((X1, X2), trunc=3, core=core, seq_core=seq_core)
+# per-block signatures: (batch=4, n_blocks=4, dim^k) for block_size=8, steps=32
+block_sigs = free_development((X,), trunc=3, block_size=8, accumulate=False)
+
+# tensor log of each block signature → log-linear increments
+log_sigs = td.tensor_logarithm(block_sigs[1:], trunc=3, output_zero_level=False)
+
+# free development of the piecewise log-linear path
+higher_order_sig = free_development(log_sigs, trunc=3, increment_input=True)
+
+# piecewise log-linear sig recovers the original sig at the same truncation
+sig = td.path_signature(X, trunc=3)
+np.testing.assert_allclose(td.tensor_flatten(sig), td.tensor_flatten(higher_order_sig), atol=1e-12)  # ✓
 ```
 
-### `tensordev.sss` — finite-state-space Volterra kernels
+### `tensordev.sss` — state-space signatures
 
-Kernels of the form
+State-space signatures are Volterra signatures whose convolution kernel is a *finite state-space kernel* (FSSK) — a matrix-exponential kernel of the form
 
 $$K_{A,b}^\Lambda(t,s) = \sum_{r=1}^q \bigl(\mathbf{1}^\top e^{-\Lambda(t-s)} b_r\bigr) A_r$$
 
-with dense or Jordan state-space operators $\Lambda$.
+with dense or Jordan state-space operators $\Lambda$. This package provides functionality for propagating and reading out the hidden state that evolves via an ODE, making online / streaming evaluation of such Volterra signatures exact and efficient.
 
 ```python
-from tensordev.sss import FSSK, StateSpaceSignature, Lambda, DenseLambda, JordanLambda
+from tensordev.sss import StateSpaceSignature
 
-kernel = FSSK(Lambda=DenseLambda(L), A=A, b=b)
-
-# compute the Volterra signature (FSSK path)
-vsig_fn = StateSpaceSignature(kernel=kernel, trunc=4)
-result = vsig_fn.vsig(X, times=times)
+# Jordan kernel: one real exponential (rate 1.0) + one oscillatory pair (decay 0.5, freq 2π)
+# acting on R^2 paths via A = I_2  →  state dim R = 1 + 2 = 3
+sss = StateSpaceSignature.from_jordan(
+    real_rates=jnp.array([1.0]),
+    real_sizes=(1,),
+    osc_decays=jnp.array([0.5]),
+    osc_freqs=jnp.array([2 * jnp.pi]),
+    osc_sizes=(1,),
+    A=jnp.eye(2)[None],   # (q=1, m=2, d=2)
+    b=jnp.ones((1, 3)),   # (q=1, R=3)
+    trunc=3,
+)
+result = sss.vsig(X, dt=1.0 / 32)
 ```
 
-`StateSpaceSignature` carries an optional persistent hidden state for streaming / online evaluation.
+`StateSpaceSignature` carries an optional persistent hidden state for streaming / online evaluation:
+
+```python
+dt = 1.0 / 32
+
+# consume the first half of the path — state is updated, not lost
+sss_mid = sss.update_with_path(X[:, :17], dt=dt)
+vsig_mid = sss_mid.readout()          # Volterra signature at t = 0.5
+
+# continue with the second half
+sss_end = sss_mid.update_with_path(X[:, 16:], dt=dt)
+vsig_end = sss_end.readout()          # Volterra signature at t = 1.0
+
+# equivalent to the one-shot call
+np.testing.assert_allclose(
+    td.tensor_flatten(vsig_end), td.tensor_flatten(sss.vsig(X, dt=dt)), atol=0
+)  # ✓
+```
 
 ### `tensordev.volterra` — Volterra signature
 
-Volterra signature for non-Markovian convolution kernels via the quadratic triangular recursion. Supports fractional, Gamma, and piecewise-constant kernel families.
+Volterra signatures for fractional, Gamma, and piecewise-constant kernel families, computed via the quadratic triangular recursion with JAX-vectorised evaluation of the inner loop.
 
 ```python
 from tensordev.volterra import VolterraKernel, VolterraSignature, vsig
 
-# fractional kernel: k_p(t,s) = (t-s)^{beta_p - 1} / Gamma(beta_p)
+A = jnp.eye(2)[None]   # (q=1, m=2, d=2)
+dt = 1.0 / 32
+
+# functional API — fractional kernel k(t,s) = (t-s)^{β-1} / Γ(β)
 kernel = VolterraKernel.fractional(beta=jnp.array([0.8]), A=A)
+result = vsig(X, kernel=kernel, dt=dt, trunc=3)
 
-# functional API
-result = vsig(X, kernel=kernel, times=times, trunc=3)
-
-# class-based (binds kernel + trunc)
-vsig_fn = VolterraSignature(kernel=kernel, trunc=3)
-result = vsig_fn.vsig(X, times=times)
+# class-based — Gamma kernel (adds exponential damping to the fractional kernel)
+kernel_g = VolterraKernel.gamma(beta=jnp.array([0.8]), rate=jnp.array([1.0]), scale=jnp.array([1.0]), A=A)
+vsig_obj = VolterraSignature(kernel=kernel_g, trunc=3)
+result = vsig_obj.vsig(X, dt=dt)
 ```
 
 Available kernel constructors:
@@ -120,7 +200,7 @@ Setting `beta=1` with `VolterraKernel.fractional` recovers the classical iterate
 
 ### `tensordev.kernel` — signature kernels
 
-Kernel objects for empirical statistics (batchwise values, Gram matrices, MMD, energy score). All inherit from `BaseKernel`.
+Kernel objects for empirical statistics (batchwise values, Gram matrices, MMD, scoring rules). All inherit from `BaseKernel`.
 
 | Class | Description |
 |---|---|
@@ -131,14 +211,43 @@ Kernel objects for empirical statistics (batchwise values, Gram matrices, MMD, e
 | `LinearKernel`, `RBFKernel`, `RBF_CEXP_Kernel`, `RBF_SQR_Kernel` | Static (pointwise) kernels used as increment kernels |
 
 ```python
-from tensordev.kernel import SigKernel, FreeKernel, HigherOrderKernel
+import numpy as np
+from tensordev.util import random_trigonometric_polynomial_paths
+from tensordev.kernel import SigKernel, RBFKernel
+
+X = random_trigonometric_polynomial_paths(batch=4, steps=32, dim=2, key=0)
+Y = random_trigonometric_polynomial_paths(batch=4, steps=32, dim=2, key=1)
 
 k = SigKernel(dyadic_order=1)
-gram = k.gram(X, Y)           # (N, M) Gram matrix
-mmd  = k.mmd(X, Y)            # scalar MMD^2
-score = k.energy_score(X, Y)  # energy score
 
+vals = k.compute_kernel(X, Y)                  # (4,)   — batchwise k(X_i, Y_i)
+gram = k.compute_Gram(X, Y)                    # (4, 4) — full cross Gram matrix
+Kxx  = k.compute_Gram(X)                       # (4, 4) — symmetric (Y=None shortcut)
+mmd  = k.compute_mmd(X, Y)                     # scalar — empirical MMD²
+esr  = k.compute_expected_scoring_rule(X, Y)   # scalar — E_Y[S(X, y)]
+sr   = k.compute_scoring_rule(X, Y[0])         # scalar — S(X, y) for a single y
+
+# RBF increment kernel — replaces the default ⟨dx, dy⟩ inner product
+k_rbf = SigKernel(dyadic_order=0, static_kernel=RBFKernel(sigma=1.0))
+gram_rbf = k_rbf.compute_Gram(X, Y)            # (4, 4)
+```
+
+`FreeKernel`, `HigherOrderKernel`, and `FSSKSigKernel` share the same empirical API and are drop-in replacements for `SigKernel`:
+
+```python
+from tensordev.kernel import FreeKernel, HigherOrderKernel, FSSKSigKernel
+
+# free kernel — accepts tensor-valued paths; level-1 path reduces to SigKernel
+k_free = FreeKernel(dyadic_order=1)
+gram_free = k_free.compute_Gram(X, Y)          # (4, 4)
+
+# higher-order kernel — log_steps must divide the number of intervals (32 here)
 k_ho = HigherOrderKernel(log_steps=(2, 2), log_degree=(3, 3))
+mmd_ho = k_ho.compute_mmd(X, Y)               # scalar
+
+# FSSK kernel — wraps the sss.kernel of a StateSpaceSignature
+k_fssk = FSSKSigKernel(kernel=sss.kernel, dt_x=1.0/32, dt_y=1.0/32)
+mmd_fssk = k_fssk.compute_mmd(X, Y)           # scalar
 ```
 
 ### `tensordev.util` — utilities
@@ -149,45 +258,9 @@ from tensordev.util import (
     integrated_ou_first_on_path,
     random_trigonometric_polynomial_paths,
     unit_speed_paths,
+    bucket_pad_ragged_paths,
+    velocity_to_increments,
 )
-```
-
-## Quick start
-
-```python
-import jax.numpy as jnp
-from tensordev import Jax, path_signature
-from tensordev.volterra import VolterraKernel, vsig
-from tensordev.kernel import SigKernel
-
-# Classical signature
-X = jnp.array([[0.0, 0.0], [0.2, -0.1], [0.4, 0.3], [0.1, 0.5]])
-sig = path_signature(X, trunc=4)
-
-# Volterra signature (fractional kernel, beta=0.7)
-A = jnp.eye(2)[None]
-kernel = VolterraKernel.fractional(beta=jnp.array([0.7]), A=A)
-result = vsig(X, kernel=kernel, dt=1.0, trunc=3)
-
-# Signature kernel MMD
-k = SigKernel()
-mmd = k.mmd(X[None], X[None])   # trivially 0 for identical samples
-```
-
-## Backend selection
-
-The default backend is JAX. Override via environment variable:
-
-```bash
-TENSORDEV_BACKEND=jax python my_script.py
-```
-
-Programmatic access:
-
-```python
-from tensordev._backend import get_default_core, get_default_seq_core
-core = get_default_core()
-seq_core = get_default_seq_core()
 ```
 
 ## Tests
@@ -197,3 +270,28 @@ pytest tests/
 ```
 
 Tests are organized by subpackage: `tests/core/`, `tests/development/`, `tests/sss/`, `tests/volterra/`, `tests/kernel/`.
+
+## Backends
+
+The core abstraction supports multiple array frameworks. Currently only the JAX backend is fully implemented.
+
+| Class | Backend | Status |
+|---|---|---|
+| `Jax` | JAX (JIT-compiled) | stable |
+| `JaxSequentialCore` | JAX scan / `lax.associative_scan` | stable |
+| `JaxShuffleCore` | JAX sparse shuffle operators | stable |
+| `Universal` | any array-API namespace | stable |
+| `Einsum` | einsum-based base class | stable |
+| `Numba` | Numba | stub |
+| `Torch` / `TensorFlow` | PyTorch / TensorFlow | stub |
+
+The active backend is selected via the `TENSORDEV_BACKEND` environment variable (default: `"jax"`):
+
+```bash
+TENSORDEV_BACKEND=jax python my_script.py
+```
+
+```python
+from tensordev._backend import get_default_core, get_default_seq_core
+core = get_default_core()
+```

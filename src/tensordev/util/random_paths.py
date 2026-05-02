@@ -7,6 +7,12 @@ import jax.random as jr
 from jax import lax
 
 
+def _as_key(key):
+    if isinstance(key, int):
+        return jr.PRNGKey(key)
+    return key
+
+
 def path_to_increments(X):
     """
     Convert a DenseElemFirstOn path into interval increments.
@@ -37,6 +43,7 @@ def integrated_ou_first_on_path(
 
     and, if ``factorial=True``, additionally by ``1 / k!``.
     """
+    key = _as_key(key)
     dt = horizon / steps
     theta = mean_reversion
     alpha = math.exp(-theta * dt)
@@ -89,6 +96,7 @@ def random_trigonometric_polynomial_paths(
     """
     Batched random trigonometric-polynomial paths.
     """
+    key = _as_key(key)
     key_sin, key_cos = jr.split(key, 2)
 
     t = jnp.linspace(0.0, horizon, steps + 1, dtype=jnp.float64)
@@ -177,6 +185,7 @@ def random_trigonometric_polynomial_paths_first_on(
         ``(X_1, ..., X_trunc)`` with
         ``X_k.shape == (batch, steps + 1, dim**k)``.
     """
+    key = _as_key(key)
     level_keys = jr.split(key, trunc)
 
     levels = []

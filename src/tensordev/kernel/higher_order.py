@@ -11,7 +11,7 @@ from tensordev.core.universal import DenseElemFirstOn
 from tensordev.development.free import free_development
 from tensordev.kernel.free import free_kernel
 from tensordev.kernel.base_kernel import BaseKernel
-from tensordev.kernel.util import DyadicOrder
+from tensordev.util.path_preprocessing import DyadicOrder
 
 _CORE = Jax()
 _SEQ_CORE = JaxSequentialCore()

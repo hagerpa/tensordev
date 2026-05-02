@@ -39,3 +39,25 @@ def get_default_core() -> Any:
 
 def get_default_seq_core() -> Any:
     return _get(_DEFAULT_BACKEND)[1]
+
+
+_SHUFFLE_CORE_REGISTRY: dict[str, Any] = {}
+
+
+def _build_jax_shuffle_core(d: int, trunc: int) -> Any:
+    from tensordev.core.jax import JaxShuffleCore
+    return JaxShuffleCore(d=d, trunc=trunc)
+
+
+_SHUFFLE_REGISTRY: dict[str, Any] = {
+    "jax": _build_jax_shuffle_core,
+}
+
+
+def shuffle_core(d: int, trunc: int) -> Any:
+    if _DEFAULT_BACKEND not in _SHUFFLE_REGISTRY:
+        raise ValueError(
+            f"No ShuffleCore implementation for backend {_DEFAULT_BACKEND!r}. "
+            f"Available: {list(_SHUFFLE_REGISTRY)}."
+        )
+    return _SHUFFLE_REGISTRY[_DEFAULT_BACKEND](d, trunc)

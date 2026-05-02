@@ -66,6 +66,17 @@ DenseElem = Tuple[Array, ...]  # level k has last dim d**k stating at level k=0;
 DenseElemFirstOn = Tuple[Array, ...]  # level k has last dim d**k starting at level k=1 no Nones; shared batch shape,
 
 
+class _TensorSliceProxy:
+    """Proxy returned by ``tensor_slice(A)`` to support ``A[key]`` syntax."""
+    __slots__ = ("_levels",)
+
+    def __init__(self, levels: tuple) -> None:
+        self._levels = levels
+
+    def __getitem__(self, key: Any) -> tuple:
+        return tuple(lvl[key] for lvl in self._levels)
+
+
 class Universal(Generic[Array]):
     def __init__(self, xp: _ArrayNamespace):
         self.xp = xp
@@ -784,6 +795,17 @@ class Universal(Generic[Array]):
                 term = self.tensor_product(term, H, trunc=trunc)
 
         return res if output_zero_level else res[1:]
+
+    def tensor_slice(self, A: DenseElem) -> _TensorSliceProxy:
+        """
+        Return a proxy that applies an index or slice to every level of ``A``.
+
+        Usage::
+
+            td.tensor_slice(A)[i:j]       # → tuple(lvl[i:j] for lvl in A)
+            td.tensor_slice(A)[..., 0]    # → tuple(lvl[..., 0] for lvl in A)
+        """
+        return _TensorSliceProxy(tuple(A))
 
     # ----------------------------------------------------------------------
     # API Transformers (from_flat / to_flat / densify)

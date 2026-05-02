@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from tensordev.kernel.free import free_kernel
 from tensordev.kernel.base_kernel import BaseKernel
 from tensordev.kernel.static_kernels import LinearKernel, StaticKernel
-from tensordev.kernel.util import DyadicOrder
+from tensordev.util.path_preprocessing import DyadicOrder
 
 Array = jnp.ndarray
 
