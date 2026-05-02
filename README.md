@@ -295,3 +295,47 @@ TENSORDEV_BACKEND=jax python my_script.py
 from tensordev._backend import get_default_core, get_default_seq_core
 core = get_default_core()
 ```
+
+## Acknowledgements and theoretical background
+
+`tensordev` is an independent implementation, but it was influenced by several
+excellent open-source projects in the signature-computation ecosystem:
+
+- [`signatory`](https://github.com/patrick-kidger/signatory): inspired the fused
+  Horner-style evaluation used for efficient tensor exponential / signature
+  development routines.
+- [`signax`](https://github.com/anh-tong/signax): provided the initial motivation
+  for building a JAX-native tensor algebra and signature package.
+- [`sigkernel`](https://github.com/crispitagorico/sigkernel): inspired parts of
+  the signature-kernel API and the second-order finite-difference stencil used
+  for the standard signature kernel.
+- [`high-order-sigkernel`](https://github.com/maudl3116/high-order-sigkernel):
+  inspired the predictor-corrector schemes for higher-order signature-kernel PDE
+  systems, which are adapted and further developed in this package.
+
+The main theoretical background for the algorithms implemented here is:
+
+- P. Kidger and T. Lyons,
+  [*Signatory: differentiable computations of the signature and logsignature
+  transforms, on both CPU and GPU*](https://arxiv.org/abs/2001.00706),
+  ICLR 2021.
+
+- C. Salvi, T. Cass, J. Foster, T. Lyons and W. Yang,
+  [*The Signature Kernel is the Solution of a Goursat PDE*](https://arxiv.org/abs/2006.14794),
+  SIAM Journal on Mathematics of Data Science, 2021.
+
+- M. Lemercier, T. Lyons and C. Salvi,
+  [*Log-PDE Methods for Rough Signature Kernels*](https://arxiv.org/abs/2404.02926),
+  arXiv preprint, 2024.
+
+- P. K. Friz and P. P. Hager,
+  [*Expected Signature Kernels for Lévy Rough Paths*](https://arxiv.org/abs/2509.07893),
+  arXiv preprint, 2025.
+
+- P. P. Hager, F. N. Harang, L. Pelizzari and S. Tindel,
+  [*The Volterra Signature*](https://arxiv.org/abs/2603.04525),
+  arXiv preprint, 2026.
+
+- P. P. Hager, F. N. Harang, L. Pelizzari and S. Tindel,
+  *Computational Aspects of the Volterra Signature*,
+  manuscript.
