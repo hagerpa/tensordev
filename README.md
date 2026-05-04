@@ -185,12 +185,7 @@ np.testing.assert_allclose(
 
 State-space signatures are Volterra signatures whose convolution kernel is a *finite state-space kernel* (FSSK), i.e. a matrix-exponential kernel of the form
 
-$$
-K_{A,b}^\Lambda(t,s)
-=
-\sum_{r=1}^q
-\bigl(\mathbf{1}^\top e^{-\Lambda(t-s)} b_r\bigr) A_r .
-$$
+$$K_{A,b}^\Lambda(t,s) = \sum_{r=1}^q \bigl(\mathbf{1}^\top e^{-\Lambda(t-s)} b_r\bigr) A_r .$$
 
 with dense or Jordan state-space operators $\Lambda$. This package provides functionality for propagating and reading out the hidden state that evolves via an ODE, making online/streaming evaluation of such Volterra signatures exact and efficient.
 
