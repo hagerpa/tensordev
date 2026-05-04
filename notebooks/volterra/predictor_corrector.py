@@ -290,54 +290,66 @@ def _solve_fractional_level(
     The returned level has shape
 
         (S + 1, batch..., m**degree).
+
+    Memory layout: source contributions are precomputed once as
+    ``(S, batch..., width)`` arrays (O(S·batch·width)).  The outer loop
+    over the S target nodes is a ``lax.scan`` (carry = None, so XLA can
+    pipeline/fuse it), and the inner weighted sum over sources is fully
+    vectorised for each target step.
     """
     S = int(dY_time.shape[0])
     batch_shape = dY_time.shape[1:-1]
     dtype = dY_time.dtype
-    width = m**degree
+    width = m ** degree
 
     zero = jnp.zeros(batch_shape + (width,), dtype=dtype)
-    source_idx = jnp.arange(S)
-    target_idx = jnp.arange(1, S + 1)
+    i_idx = jnp.arange(S)        # (S,)
+    n_idx = jnp.arange(1, S + 1) # (S,)
+
+    # ── precompute source-wise tensor contributions ───────────────────────
+    # vmap over source axis: (S, batch..., width)
+    contrib_left  = jax.vmap(_append_increment)(prev[i_idx],     dY_time)
+    contrib_right = jax.vmap(_append_increment)(prev[i_idx + 1], dY_time)
+
+    # Precompute source time-interval endpoints (static per level).
+    a_all = times[i_idx]       # (S,)
+    b_all = times[i_idx + 1]   # (S,)
+
+    extra = (1,) * (len(batch_shape) + 1)  # for broadcasting over (batch..., width)
 
     def target_step(_, n):
         tn = times[n]
+        valid = i_idx < n  # (S,)
 
-        def source_step(acc, i):
-            valid = i < n
+        # Safe values to keep fractional powers well-defined for masked entries.
+        a_s  = jnp.where(valid, a_all, jnp.zeros_like(a_all))
+        b_s  = jnp.where(valid, b_all, jnp.ones_like(b_all))
+        tn_s = jnp.where(valid, tn,    jnp.ones_like(a_all))
 
-            a_raw = times[i]
-            b_raw = times[i + 1]
+        w_left, w_right, w_euler = _fractional_interval_weights(
+            beta=beta, tn=tn_s, a=a_s, b=b_s, dtype=dtype,
+        )
+        # w_*: (S,) — one scalar weight per source interval
 
-            # Avoid invalid fractional powers for masked intervals i >= n.
-            a = jnp.where(valid, a_raw, jnp.asarray(0.0, dtype=dtype))
-            b = jnp.where(valid, b_raw, jnp.asarray(1.0, dtype=dtype))
-            tn_safe = jnp.where(valid, tn, jnp.asarray(1.0, dtype=dtype))
+        # Broadcast weights to (S, 1..., 1) for multiplication with (S, batch..., width).
+        w_l = w_left.reshape(w_left.shape   + extra)
+        w_r = w_right.reshape(w_right.shape + extra)
+        w_e = w_euler.reshape(w_euler.shape + extra)
 
-            w_left, w_right, w_euler = _fractional_interval_weights(
-                beta=beta,
-                tn=tn_safe,
-                a=a,
-                b=b,
-                dtype=dtype,
-            )
+        if scheme == "euler":
+            weighted = w_e * contrib_left
+        else:
+            weighted = w_l * contrib_left + w_r * contrib_right
+        # weighted: (S, batch..., width)
 
-            dy = dY_time[i]
-
-            if scheme == "euler":
-                term = w_euler * _append_increment(prev[i], dy)
-            else:
-                term_left = w_left * _append_increment(prev[i], dy)
-                term_right = w_right * _append_increment(prev[i + 1], dy)
-                term = term_left + term_right
-
-            term = jnp.where(valid, term, jnp.zeros_like(term))
-            return acc + term, None
-
-        out, _ = lax.scan(source_step, zero, source_idx)
+        # Zero out invalid sources and sum → (batch..., width).
+        mask = valid.reshape(valid.shape + extra)
+        out = jnp.where(mask, weighted, jnp.zeros_like(weighted)).sum(axis=0)
         return None, out
 
-    _, values = lax.scan(target_step, None, target_idx)
+    _, values = lax.scan(target_step, None, n_idx)
+    # values: (S, batch..., width)
+
     return jnp.concatenate([zero[None], values], axis=0)
 
 

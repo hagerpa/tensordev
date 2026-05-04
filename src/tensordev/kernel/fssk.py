@@ -6,7 +6,6 @@ import jax
 import jax.numpy as jnp
 
 from tensordev.kernel.base_kernel import BaseKernel
-from tensordev.kernel.parallel import pmap_solver_call
 from tensordev.kernel.static_kernels import LinearKernel, StaticKernel
 from tensordev.util.path_preprocessing import DyadicOrder, normalize_dyadic_order
 from tensordev.sss.kernel import FSSK
@@ -44,7 +43,7 @@ class FSSKSigKernel(BaseKernel):
     dyadic_order : int, default=0
         Dyadic refinement level. Each coarse interval is split into ``2^k``
         sub-intervals; gamma is stored on the coarse grid and indexed lazily.
-    increment_in : bool, default=False
+    increment_input : bool, default=False
         If ``True``, *X* and *Y* are already provided as increments
         ``(batch, intervals, dim)`` rather than as path values
         ``(batch, nodes, dim)``.
@@ -62,11 +61,13 @@ class FSSKSigKernel(BaseKernel):
     scheme: str = "heun"
     precompute_propagators: bool = True
     dyadic_order: DyadicOrder = 0
-    increment_in: bool = False
+    increment_input: bool = False
     num_devices: int = 1
     static_kernel: StaticKernel = LinearKernel(scale=1.0)
 
-    def __call__(self, X, Y, *, evaluate="terminal", return_fg=False, pairwise=False):
+
+    def _compute(self, X, Y, *, evaluate="terminal", return_fg=False, pairwise=False,
+                 increment_input: bool = False):
         return fssk_sigkernel(
             X, Y,
             kernel=self.kernel, dt_x=self.dt_x, dt_y=self.dt_y,
@@ -74,8 +75,7 @@ class FSSKSigKernel(BaseKernel):
             backend=self.backend, scheme=self.scheme,
             precompute_propagators=self.precompute_propagators,
             dyadic_order=self.dyadic_order,
-            increment_in=self.increment_in,
-            num_devices=self.num_devices,
+            increment_in=increment_input,
             static_kernel=self.static_kernel,
         )
 
@@ -83,8 +83,8 @@ class FSSKSigKernel(BaseKernel):
         X = jnp.asarray(X)
         if X.ndim == 2:
             X = X[None, ...]
-        if X.ndim != 3:
-            raise ValueError("Expected shape (batch, length, dim) or (length, dim).")
+        if X.ndim < 3:
+            raise ValueError("Expected shape (..., length, dim) with at least one batch axis.")
         if X.shape[-2] < 2:
             raise ValueError("Each path must contain at least two time points.")
         if X.shape[-1] != self.kernel.path_dim:
@@ -220,7 +220,6 @@ def fssk_sigkernel(
         backend: str = "scan", scheme: str = "heun",
         precompute_propagators: bool = False, dyadic_order: DyadicOrder = 0,
         increment_in: bool = False,
-        num_devices: int = 1,
         static_kernel: StaticKernel = LinearKernel(scale=1.0),
 ):
     """Evaluate the beta PDE approximation of the FSSK signature kernel.
@@ -256,16 +255,6 @@ def fssk_sigkernel(
         Number of dyadic refinement levels.
     increment_in : bool, default=False
         If ``True``, *X* and *Y* are path increments, not path values.
-    num_devices : int, default=1
-        Number of JAX devices (virtual CPUs) to distribute the batch across via
-        ``jax.pmap``.  Set to ``jax.device_count()`` to use all available
-        devices.  Requires setting ``XLA_FLAGS`` *before* importing JAX::
-
-            import os
-            os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
-            import jax
-
-        See :mod:`tensordev.kernel.parallel` for details.
     static_kernel : StaticKernel, default=LinearKernel(scale=1.0)
         Static kernel used to build the coarse-grid gamma via the discrete
         mixed-derivative formula
@@ -340,17 +329,10 @@ def fssk_sigkernel(
     solver = _get_solver(backend=backend, scheme=scheme, precompute_propagators=precompute_propagators,
                          dyadic_order=(dyadic_order_x, dyadic_order_y), terminal_only=terminal_only)
 
-    if num_devices > 1:
-        result = pmap_solver_call(
-            solver, gamma_coarse, dt_x_arr, dt_y_arr,
-            lambda_op=kernel.Lambda, transport_params=transport_params,
-            num_devices=num_devices,
-        )
-    else:
-        result = solver(
-            gamma_coarse, dt_x_arr, dt_y_arr, lambda_op=kernel.Lambda,
-            transport_params=transport_params,
-        )
+    result = solver(
+        gamma_coarse, dt_x_arr, dt_y_arr, lambda_op=kernel.Lambda,
+        transport_params=transport_params,
+    )
 
     if terminal_only:
         # result is (eta_terminal, K_terminal, A_terminal, B_terminal) — just the terminal cell
@@ -768,7 +750,7 @@ def _lambda_left_right(lambda_op, X, *, dtype):
 
 
 def _to_nodes(X, *, path_dim, name, increment_in):
-    """Normalize input to ``(batch, nodes, dim)`` path *node* values.
+    """Normalize input to ``(*batch, nodes, dim)`` path *node* values.
 
     If ``increment_in=True`` the increments are integrated with a zero initial
     state via cumulative sum.  Otherwise the array is returned as-is (possibly
@@ -777,8 +759,8 @@ def _to_nodes(X, *, path_dim, name, increment_in):
     X = jnp.asarray(X)
     if X.ndim == 2:
         X = X[None, ...]
-    if X.ndim != 3:
-        raise ValueError(f"{name} must have shape (batch, length, dim) or (length, dim).")
+    if X.ndim < 3:
+        raise ValueError(f"{name} must have shape (..., length, dim) with at least one batch axis.")
     if X.shape[-1] != path_dim:
         raise ValueError(
             f"{name} must have terminal feature dimension {path_dim}, got {X.shape[-1]}."
@@ -786,8 +768,8 @@ def _to_nodes(X, *, path_dim, name, increment_in):
     if increment_in:
         if X.shape[-2] < 1:
             raise ValueError(f"{name} must contain at least one interval when increment_in=True.")
-        zeros = jnp.zeros_like(X[:, :1, :])
-        return jnp.concatenate([zeros, jnp.cumsum(X, axis=1)], axis=1)
+        zeros = jnp.zeros_like(X[..., :1, :])
+        return jnp.concatenate([zeros, jnp.cumsum(X, axis=-2)], axis=-2)
     if X.shape[-2] < 2:
         raise ValueError(f"{name} must contain at least two time points.")
     return X
@@ -820,26 +802,33 @@ def _build_gamma_grid_static(X_nodes, Y_nodes, *, kernel, static_kernel, pairwis
     A = kernel.A.astype(dtype)   # (q, m, d)
     b = kernel.b.astype(dtype)   # (q, R)
 
-    bx, s_nodes = int(X_nodes.shape[0]), int(X_nodes.shape[1])
-    by, t_nodes = int(Y_nodes.shape[0]), int(Y_nodes.shape[1])
+    batch_shape_x = X_nodes.shape[:-2]
+    batch_shape_y = Y_nodes.shape[:-2]
+    s_nodes = int(X_nodes.shape[-2])
+    t_nodes = int(Y_nodes.shape[-2])
     q, m, R = int(A.shape[0]), int(A.shape[1]), int(b.shape[1])
 
-    # Projected nodes: AX[b, i, q, :] = A[q] @ X_nodes[b, i, :]
-    AX = jnp.einsum("qmd,bid->biqm", A, X_nodes.astype(dtype))  # (bx, s_nodes, q, m)
-    AY = jnp.einsum("qmd,bjd->bjqm", A, Y_nodes.astype(dtype))  # (by, t_nodes, q, m)
+    # Flatten batch dims so the solver always sees a single leading batch axis.
+    X_flat = X_nodes.reshape(-1, s_nodes, X_nodes.shape[-1]).astype(dtype)
+    Y_flat = Y_nodes.reshape(-1, t_nodes, Y_nodes.shape[-1]).astype(dtype)
+    bx, by = X_flat.shape[0], Y_flat.shape[0]
+
+    # Projected nodes: AX[b, i, q, :] = A[q] @ X_flat[b, i, :]
+    AX = jnp.einsum("qmd,bid->biqm", A, X_flat)  # (bx, s_nodes, q, m)
+    AY = jnp.einsum("qmd,bjd->bjqm", A, Y_flat)  # (by, t_nodes, q, m)
     AX_flat = AX.reshape(bx, s_nodes * q, m)
     AY_flat = AY.reshape(by, t_nodes * q, m)
 
     if pairwise:
-        batch_shape = (bx, by)
+        batch_shape = batch_shape_x + batch_shape_y
         # Gram_matrix → (bx, by, s_nodes*q, t_nodes*q); merge outer batch dims
         K = static_kernel.Gram_matrix(AX_flat, AY_flat).reshape(bx * by, s_nodes * q, t_nodes * q)
     else:
-        if bx != by:
+        if batch_shape_x != batch_shape_y:
             raise ValueError(
-                f"Batchwise evaluation requires matching batch sizes; got {bx} and {by}."
+                f"Batchwise evaluation requires matching batch shapes; got {batch_shape_x} and {batch_shape_y}."
             )
-        batch_shape = (bx,)
+        batch_shape = batch_shape_x
         K = static_kernel.batch_kernel(AX_flat, AY_flat)  # (bx, s_nodes*q, t_nodes*q)
 
     # Reshape, transpose q-axes adjacent, apply discrete mixed derivative, contract with b

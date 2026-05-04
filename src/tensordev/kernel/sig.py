@@ -44,8 +44,9 @@ class SigKernel(BaseKernel):
     dyadic_order: DyadicOrder = 0
     num_devices: int = 1
     static_kernel: StaticKernel = LinearKernel(scale=1.0)
+    increment_input: bool = False
 
-    def __call__(
+    def _compute(
             self,
             X,
             Y,
@@ -53,28 +54,8 @@ class SigKernel(BaseKernel):
             evaluate: str = "terminal",
             return_fg: bool = False,
             pairwise: bool = False,
+            increment_input: bool = False,
     ):
-        """
-        Evaluate the configured classical signature kernel.
-
-        Parameters
-        ----------
-        X, Y :
-            Normalized batched path inputs of shape ``(batch, length, dim)``.
-        evaluate : {"terminal", "grid"}, default="terminal"
-            Whether to return only the terminal kernel values or the full discrete
-            solution.
-        return_fg : bool, default=False
-            Whether to additionally return the tensor-valued components ``f`` and
-            ``g`` inherited from the underlying free-kernel solver.
-        pairwise : bool, default=False
-            Whether to evaluate batchwise or pairwise over the empirical samples.
-
-        Returns
-        -------
-        Array or tuple
-            Output of the underlying ``free_kernel`` call.
-        """
         return free_kernel(
             (X,),
             (Y,),
@@ -83,8 +64,7 @@ class SigKernel(BaseKernel):
             pairwise=pairwise,
             backend=self.backend,
             dyadic_order=self.dyadic_order,
-            increment_in=False,
-            num_devices=self.num_devices,
+            increment_in=increment_input,
             static_kernel=self.static_kernel,
         )
 
@@ -112,8 +92,8 @@ class SigKernel(BaseKernel):
         X = jnp.asarray(X)
         if X.ndim == 2:
             X = X[None, ...]
-        if X.ndim != 3:
-            raise ValueError("Expected shape (batch, length, dim) or (length, dim).")
+        if X.ndim < 3:
+            raise ValueError("Expected shape (..., length, dim) with at least one batch axis.")
         if X.shape[-2] < 2:
             raise ValueError("Each path must contain at least two time points.")
         return X

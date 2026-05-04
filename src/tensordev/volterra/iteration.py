@@ -29,6 +29,7 @@ def vsig(
     axis: int = -2,
     output_starting_point: bool = False,
     increment_input: bool = False,
+    dyadic_order: int = 0,
 ) -> DenseElem:
     r"""
     Compute a truncated Volterra signature from path nodes or increments.
@@ -64,6 +65,11 @@ def vsig(
         i.e. ``[1, V_0, ..., V_{S-1}]`` with the trajectory axis at ``axis``.
     increment_input:
         Treat ``X`` as increments rather than path nodes.
+    dyadic_order:
+        Non-negative integer.  Each original increment is split into
+        ``2**dyadic_order`` equal sub-increments (each multiplied by
+        ``1 / 2**dyadic_order``), and ``dt`` / ``times`` are refined
+        accordingly.  ``dyadic_order=0`` (default) leaves the path unchanged.
 
     Returns
     -------
@@ -73,6 +79,8 @@ def vsig(
     """
     if trunc <= 0:
         raise ValueError(f"trunc must be positive, got {trunc}.")
+    if dyadic_order < 0:
+        raise ValueError(f"dyadic_order must be non-negative, got {dyadic_order}.")
 
     X = jnp.asarray(X)
     if X.ndim < 2:
@@ -91,6 +99,13 @@ def vsig(
     S = dX.shape[axis_norm]
     if S == 0:
         raise ValueError("volterra_vsig requires at least one increment.")
+
+    # Dyadic refinement: split each increment into 2**dyadic_order equal sub-increments.
+    if dyadic_order > 0:
+        factor = 1 << int(dyadic_order)
+        dX = jnp.repeat(dX / factor, factor, axis=axis_norm)
+        S = dX.shape[axis_norm]
+        times, dt = _refine_times_or_dt(times, dt, factor=factor, dtype=dtype)
 
     projected = jnp.einsum("qmd,...d->...qm", kernel.A.astype(dtype), dX)
     y = projected[..., 0, :] if kernel.q == 1 else projected
@@ -133,6 +148,29 @@ def vsig(
         return out
 
     return tuple(level[-1] for level in history_final)
+
+
+def _refine_times_or_dt(
+    times: Array | None,
+    dt: Array | float | None,
+    *,
+    factor: int,
+    dtype: jnp.dtype,
+) -> tuple[Array | None, Array | float | None]:
+    """Refine ``times`` or ``dt`` for a dyadic subdivision by ``factor``."""
+    if times is not None:
+        times_arr = jnp.asarray(times, dtype=dtype)
+        # Fine grid: for each coarse interval subdivide into `factor` equal parts.
+        fine_dts = jnp.repeat(jnp.diff(times_arr) / factor, factor)
+        fine_times = jnp.concatenate([times_arr[:1], times_arr[:1] + jnp.cumsum(fine_dts)])
+        return fine_times, None
+
+    # scalar dt (or None → defaults to 1)
+    dt_val = 1.0 if dt is None else dt
+    dt_arr = jnp.asarray(dt_val, dtype=dtype)
+    if dt_arr.ndim != 0:
+        raise ValueError(f"dt must be scalar when using dyadic_order, got shape {dt_arr.shape}.")
+    return None, dt_arr / factor
 
 
 def _eval_vte(v: DenseElem, y: Array, coef: VolterraCoefficients) -> DenseElem:

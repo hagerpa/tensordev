@@ -17,9 +17,10 @@ different cores simultaneously) you need two things:
 
        XLA_FLAGS="--xla_force_host_platform_device_count=$(sysctl -n hw.logicalcpu)" python train.py
 
-2. **Pass ``num_devices=N``** to ``fssk_sigkernel`` / ``FSSKSigKernel``.  The
-   batch dimension of gamma (or dx/dy) will be split across those N virtual
-   devices and evaluated in parallel via ``jax.pmap``.
+2. **Pass ``num_devices=N``** to any :class:`~tensordev.kernel.base_kernel.BaseKernel`
+   subclass (e.g. ``SigKernel``, ``FreeKernel``, ``FSSKSigKernel``).  The
+   batch dimension will be split across those N virtual devices and evaluated
+   in parallel via ``jax.pmap``.
 
 Two axes of parallelism
 -----------------------
@@ -47,7 +48,7 @@ Quick start
     os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 
     import jax
-    from tensordev.kernel.sss import FSSKSigKernel
+    from tensordev.kernel.fssk import FSSKSigKernel
 
     kernel = FSSKSigKernel(..., num_devices=8)
     gram = kernel.compute_Gram(X, Y)
@@ -95,13 +96,13 @@ def recommend_parallelism() -> str:
             f'    os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count={n_phys}"',
             "    import jax",
             "",
-            f"Then pass num_devices={n_phys} to fssk_sigkernel / FSSKSigKernel.",
+            f"Then pass num_devices={n_phys} to any BaseKernel subclass (SigKernel, FreeKernel, FSSKSigKernel, …).",
         ]
     else:
         lines += [
             "",
             f"All {n_phys} CPUs are already exposed as JAX devices.",
-            f"Pass num_devices={n_jax} to fssk_sigkernel / FSSKSigKernel.",
+            f"Pass num_devices={n_jax} to any BaseKernel subclass.",
         ]
     return "\n".join(lines)
 

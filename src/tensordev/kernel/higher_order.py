@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Union
+from typing import Literal
 
 import jax.numpy as jnp
 
 from tensordev import Jax
 from tensordev.core.jax import JaxSequentialCore
-from tensordev.core.universal import DenseElemFirstOn
 from tensordev.development.free import free_development
 from tensordev.kernel.free import free_kernel
 from tensordev.kernel.base_kernel import BaseKernel
@@ -16,12 +15,11 @@ from tensordev.util.path_preprocessing import DyadicOrder
 _CORE = Jax()
 _SEQ_CORE = JaxSequentialCore()
 Array = jnp.ndarray
-PathInput = Union[Array, DenseElemFirstOn]
 
 
 def higher_order_kernel(
-        X: PathInput,
-        Y: PathInput,
+        X: Array,
+        Y: Array,
         *,
         log_steps: tuple[int, int],
         log_degree: tuple[int, int],
@@ -31,7 +29,6 @@ def higher_order_kernel(
         backend: Literal["scan", "wavefront"] = "scan",
         dyadic_order: DyadicOrder = 0,
         increment_input: bool = False,
-        num_devices: int = 1,
 ):
     """
     Higher-order signature kernel via piecewise log-linear approximation.
@@ -86,9 +83,6 @@ def higher_order_kernel(
     increment_input :
         If ``False``, interpret ``X`` and ``Y`` as paths and first difference them.
         If ``True``, interpret them directly as interval increments.
-
-    core :
-        Tensor algebra backend. Defaults to ``Jax()``.
 
     Returns
     -------
@@ -153,7 +147,7 @@ def higher_order_kernel(
 
     return free_kernel(log_x, log_y, evaluate=evaluate, return_fg=return_fg, pairwise=pairwise,
                        backend=backend, dyadic_order=dyadic_order,
-                       increment_in=True, num_devices=num_devices)
+                       increment_in=True)
 
 
 @dataclass(frozen=True)
@@ -184,7 +178,13 @@ class HigherOrderKernel(BaseKernel):
     increment_input: bool = False
     num_devices: int = 1
 
-    def __call__(
+    def _as_sample_batch(self, X):
+        X = jnp.asarray(X)
+        if X.ndim == 2:
+            X = X[None, ...]
+        return X
+
+    def _compute(
             self,
             X,
             Y,
@@ -192,28 +192,8 @@ class HigherOrderKernel(BaseKernel):
             evaluate: str = "terminal",
             return_fg: bool = False,
             pairwise: bool = False,
+            increment_input: bool = False,
     ):
-        """
-        Evaluate the configured higher-order kernel.
-
-        Parameters
-        ----------
-        X, Y :
-            Normalized tensor-path inputs in packed positive-level form.
-        evaluate : {"terminal", "grid"}, default="terminal"
-            Whether to return only the terminal kernel values or the full discrete
-            solution.
-        return_fg : bool, default=False
-            Whether to additionally return auxiliary outputs, if supported by the
-            underlying solver.
-        pairwise : bool, default=False
-            Whether to evaluate batchwise or pairwise over the empirical samples.
-
-        Returns
-        -------
-        Array or tuple
-            Output of ``higher_order_kernel`` with the stored hyperparameters.
-        """
         return higher_order_kernel(
             X,
             Y,
@@ -224,40 +204,6 @@ class HigherOrderKernel(BaseKernel):
             log_degree=self.log_degree,
             backend=self.backend,
             dyadic_order=self.dyadic_order,
-            increment_input=self.increment_input,
-            num_devices=self.num_devices,
+            increment_input=increment_input,
         )
 
-    def _as_sample_batch(self, X):
-        """
-        Normalize tensor-path input to packed positive-level form with a leading
-        empirical sample axis.
-
-        Parameters
-        ----------
-        X :
-            Either a single tensor level or a tuple/list of tensor levels. Each
-            level is expected to have shape ``(batch, steps, width)`` or
-            ``(steps, width)`` for a single sample.
-
-        Returns
-        -------
-        tuple
-            Tuple of arrays, each carrying the empirical sample axis on axis ``0``.
-
-        Raises
-        ------
-        ValueError
-            If no tensor levels are provided or if tensor levels inconsistently
-            include a sample axis.
-        """
-        levels = (jnp.asarray(X),) if not isinstance(X, (tuple, list)) else tuple(jnp.asarray(z) for z in X)
-        if not levels:
-            raise ValueError("Expected at least one positive tensor level.")
-
-        if all(level.ndim == 2 for level in levels):
-            levels = tuple(level[None, ...] for level in levels)
-        elif any(level.ndim == 2 for level in levels):
-            raise ValueError("All levels must either all have a sample axis or all omit it.")
-
-        return levels

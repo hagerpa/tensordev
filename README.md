@@ -387,12 +387,17 @@ seq_core = get_default_seq_core()
 
 `tensordev` is an independent implementation, but it was influenced by several excellent open-source projects in the signature-computation ecosystem:
 
+- [`iisignature`](https://github.com/bottler/iisignature): a gold-standard reference for efficient signature and logsignature computation.
 - [`signatory`](https://github.com/patrick-kidger/signatory): inspired the fused Horner-style evaluation used for efficient tensor exponential / signature development routines.
 - [`signax`](https://github.com/anh-tong/signax): provided the initial motivation for building a JAX-native tensor algebra and signature package.
 - [`sigkernel`](https://github.com/crispitagorico/sigkernel): inspired parts of the signature-kernel API and the second-order finite-difference stencil used for the standard signature kernel.
 - [`high-order-sigkernel`](https://github.com/maudl3116/high-order-sigkernel): inspired the predictor-corrector schemes for higher-order signature-kernel PDE systems, which are adapted and further developed in this package.
 
 The main theoretical background for the algorithms implemented here is:
+
+- J. Reizenstein and B. Graham,
+  [*Algorithm 1004: The iisignature Library: Efficient Calculation of Iterated-Integral Signatures and Log Signatures*](https://arxiv.org/abs/1802.08252),
+  ACM Transactions on Mathematical Software, 2020.
 
 - P. Kidger and T. Lyons,
   [*Signatory: differentiable computations of the signature and logsignature transforms, on both CPU and GPU*](https://arxiv.org/abs/2001.00706),

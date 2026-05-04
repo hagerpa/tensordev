@@ -13,7 +13,6 @@ from tensordev.core.jax import JaxSequentialCore
 from tensordev.core.universal import DenseElemFirstOn
 from tensordev.development.free import free_development
 from tensordev.kernel.base_kernel import BaseKernel
-from tensordev.kernel.parallel import pmap_batch
 from tensordev.kernel.static_kernels import LinearKernel, StaticKernel
 from tensordev.util.path_preprocessing import DyadicOrder, normalize_dyadic_order
 
@@ -38,13 +37,13 @@ class FreeCellData:
     """
 
     # driving increments
-    dx_i: tuple   # x-increment for row i, M levels
-    dy_j: tuple   # y-increment for column j, N levels
+    dx_i: tuple  # x-increment for row i, M levels
+    dy_j: tuple  # y-increment for column j, N levels
 
     # scalar PDE state at three corners
-    u_nw: Array   # (i-1, j-1)
-    u_n: Array    # (i-1, j)
-    u_w: Array    # (i, j-1)
+    u_nw: Array  # (i-1, j-1)
+    u_n: Array  # (i-1, j)
+    u_w: Array  # (i, j-1)
 
     # precomputed static-kernel mixed difference G for cell (i,j)
     # k(x_i,y_j) - k(x_{i-1},y_j) - k(x_i,y_{j-1}) + k(x_{i-1},y_{j-1})
@@ -138,6 +137,7 @@ class FreeRowState:
         FreeRowState
             Grid arrays with shape ``batch + (s_nodes, t_nodes, …)``.
         """
+
         def _prepend(first, scanned, axis):
             return jnp.concatenate(
                 (jnp.expand_dims(first, axis), jnp.moveaxis(scanned, 0, axis)),
@@ -161,7 +161,6 @@ def free_kernel(
         dyadic_order: DyadicOrder = 0,
         increment_in: bool = False,
         quadrature: Literal["left", "midpoint", "trapezoid"] = "left",
-        num_devices: int = 1,
         static_kernel: StaticKernel = LinearKernel(scale=1.0)):
     """
     Compute the truncated kernel of free developments.
@@ -202,23 +201,6 @@ def free_kernel(
         increments. If ``False``, they are interpreted as path values and converted
         to increments along the interval axis.
 
-    num_devices : int, default=1
-        Number of JAX virtual devices to distribute the batch across via
-        ``jax.pmap``.  Set to ``jax.device_count()`` to use all available
-        devices.  Requires ``XLA_FLAGS`` to be set *before* importing JAX::
-
-            import os
-            os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
-            import jax
-
-        **Non-pairwise**: both ``x`` and ``y`` batches are sharded along
-        axis 0 (must have the same leading size).
-
-        **Pairwise**: only the ``x`` batch is sharded; the full ``y`` batch is
-        replicated to every device.  The assembled result has the full
-        ``batch_x × batch_y`` shape.
-
-        See :mod:`tensordev.kernel.parallel` for details.
 
     static_kernel : StaticKernel, default=LinearKernel(scale=1.0)
         Static (pointwise) kernel used to compute the driving term ``G_ij`` in
@@ -253,18 +235,6 @@ def free_kernel(
                                     dyadic_order=dyadic_order, static_kernel=static_kernel)
         raise ValueError(f"Unknown backend={backend!r}.")
 
-    if num_devices > 1:
-        if pairwise:
-            # Shard along the x-batch axis (axis 0 of dx after broadcast).
-            # dy is replicated via closure; the per-device result has shape
-            # (batch_x // num_devices) + batch_y + ... and is reassembled
-            # along axis 0 by pmap_batch.
-            dx_b, dy_b = _broadcast_pairwise(dx, dy)
-            return pmap_batch(lambda dx_s: _solve(dx_s, dy_b), dx_b,
-                              num_devices=num_devices)
-        else:
-            # Shard both dx and dy along axis 0 (same leading batch size).
-            return pmap_batch(_solve, dx, dy, num_devices=num_devices)
 
     if pairwise:
         dx, dy = _broadcast_pairwise(dx, dy)
@@ -620,7 +590,7 @@ def _free_cell_step(cell: FreeCellData, *, M, N, m, n, P, P_f, P_g):
         G2_ij = G_ij * G_ij
         u_se = (u_n + u_w) * (1.0 + 0.5 * G_ij + kap * G2_ij) \
                - u_nw * (1.0 - kap * G2_ij)
-        return u_se, f_n, g_w          # f, g are empty tuples — pass through
+        return u_se, f_n, g_w  # f, g are empty tuples — pass through
 
     # --- general Heun predictor–corrector ---------------------------------
     G_ij = t_inner(dx_i[:P], dy_j[:P])
@@ -678,7 +648,6 @@ def _free_cell_step(cell: FreeCellData, *, M, N, m, n, P, P_f, P_g):
     u_se = u_base + 0.25 * (F_nw + F_n + F_w + F_c)
 
     return u_se, f_se, g_se
-
 
 def _precompute_G_coarse(dx, dy, *, static_kernel, dtype):
     """Precompute the coarse-grid discrete mixed-difference kernel matrix.
@@ -1225,6 +1194,8 @@ def _solve_wavefront(
     return u_grid, f_grid, g_grid
 
 
+
+
 @dataclass(frozen=True)
 class FreeKernel(BaseKernel):
     """
@@ -1242,16 +1213,35 @@ class FreeKernel(BaseKernel):
     - A tuple/list is interpreted as packed positive tensor levels.
     - A missing leading sample axis is promoted to batch size ``1``.
 
-    Depending on ``increment_in``, tensor inputs are interpreted either as
+    Depending on ``increment_input``, tensor inputs are interpreted either as
     path values or as interval increments.
     """
     backend: Literal["scan", "wavefront"] = "scan"
     dyadic_order: DyadicOrder = 0
-    increment_in: bool = False
+    increment_input: bool = False
     num_devices: int = 1
     static_kernel: StaticKernel = LinearKernel(scale=1.0)
 
-    def __call__(
+    def _as_sample_batch(self, X):
+        levels = (jnp.asarray(X),) if not isinstance(X, (tuple, list)) else tuple(jnp.asarray(z) for z in X)
+        if not levels:
+            raise ValueError("Expected at least one positive tensor level.")
+        if all(level.ndim == 2 for level in levels):
+            levels = tuple(level[None, ...] for level in levels)
+        elif any(level.ndim == 2 for level in levels):
+            raise ValueError("All levels must either all have a sample axis or all omit it.")
+        return levels
+
+    def _batch_size(self, X) -> int:
+        return int(X[0].shape[0])
+
+    def _slice_batch(self, X, start: int, stop: int):
+        return tuple(level[start:stop] for level in X)
+
+    def _broadcast_pairwise(self, X, Y):
+        return _broadcast_pairwise(X, Y)
+
+    def _compute(
             self,
             X,
             Y,
@@ -1259,8 +1249,8 @@ class FreeKernel(BaseKernel):
             evaluate: str = "terminal",
             return_fg: bool = False,
             pairwise: bool = False,
+            increment_input: bool = False,
     ):
-        # ...existing code...
         return free_kernel(
             X,
             Y,
@@ -1269,41 +1259,7 @@ class FreeKernel(BaseKernel):
             pairwise=pairwise,
             backend=self.backend,
             dyadic_order=self.dyadic_order,
-            increment_in=self.increment_in,
-            num_devices=self.num_devices,
+            increment_in=increment_input,
             static_kernel=self.static_kernel,
         )
 
-    def _as_sample_batch(self, X):
-        """
-        Normalize tensor-path input to packed positive-level form with a leading
-        empirical sample axis.
-
-        Parameters
-        ----------
-        X :
-            Either a single tensor level or a tuple/list of tensor levels. Each
-            level is expected to have shape ``(batch, steps, width)`` or
-            ``(steps, width)`` for a single sample.
-
-        Returns
-        -------
-        tuple
-            Tuple of arrays, each carrying the empirical sample axis on axis ``0``.
-
-        Raises
-        ------
-        ValueError
-            If no tensor levels are provided, if levels inconsistently include a
-            sample axis, or if leading sample sizes disagree.
-        """
-        levels = (jnp.asarray(X),) if not isinstance(X, (tuple, list)) else tuple(jnp.asarray(z) for z in X)
-        if not levels:
-            raise ValueError("Expected at least one positive tensor level.")
-
-        if all(level.ndim == 2 for level in levels):
-            levels = tuple(level[None, ...] for level in levels)
-        elif any(level.ndim == 2 for level in levels):
-            raise ValueError("All levels must either all have a sample axis or all omit it.")
-
-        return levels
