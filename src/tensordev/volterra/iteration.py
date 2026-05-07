@@ -119,16 +119,29 @@ def vsig(
     history0 = _make_history_seed(S=S, unit=unit, m=kernel.m, trunc=trunc, dtype=dtype)
     source = jnp.arange(S, dtype=jnp.int32)
 
+    # For continuous kernels (fractional, gamma) the coefficient computation
+    # involves expensive special functions (betainc).  Precomputing the full
+    # (S × S) grid in one batched call before the scan is much more efficient
+    # than evaluating one column at a time inside the scan body.
+    # Piecewise-constant kernels are already a cheap gather and are left as-is.
+    if kernel.kind != "piecewise_constant":
+        _precomp = kernel.coef_grid(times_arr, trunc=trunc, dtype=dtype)
+    else:
+        _precomp = None
+
     def step(history: DenseElem, j: Array) -> tuple[DenseElem, DenseElem]:
         v_prev = tuple(level[:S] for level in history)
-        coef_j = _coef_row(
-            kernel,
-            source=source,
-            readout=j,
-            times=times_arr,
-            trunc=trunc,
-            dtype=dtype,
-        )
+        if _precomp is not None:
+            coef_j = _precomp[:, j]
+        else:
+            coef_j = _coef_row(
+                kernel,
+                source=source,
+                readout=j,
+                times=times_arr,
+                trunc=trunc,
+                dtype=dtype,
+            )
         coef_j = _insert_singleton_batch_axes(coef_j, batch_ndim=len(batch_shape))
         terms = _eval_vte(v_prev, y_time, coef_j)
         contribution = tuple(jnp.sum(level, axis=0) for level in terms)

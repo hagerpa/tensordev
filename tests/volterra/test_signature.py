@@ -12,7 +12,6 @@ from tensordev.development import path_signature
 from tensordev.volterra import VolterraKernel, vsig
 from tensordev.volterra.eval_general import eval_e as eval_e_general
 from tensordev.volterra.eval_general import eval_vte as eval_vte_general
-from tensordev.volterra.eval_scalar import eval_e as eval_e_scalar
 from tensordev.volterra.eval_scalar import eval_vte as eval_vte_scalar
 
 
@@ -30,8 +29,6 @@ def _assert_dense_allclose(got, expected, *, atol=1e-10, rtol=1e-10):
 
 
 def _eval_e(y, coeffs):
-    if coeffs.q == 1:
-        return eval_e_scalar(y, coeffs)
     return eval_e_general(y, coeffs)
 
 

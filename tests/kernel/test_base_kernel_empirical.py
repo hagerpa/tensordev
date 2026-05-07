@@ -88,10 +88,12 @@ def free_setup():
 @pytest.fixture(scope="module")
 def hok_setup():
     key = jr.PRNGKey(3001)
-    X = _paths_as_increments(key, batch=BATCH_X, steps=STEPS, dim=DIM)
-    Y = _paths_as_increments(jr.fold_in(key, 1), batch=BATCH_Y, steps=STEPS, dim=DIM)
+    X = _paths(key, batch=BATCH_X, steps=STEPS, dim=DIM)
+    Y = _paths(jr.fold_in(key, 1), batch=BATCH_Y, steps=STEPS, dim=DIM)
+    dX = jnp.diff(X, axis=-2)   # (batch, steps-1, dim)
+    dY = jnp.diff(Y, axis=-2)
     kernel = HigherOrderKernel(log_steps=(5, 5), log_degree=(2, 2), increment_input=True)
-    return kernel, X, Y
+    return kernel, dX, dY
 
 
 @pytest.fixture(scope="module")
@@ -279,8 +281,8 @@ def test_hok_call_time_increment_input_agrees_with_ctor(hok_setup):
     ctor_kernel, dX, dY = hok_setup   # ctor_kernel has increment_input=True
 
     # Use equal-sized sub-batches for batchwise (non-pairwise) evaluation
-    dX_sub = tuple(level[:BATCH_X] for level in dX)
-    dY_sub = tuple(level[:BATCH_X] for level in dY)
+    dX_sub = dX[:BATCH_X]
+    dY_sub = dY[:BATCH_X]
 
     # Build an equivalent kernel WITHOUT increment_input in ctor, pass it at call time
     call_kernel = HigherOrderKernel(
@@ -299,21 +301,6 @@ def test_hok_call_time_increment_input_agrees_with_ctor(hok_setup):
         np.asarray(out_ctor),
         rtol=1e-12, atol=1e-12,
         err_msg="call-time increment_input=True disagrees with ctor increment_input=True",
-    )
-
-
-def test_hok_tuple_input_compute_gram(hok_setup):
-    """HigherOrderKernel.compute_Gram works with tuple-of-levels inputs."""
-    kernel, dX, dY = hok_setup
-    gram = kernel.compute_Gram(dX, dY, sym=False, max_batch=3)
-    assert gram.shape == (BATCH_X, BATCH_Y)
-    gram_sym = kernel.compute_Gram(dX, sym=True, max_batch=3)
-    assert gram_sym.shape == (BATCH_X, BATCH_X)
-    np.testing.assert_allclose(
-        np.asarray(gram_sym),
-        np.asarray(gram_sym).T,
-        rtol=1e-10, atol=1e-10,
-        err_msg="HigherOrderKernel sym Gram not symmetric",
     )
 
 

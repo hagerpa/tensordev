@@ -130,6 +130,8 @@ def _eval_e_first_on(
 def _normalize_y_multiindex(y: Array, coef: VolterraCoefficients) -> Array:
     """Return projected increment with trailing shape ``(q, m)``."""
     y = jnp.asarray(y, dtype=coef.alpha.dtype)
+    if coef.q == 1 and y.shape[-1:] == (coef.m,) and (y.ndim == 1 or y.shape[-2] != 1):
+        return y[..., None, :]
     if y.ndim < 2 or y.shape[-2:] != (coef.q, coef.m):
         raise ValueError(f"y must have trailing shape ({coef.q}, {coef.m}), got {tuple(y.shape)}.")
     return y

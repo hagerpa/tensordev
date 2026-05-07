@@ -15,7 +15,6 @@ from tensordev.core.jax import Jax
 from tensordev.volterra import VolterraKernel
 from tensordev.volterra.eval_general import eval_e as eval_e_general
 from tensordev.volterra.eval_general import eval_vte as eval_vte_general
-from tensordev.volterra.eval_scalar import eval_e as eval_e_scalar
 from tensordev.volterra.eval_scalar import eval_vte as eval_vte_scalar
 
 
@@ -23,8 +22,6 @@ _CORE = Jax()
 
 
 def eval_e(y, coeffs):
-    if coeffs.q == 1:
-        return eval_e_scalar(y, coeffs)
     return eval_e_general(y, coeffs)
 
 
