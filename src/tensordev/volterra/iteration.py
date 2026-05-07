@@ -320,4 +320,157 @@ def _insert_singleton_batch_axes(
     )
 
 
-__all__ = ["vsig"]
+def vsig_fft(
+    X: Array,
+    *,
+    kernel: VolterraKernel,
+    trunc: int,
+    times: Array | None = None,
+    dt: Array | float | None = None,
+    axis: int = -2,
+    output_starting_point: bool = False,
+    increment_input: bool = False,
+    dyadic_order: int = 0,
+) -> DenseElem:
+    r"""Level-by-level Volterra signature using FFT convolution (q=1 only).
+
+    Restructures the sequential readout scan of :func:`vsig` into a
+    per-level pass that evaluates all readout times simultaneously.  The
+    key identity is the Horner expansion
+
+    .. math::
+        (V_i \otimes_N E_{ij})^{(n)}
+        = \sum_{k=0}^{n-1} \alpha[i,j,n{-}k{-}1]\,
+          \bigl(V_i^{(k)} \otimes y_i^{\otimes(n-k)}\bigr),
+
+    so :math:`V_j^{(n)}` for **all** :math:`j` simultaneously is a causal
+    discrete convolution computable via FFT in :math:`O(S \log S)`.
+
+    This path is only taken for **convolution kernels** (``fractional``,
+    ``gamma``) on a **uniform grid** (``times=None``), where the coefficient
+    matrix is Toeplitz and only the :math:`O(S \cdot M)` impulse-response
+    row needs to be stored — not an :math:`O(S^2 \cdot M)` grid.
+
+    For all other cases (non-uniform grids, ``piecewise_constant``) the call
+    is forwarded to :func:`vsig`, which retains its :math:`O(S \cdot M)`
+    per-step memory footprint via the scan.
+
+    Parameters
+    ----------
+    X, kernel, trunc, times, dt, axis, output_starting_point,
+    increment_input, dyadic_order:
+        Same semantics as :func:`vsig`.
+
+    Returns
+    -------
+    DenseElem
+        Terminal signature (or full trajectory with ``output_starting_point``),
+        numerically equivalent to the output of :func:`vsig`.
+
+    Raises
+    ------
+    NotImplementedError
+        If ``kernel.q != 1``.
+    """
+    if trunc <= 0:
+        raise ValueError(f"trunc must be positive, got {trunc}.")
+    if dyadic_order < 0:
+        raise ValueError(f"dyadic_order must be non-negative, got {dyadic_order}.")
+    if kernel.q != 1:
+        raise NotImplementedError(
+            f"vsig_fft only supports scalar kernels (q=1); got q={kernel.q}."
+        )
+
+    # Option C: non-Toeplitz cases get no benefit from the level-by-level
+    # restructuring and would still need an O(S²·M) coefficient grid.
+    # Forward to vsig which holds only one column at a time (O(S·M) memory).
+    if not (kernel.kind in ("fractional", "gamma") and times is None):
+        return vsig(
+            X, kernel=kernel, trunc=trunc, times=times, dt=dt, axis=axis,
+            output_starting_point=output_starting_point,
+            increment_input=increment_input, dyadic_order=dyadic_order,
+        )
+
+    # --- FFT path (convolution kernel, uniform grid) ---
+    X = jnp.asarray(X)
+    if X.ndim < 2:
+        raise ValueError("X must have at least a step axis and a trailing path dimension.")
+
+    axis_norm = axis % X.ndim
+    if axis_norm == X.ndim - 1:
+        raise ValueError("axis must identify the step axis, not the trailing path dimension.")
+    if X.shape[-1] != kernel.path_dim:
+        raise ValueError(
+            f"X trailing dimension must be {kernel.path_dim}, got {X.shape[-1]}."
+        )
+
+    dtype = X.dtype
+    dX = (X if increment_input else jnp.diff(X, axis=axis_norm)).astype(dtype)
+    S = dX.shape[axis_norm]
+    if S == 0:
+        raise ValueError("vsig_fft requires at least one increment.")
+
+    if dyadic_order > 0:
+        factor = 1 << int(dyadic_order)
+        dX = jnp.repeat(dX / factor, factor, axis=axis_norm)
+        S = dX.shape[axis_norm]
+        # times stays None; uniform grid stays uniform after refinement
+        times, dt = _refine_times_or_dt(times, dt, factor=factor, dtype=dtype)
+
+    projected = jnp.einsum("qmd,...d->...qm", kernel.A.astype(dtype), dX)
+    y_time = jnp.moveaxis(projected[..., 0, :], axis_norm, 0)  # (S, *batch, m)
+    times_arr = _normalize_times(times, dt, S=S, dtype=dtype)
+    batch_shape = tuple(y_time.shape[1:-1])
+
+    unit = _make_unit(batch_shape=batch_shape, m=kernel.m, trunc=trunc, dtype=dtype)
+
+    # Option A: compute only the Toeplitz impulse-response row — O(S·M) memory.
+    # The source interval is always [t_0, t_1]; tau sweeps all S readout points.
+    # This replaces the O(S²·M) coef_grid call in the original draft.
+    g_coef = kernel.coef(times_arr[0], times_arr[1], times_arr[1:], trunc=trunc, dtype=dtype)
+    g = g_coef.alpha[..., 0, :]  # (S, 1, M) → (S, M)
+    fft_n = _next_pow2(2 * S)
+    G = jnp.fft.rfft(g, n=fft_n, axis=0)  # (fft_n//2+1, M)
+
+    m = kernel.m
+    # y_pow[r]: shape (S, *batch, m^r).
+    y_pow: list[Array] = [
+        jnp.ones((S,) + batch_shape + (1,), dtype=dtype),
+        y_time,
+    ]
+    for r in range(2, trunc + 1):
+        y_pow.append(_CORE.tensor_product_homogeneous(y_pow[r - 1], y_time))
+
+    # V_all[n]: shape (S+1, *batch, m^n).
+    # Slot 0 = unit[n]; slot j+1 = V_j^{(n)}.
+    V_all: list[Array] = [jnp.ones((S + 1,) + batch_shape + (1,), dtype=dtype)]
+    extra_bc = (1,) * (len(batch_shape) + 1)  # for broadcasting G over batch+tensor dims
+
+    for n in range(1, trunc + 1):
+        m_n = m ** n
+        acc = jnp.zeros((S,) + batch_shape + (m_n,), dtype=dtype)
+
+        for k in range(n):
+            ell_idx = n - k - 1
+            signal = _CORE.tensor_product_homogeneous(V_all[k][:S], y_pow[n - k])
+            g_ell = G[:, ell_idx].reshape((-1,) + extra_bc)
+            SIG = jnp.fft.rfft(signal, n=fft_n, axis=0)
+            acc = acc + jnp.fft.irfft(g_ell * SIG, n=fft_n, axis=0)[:S]
+
+        V_n = jnp.concatenate([unit[n][None], unit[n] + acc], axis=0)
+        V_all.append(V_n)
+
+    if output_starting_point:
+        out = tuple(V_all)
+        if axis_norm != 0:
+            out = tuple(jnp.moveaxis(lev, 0, axis_norm) for lev in out)
+        return out
+
+    return tuple(lev[-1] for lev in V_all)
+
+
+def _next_pow2(n: int) -> int:
+    return 1 if n <= 1 else 1 << (n - 1).bit_length()
+
+
+__all__ = ["vsig", "vsig_fft"]
