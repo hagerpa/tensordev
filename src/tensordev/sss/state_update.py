@@ -101,11 +101,17 @@ def fssk_state(
     projected = jnp.einsum("qmd,...d->...qm", kernel.A.astype(dtype), dX)
     y = projected[..., 0, :] if kernel.q == 1 else projected
 
-    coef = kernel.coef(
-        _normalize_dt(dt, increment_shape=dX.shape, S=S, axis_norm=axis_norm),
-        trunc=trunc,
-        dtype=dtype,
-    )
+    # Optimisation: when dt is uniform across all steps (scalar input or a
+    # length-1 1-D array), compute exactly *one* coefficient set and let
+    # broadcast_time(S) inside fssk_state_from_coef expand it lazily.
+    # For genuinely time-varying dt we fall back to the full per-step grid.
+    dt_arr = jnp.asarray(dt)
+    if dt_arr.ndim == 0 or (dt_arr.ndim == 1 and dt_arr.shape[0] == 1):
+        dt_for_coef = dt_arr.reshape(())   # scalar → one matrix-exponential
+    else:
+        dt_for_coef = _normalize_dt(dt, increment_shape=dX.shape, S=S, axis_norm=axis_norm)
+
+    coef = kernel.coef(dt_for_coef, trunc=trunc, dtype=dtype)
 
     return fssk_state_from_coef(
         y,

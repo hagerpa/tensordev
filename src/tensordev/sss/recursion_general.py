@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache, partial
 
+import numpy as np
 import jax
 import jax.numpy as jnp
 
@@ -45,6 +46,66 @@ def init_state(
     )
 
 
+@lru_cache(maxsize=None)
+def _precompute_navigation(
+        q: int,
+        trunc: int,
+) -> tuple[
+    tuple[list[int], ...],
+    tuple[tuple[np.ndarray, ...] | None, ...],
+]:
+    """
+    Host-side precomputation for the batched (stacked multi-index) recursion.
+
+    Returned objects use only Python/NumPy and are cached so that JIT
+    re-traces do not repeat work.
+
+    Parameters
+    ----------
+    q, trunc:
+        Same as ``_packed_multiindex_navigation``.
+
+    Returns
+    -------
+    global_idx_by_deg:
+        ``global_idx_by_deg[n]`` is a plain Python ``list[int]`` of the packed
+        global indices for degree ``n``.
+    succ_local_by_n_r:
+        ``succ_local_by_n_r[n]`` is ``None`` when ``n == trunc``; otherwise it
+        is a tuple of ``q`` NumPy integer arrays, where
+        ``succ_local_by_n_r[n][r]`` has shape ``(num_n,)`` and stores the
+        *local* index of ``plus[ell][r]`` within the degree-``(n+1)`` block,
+        for each ``ell`` in ``global_idx_by_deg[n]``.
+    """
+    by_degree, plus = _packed_multiindex_navigation(q, trunc)
+
+    # inverse map: global_idx -> local position within its degree block
+    local_of_global: dict[int, int] = {}
+    for block in by_degree:
+        for local, gidx in enumerate(block):
+            local_of_global[gidx] = local
+
+    global_idx_by_deg = tuple(
+        np.array(list(block), dtype=np.intp) for block in by_degree
+    )
+
+    succ_local_list: list[tuple[np.ndarray, ...] | None] = []
+    for n, block in enumerate(by_degree):
+        if n == trunc:
+            succ_local_list.append(None)
+        else:
+            succ_r = tuple(
+                np.array(
+                    [local_of_global[plus[ell_idx][r]] for ell_idx in block],
+                    dtype=np.intp,
+                )
+                for r in range(q)
+            )
+            succ_local_list.append(succ_r)
+
+    return global_idx_by_deg, tuple(succ_local_list)
+
+
 @partial(jax.jit, static_argnames=("core",))
 def eval_fg(
         y: Array,
@@ -81,6 +142,21 @@ def eval_fg(
         Dense element with degrees ``0, ..., N-2`` when ``N > 1``. Level ``r``
         has shape ``batch + (q, R, R, m**r)``. For ``N == 1`` a single zero
         degree-0 level is returned for shape stability.
+
+    Notes
+    -----
+    **Batched multi-index recursion** (compilation-cost reduction)
+
+    The inner loop over multi-indices (whose count grows as C(N+q-2,q)) is
+    replaced by a single batched operation per ``(degree, r)`` pair.  Instead
+    of one ``DenseElem`` per multi-index, we keep one ``DenseElem`` per degree
+    where the multi-index axis is a leading batch dimension:
+
+    * ``F_stack[n]``: level ``k`` has shape ``batch + (num_n, 1, R, m**k)``
+    * ``G_stack[n]``: level ``k`` has shape ``batch + (num_n, q, R, R, m**k)``
+
+    All gather / scale / shuffle / summation operations act on these batched
+    tensors, reducing the number of XLA ops from O(q·C(N+q-2,q)) to O(N·q).
     """
     y = _normalize_y(y, coef)
 
@@ -103,74 +179,123 @@ def eval_fg(
             f"got {coef.phi.shape[-4:]}"
         )
 
-    by_degree, plus = _packed_multiindex_navigation(q, N - 1)
+    global_idx_by_deg, succ_local_by_n_r = _precompute_navigation(q, N - 1)
+
     inv_factorial = coef.layout.inv_factorial.astype(dtype)
+    back_trans = coef.layout.backward_transition.astype(dtype)  # (layout.size, q)
 
-    F: list[DenseElem | None] = [None] * coef.layout.size
-    G: list[DenseElem | None] = [None] * coef.layout.size
+    g_zero = _zero_g0(y, coef)  # batch + (q, R, R, 1)
 
-    g_zero = _zero_g0(y, coef)
+    # F_stack[n]: DenseElem, level k shape → batch + (num_n, 1, R, m**k)
+    # G_stack[n]: DenseElem, level k shape → batch + (num_n, q, R, R, m**k)
+    F_stack: list[DenseElem | None] = [None] * N
+    G_stack: list[DenseElem | None] = [None] * N
 
     for n in range(N - 1, -1, -1):
         max_f_degree = N - 1 - n
         max_g_degree = N - 2 - n
 
-        for ell_idx in by_degree[n]:
-            scale = inv_factorial[ell_idx]
+        idx_n = global_idx_by_deg[n]   # Python list[int], static
+        num_n = len(idx_n)
 
-            f_base: DenseElem = (
-                coef.psi[..., ell_idx, :][..., None, :, None] * scale,
+        # scale factors: shape (num_n,)
+        scale_n = inv_factorial[idx_n]
+
+        # ── F base: batch + (num_n, 1, R, 1) ─────────────────────────────
+        # coef.psi[..., idx_n, :] → batch + (num_n, R)
+        # [..None, :, None] → batch + (num_n, 1, R, 1)
+        f_base_n = (
+            coef.psi[..., idx_n, :][..., None, :, None]
+            * scale_n[:, None, None, None]
+        )
+        f_stack_n: DenseElem = (f_base_n,)
+
+        # ── G base ────────────────────────────────────────────────────────
+        if n <= N - 2:
+            # coef.phi[..., :, idx_n, :, :] → batch + (q, num_n, R, R)
+            # swapaxes(-4,-3)              → batch + (num_n, q, R, R)
+            # [..., None] * scale          → batch + (num_n, q, R, R, 1)
+            phi_gathered = jnp.swapaxes(
+                coef.phi[..., :, idx_n, :, :], -4, -3
             )
-            f_ell = f_base
+            g_base_n = (
+                phi_gathered[..., None]
+                * scale_n[:, None, None, None, None]
+            )
+            g_stack_n: DenseElem = (g_base_n,)
+        else:
+            # n == N-1: no phi base, broadcast g_zero over num_n
+            # g_zero: batch + (q, R, R, 1)
+            # expand to: batch + (1, q, R, R, 1) then broadcast to num_n
+            g_zero_exp = jnp.expand_dims(g_zero, axis=g_zero.ndim - 4)
+            g_base_n = jnp.broadcast_to(
+                g_zero_exp,
+                g_zero_exp.shape[:-5] + (num_n,) + g_zero_exp.shape[-4:],
+            )
+            g_stack_n = (g_base_n,)
 
-            if n <= N - 2:
-                g_base: DenseElem = (
-                    coef.phi[..., :, ell_idx, :, :][..., None] * scale,
+        # ── Accumulate over components r ──────────────────────────────────
+        if n <= N - 2:
+            succ_local_r = succ_local_by_n_r[n]  # tuple of q numpy int arrays
+
+            for r in range(q):
+                sl = succ_local_r[r]  # shape (num_n,) — local indices into degree n+1
+
+                # transition scalars for this (degree, r): shape (num_n,)
+                trans_r = back_trans[idx_n, r]
+
+                # ── F: gather → scale → shuffle → accumulate ──────────────
+                # F_stack[n+1][k]: batch + (num_{n+1}, 1, R, m**k)
+                # After gather:    batch + (num_n,    1, R, m**k)
+                F_gathered = tuple(
+                    lvl[..., sl, :, :, :] for lvl in F_stack[n + 1]
                 )
-            else:
-                g_base = (g_zero,)
-            g_ell = g_base
+                F_scaled = tuple(
+                    lvl * trans_r[:, None, None, None] for lvl in F_gathered
+                )
+                F_shuff = core.tensor_shuffle_vector(
+                    F_scaled,
+                    y[..., r, None, None, None, :],   # batch + (1, 1, 1, m)  ← extra None for num_n axis
+                    trunc=max_f_degree,
+                )
+                f_stack_n = core.tensor_summation(
+                    f_stack_n,
+                    (jnp.zeros_like(f_base_n),) + F_shuff,
+                    trunc=max_f_degree,
+                )
 
-            if n <= N - 2:
-                for r in range(q):
-                    succ = plus[ell_idx][r]
-                    transition = coef.layout.backward_transition[ell_idx, r].astype(dtype)
+                # ── G: gather → scale → shuffle → accumulate ──────────────
+                # G_stack[n+1][k]: batch + (num_{n+1}, q, R, R, m**k)
+                # After gather:    batch + (num_n,    q, R, R, m**k)
+                G_gathered = tuple(
+                    lvl[..., sl, :, :, :, :] for lvl in G_stack[n + 1]
+                )
+                G_scaled = tuple(
+                    lvl * trans_r[:, None, None, None, None] for lvl in G_gathered
+                )
+                G_shuff = core.tensor_shuffle_vector(
+                    G_scaled,
+                    y[..., r, None, None, None, None, :],  # batch + (1, 1, 1, 1, m)  ← extra None for num_n axis
+                    trunc=max_g_degree,
+                )
+                g_stack_n = core.tensor_summation(
+                    g_stack_n,
+                    (jnp.zeros_like(g_base_n),) + G_shuff,
+                    trunc=max_g_degree,
+                )
 
-                    fy = core.tensor_shuffle_vector(
-                        F[succ],
-                        y[..., r, None, None, :],
-                        trunc=max_f_degree,
-                    )
-                    fy = tuple(transition * fy_k for fy_k in fy)
+        F_stack[n] = f_stack_n
+        G_stack[n] = g_stack_n
 
-                    f_ell = core.tensor_summation(
-                        f_ell,
-                        (jnp.zeros_like(f_base[0]),) + fy,
-                        trunc=max_f_degree,
-                    )
-
-                    gy = core.tensor_shuffle_vector(
-                        G[succ],
-                        y[..., r, None, None, None, :],
-                        trunc=max_g_degree,
-                    )
-                    gy = tuple(transition * gy_k for gy_k in gy)
-
-                    g_ell = core.tensor_summation(
-                        g_ell,
-                        (jnp.zeros_like(g_base[0]),) + gy,
-                        trunc=max_g_degree,
-                    )
-
-            F[ell_idx] = f_ell
-            G[ell_idx] = g_ell
-    f0 = F[0]
-    g0 = G[0]
-    if f0 is None or g0 is None:
-        raise RuntimeError("internal error: root multi-index was not evaluated")
+    # ── Extract the degree-0 root (local index 0 within degree-0 block) ───
+    # F_stack[0][k]: batch + (1, 1, R, m**k)  →  batch + (1, R, m**k)
+    f0: DenseElem = tuple(lvl[..., 0, :, :, :] for lvl in F_stack[0])
 
     if N == 1:
-        g0 = (g_zero,)
+        g0: DenseElem = (g_zero,)
+    else:
+        # G_stack[0][k]: batch + (1, q, R, R, m**k)  →  batch + (q, R, R, m**k)
+        g0 = tuple(lvl[..., 0, :, :, :, :] for lvl in G_stack[0])
 
     return f0, g0
 
