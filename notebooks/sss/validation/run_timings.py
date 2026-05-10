@@ -40,6 +40,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 
 from tensordev.sss import StateSpaceSignature
+from tensordev.util.random_paths import unit_speed_paths
 from timing_utils import (
     time_call,
     time_warmup,
@@ -186,16 +187,6 @@ def _empty_row() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def brownian_paths(*, n_paths: int, J: int, d: int, seed: int):
-    key = jax.random.PRNGKey(seed)
-    dt = 1.0 / (J - 1)
-    dW = jnp.sqrt(dt) * jax.random.normal(key, shape=(n_paths, J - 1, d), dtype=jnp.float64)
-    X = jnp.concatenate(
-        [jnp.zeros((n_paths, 1, d), dtype=jnp.float64), jnp.cumsum(dW, axis=1)],
-        axis=1,
-    )
-    return X, dt
-
 
 def random_fssk_params(
     *, q: int, R: int, m: int, d: int, seed: int,
@@ -324,8 +315,9 @@ def main():
             flush=True,
         )
 
-        X, dt = brownian_paths(n_paths=n_paths, J=J, d=d, seed=seed0 + 10_000 + run_id)
-        Lambda, A, b = random_fssk_params(q=q, R=R, m=m, d=d, seed=seed0 + run_id)
+        dt = 1.0 / (J - 1)
+        X = unit_speed_paths(dt=dt, dt_fine=dt / 8, n_paths=n_paths, dim=3, seed=seed0 + 10_000 + run_id)
+        Lambda, A, b = random_fssk_params(q=q, R=R, m=m, d=3, seed=seed0 + run_id)
 
         timings = time_exact_components(
             X=X, dt=dt, Lambda=Lambda, A=A, b=b, N=N, n_repeats=n_repeats,
@@ -350,7 +342,7 @@ def main():
             intervals=intervals,
             R=R,
             m=m,
-            d=d,
+            d=3,
             N=N,
             n_paths=n_paths,
             n_repeats=n_repeats,

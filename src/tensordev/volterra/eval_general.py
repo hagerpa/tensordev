@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from functools import lru_cache, partial
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -8,6 +8,7 @@ import jax.numpy as jnp
 from tensordev.core.jax import Jax
 from tensordev.core.universal import DenseElem, DenseElemFirstOn
 from tensordev.volterra.coeffs import VolterraCoefficients, validate_volterra_coefficients
+from tensordev.util.combinatorics import multiindex_batched_navigation
 
 
 Array = jax.Array
@@ -58,6 +59,7 @@ def eval_vte(
     return (zero,) + tuple(out_first)
 
 
+
 @partial(jax.jit, static_argnames=("core",))
 def _eval_e_first_on(
     y: Array,
@@ -84,39 +86,59 @@ def _eval_e_first_on(
 
     N = coef.trunc
     q = coef.q
-    by_degree, plus = _packed_multiindex_navigation(q, N - 1)
+    global_idx_by_deg, succ_local_by_n_r = multiindex_batched_navigation(q, N - 1)
     inv_factorial = coef.layout.inv_factorial.astype(dtype)
+    back_trans = coef.layout.backward_transition.astype(dtype)  # (layout.size, q)
 
-    F: list[DenseElem | None] = [None] * coef.layout.size
+    # F_stack[n]: DenseElem, level k shape → batch + (num_n, q, m**k)
+    F_stack: list[DenseElem | None] = [None] * N
 
     for n in range(N - 1, -1, -1):
         max_degree = N - 1 - n
-        for ell_idx in by_degree[n]:
-            scale = inv_factorial[ell_idx]
-            base: DenseElem = (alpha[..., :, ell_idx][..., None] * scale,)
-            f_ell = base
+        idx_n = global_idx_by_deg[n]  # numpy array of shape (num_n,), static
+        num_n = len(idx_n)
 
-            if n <= N - 2:
-                for r in range(q):
-                    succ = plus[ell_idx][r]
-                    transition = coef.layout.backward_transition[ell_idx, r].astype(dtype)
-                    fy = core.tensor_shuffle_vector(
-                        F[succ],
-                        y[..., r, :][..., None, :],
-                        trunc=max_degree,
-                    )
-                    fy = tuple(transition * level for level in fy)
-                    f_ell = core.tensor_summation(
-                        f_ell,
-                        (jnp.zeros_like(base[0]),) + fy,
-                        trunc=max_degree,
-                    )
+        # scale factors: shape (num_n,)
+        scale_n = inv_factorial[idx_n]
 
-            F[ell_idx] = f_ell
+        # alpha[..., :, idx_n] → batch + (q, num_n)
+        # moveaxis → batch + (num_n, q); [..., None] → batch + (num_n, q, 1)
+        alpha_gathered = jnp.moveaxis(alpha[..., :, idx_n], -1, -2)
+        f_base_n = alpha_gathered[..., None] * scale_n[:, None, None]
+        f_stack_n: DenseElem = (f_base_n,)
 
-    root = F[0]
-    if root is None:
-        raise RuntimeError("internal error: root multi-index was not evaluated")
+        if n <= N - 2:
+            succ_local_r = succ_local_by_n_r[n]  # tuple of q numpy int arrays
+
+            for r in range(q):
+                sl = succ_local_r[r]  # shape (num_n,) — local indices into degree n+1
+
+                # transition scalars: shape (num_n,)
+                trans_r = back_trans[idx_n, r]
+
+                # F_stack[n+1][k]: batch + (num_{n+1}, q, m**k)
+                # After gather:    batch + (num_n,     q, m**k)
+                F_gathered = tuple(
+                    lvl[..., sl, :, :] for lvl in F_stack[n + 1]
+                )
+                F_scaled = tuple(
+                    lvl * trans_r[:, None, None] for lvl in F_gathered
+                )
+                fy = core.tensor_shuffle_vector(
+                    F_scaled,
+                    y[..., r, None, None, :],  # batch + (1, 1, m) — broadcasts over num_n
+                    trunc=max_degree,
+                )
+                f_stack_n = core.tensor_summation(
+                    f_stack_n,
+                    (jnp.zeros_like(f_base_n),) + fy,
+                    trunc=max_degree,
+                )
+
+        F_stack[n] = f_stack_n
+
+    # F_stack[0][k]: batch + (1, q, m**k) → batch + (q, m**k)
+    root: DenseElem = tuple(lvl[..., 0, :, :] for lvl in F_stack[0])
 
     by_final_letter = core.tensor_product(
         root,
@@ -135,57 +157,6 @@ def _normalize_y_multiindex(y: Array, coef: VolterraCoefficients) -> Array:
     if y.ndim < 2 or y.shape[-2:] != (coef.q, coef.m):
         raise ValueError(f"y must have trailing shape ({coef.q}, {coef.m}), got {tuple(y.shape)}.")
     return y
-
-
-@lru_cache(maxsize=None)
-def _packed_multiindex_navigation(
-    q: int,
-    trunc: int,
-) -> tuple[tuple[tuple[int, ...], ...], tuple[tuple[int, ...], ...]]:
-    """Host-side degree blocks and successor lookup matching the layout order."""
-    tuples: list[tuple[int, ...]] = []
-    by_degree: list[list[int]] = []
-
-    for n in range(trunc + 1):
-        block = list(_compositions_desc(total=n, q=q))
-        by_degree.append(list(range(len(tuples), len(tuples) + len(block))))
-        tuples.extend(block)
-
-    index = {multi: i for i, multi in enumerate(tuples)}
-    plus: list[tuple[int, ...]] = []
-    for multi in tuples:
-        vals = list(multi)
-        total = sum(vals)
-        row = []
-        for r in range(q):
-            if total < trunc:
-                vals[r] += 1
-                row.append(index[tuple(vals)])
-                vals[r] -= 1
-            else:
-                row.append(-1)
-        plus.append(tuple(row))
-
-    return tuple(tuple(block) for block in by_degree), tuple(plus)
-
-
-def _compositions_desc(total: int, q: int):
-    """Compositions in the same graded order as ``build_multiindex_layout``."""
-    if q == 1:
-        yield (total,)
-        return
-    prefix = [0] * q
-
-    def rec(pos: int, remaining: int):
-        if pos == q - 1:
-            prefix[pos] = remaining
-            yield tuple(prefix)
-            return
-        for first in range(remaining, -1, -1):
-            prefix[pos] = first
-            yield from rec(pos + 1, remaining - first)
-
-    yield from rec(0, total)
 
 
 __all__ = ["eval_e", "eval_vte"]

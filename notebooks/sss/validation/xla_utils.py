@@ -3,15 +3,6 @@ xla_utils.py — JAX XLA cost-analysis and memory-analysis helpers.
 
 Public API
 ----------
-abstract_like(x) -> jax.ShapeDtypeStruct
-    Convert a single array (or existing ShapeDtypeStruct) to an abstract spec.
-
-make_abstract_args(*xs) -> tuple[jax.ShapeDtypeStruct, ...]
-    Batch-convert positional args to abstract specs.
-
-abstract_kwargs(**kw) -> dict[str, jax.ShapeDtypeStruct | Any]
-    Batch-convert keyword args that are arrays; leave non-arrays untouched.
-
 compile_and_profile(fn, *args, static_argnums=(), static_argnames=(), **kwargs)
     -> dict
     Lower and compile ``fn`` on concrete *or abstract* inputs, run
@@ -59,58 +50,6 @@ from typing import Any
 
 import jax
 import numpy as np
-
-# ---------------------------------------------------------------------------
-# Abstract-input helpers
-# ---------------------------------------------------------------------------
-
-def abstract_like(x: Any) -> "jax.ShapeDtypeStruct":
-    """Return a ``jax.ShapeDtypeStruct`` with the same shape and dtype as *x*.
-
-    *x* may be:
-    - a JAX / NumPy array
-    - an existing ``jax.ShapeDtypeStruct`` (returned unchanged)
-    - any object with ``.shape`` and ``.dtype`` attributes
-
-    Scalar Python floats / ints are *not* converted (they have no shape) and
-    are returned as-is so they remain concrete when passed to ``.lower()``.
-    """
-    if isinstance(x, jax.ShapeDtypeStruct):
-        return x
-    if hasattr(x, "shape") and hasattr(x, "dtype"):
-        return jax.ShapeDtypeStruct(shape=tuple(x.shape), dtype=x.dtype)
-    return x  # scalar or non-array — leave concrete
-
-
-def make_abstract_args(*xs: Any) -> tuple:
-    """Convert positional array arguments to ``jax.ShapeDtypeStruct`` specs.
-
-    Non-array scalars (``int``, ``float``, ``bool``) are left untouched so
-    they stay concrete when forwarded to `jax.jit(fn).lower()`.
-
-    Example
-    -------
-    >>> X = jnp.ones((2, 128, 4), dtype=jnp.float64)
-    >>> dt = 1.0 / 127
-    >>> make_abstract_args(X, dt)
-    (ShapeDtypeStruct(shape=(2, 128, 4), dtype=float64), 0.007874015748031496)
-    """
-    return tuple(abstract_like(x) for x in xs)
-
-
-def abstract_kwargs(**kw: Any) -> dict[str, Any]:
-    """Convert array keyword arguments to ``jax.ShapeDtypeStruct`` specs.
-
-    Keyword arguments that are plain Python scalars (``int``, ``float``,
-    ``bool``, ``str``) or already-abstract specs are left untouched.
-
-    Example
-    -------
-    >>> abstract_kwargs(X=jnp.ones((4, 64, 2)), dt=0.01, axis=-2)
-    {'X': ShapeDtypeStruct(...), 'dt': 0.01, 'axis': -2}
-    """
-    return {k: abstract_like(v) for k, v in kw.items()}
-
 
 def _any_abstract(*args: Any, **kwargs: Any) -> bool:
     """Return True if any positional or keyword argument is a ShapeDtypeStruct."""

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from functools import lru_cache, partial
+from functools import partial
 
-import numpy as np
 import jax
 import jax.numpy as jnp
 
 from tensordev.core.jax import Jax
 from tensordev.core.universal import DenseElem, DenseElemFirstOn
 from tensordev.sss.coeffs import FSSKCoefficients
+from tensordev.util.combinatorics import multiindex_batched_navigation
 
 Array = jax.Array
 
@@ -45,65 +45,6 @@ def init_state(
         for r in range(coef.trunc)
     )
 
-
-@lru_cache(maxsize=None)
-def _precompute_navigation(
-        q: int,
-        trunc: int,
-) -> tuple[
-    tuple[list[int], ...],
-    tuple[tuple[np.ndarray, ...] | None, ...],
-]:
-    """
-    Host-side precomputation for the batched (stacked multi-index) recursion.
-
-    Returned objects use only Python/NumPy and are cached so that JIT
-    re-traces do not repeat work.
-
-    Parameters
-    ----------
-    q, trunc:
-        Same as ``_packed_multiindex_navigation``.
-
-    Returns
-    -------
-    global_idx_by_deg:
-        ``global_idx_by_deg[n]`` is a plain Python ``list[int]`` of the packed
-        global indices for degree ``n``.
-    succ_local_by_n_r:
-        ``succ_local_by_n_r[n]`` is ``None`` when ``n == trunc``; otherwise it
-        is a tuple of ``q`` NumPy integer arrays, where
-        ``succ_local_by_n_r[n][r]`` has shape ``(num_n,)`` and stores the
-        *local* index of ``plus[ell][r]`` within the degree-``(n+1)`` block,
-        for each ``ell`` in ``global_idx_by_deg[n]``.
-    """
-    by_degree, plus = _packed_multiindex_navigation(q, trunc)
-
-    # inverse map: global_idx -> local position within its degree block
-    local_of_global: dict[int, int] = {}
-    for block in by_degree:
-        for local, gidx in enumerate(block):
-            local_of_global[gidx] = local
-
-    global_idx_by_deg = tuple(
-        np.array(list(block), dtype=np.intp) for block in by_degree
-    )
-
-    succ_local_list: list[tuple[np.ndarray, ...] | None] = []
-    for n, block in enumerate(by_degree):
-        if n == trunc:
-            succ_local_list.append(None)
-        else:
-            succ_r = tuple(
-                np.array(
-                    [local_of_global[plus[ell_idx][r]] for ell_idx in block],
-                    dtype=np.intp,
-                )
-                for r in range(q)
-            )
-            succ_local_list.append(succ_r)
-
-    return global_idx_by_deg, tuple(succ_local_list)
 
 
 @partial(jax.jit, static_argnames=("core",))
@@ -179,7 +120,7 @@ def eval_fg(
             f"got {coef.phi.shape[-4:]}"
         )
 
-    global_idx_by_deg, succ_local_by_n_r = _precompute_navigation(q, N - 1)
+    global_idx_by_deg, succ_local_by_n_r = multiindex_batched_navigation(q, N - 1)
 
     inv_factorial = coef.layout.inv_factorial.astype(dtype)
     back_trans = coef.layout.backward_transition.astype(dtype)  # (layout.size, q)
@@ -393,62 +334,6 @@ def _zero_g0(y: Array, coef: FSSKCoefficients) -> Array:
     batch_shape = jnp.broadcast_shapes(coef.E.shape[:-2], y.shape[:-2])
     return jnp.zeros(batch_shape + (coef.q, coef.R, coef.R, 1), dtype=coef.E.dtype)
 
-
-@lru_cache(maxsize=None)
-def _packed_multiindex_navigation(
-        q: int,
-        trunc: int,
-) -> tuple[tuple[tuple[int, ...], ...], tuple[tuple[int, ...], ...]]:
-    """
-    Host-side packed multi-index navigation matching ``build_multiindex_layout``.
-
-    The degree loops and successor lookups must stay static under ``jax.jit``.
-    The coefficient arrays themselves are still indexed in the canonical packed
-    order defined by ``coef.layout``.
-    """
-    tuples: list[tuple[int, ...]] = []
-    by_degree: list[list[int]] = []
-
-    for n in range(trunc + 1):
-        block = list(_compositions_desc(total=n, q=q))
-        by_degree.append(list(range(len(tuples), len(tuples) + len(block))))
-        tuples.extend(block)
-
-    index = {multi: i for i, multi in enumerate(tuples)}
-    plus: list[tuple[int, ...]] = []
-    for multi in tuples:
-        vals = list(multi)
-        total = sum(vals)
-        row = []
-        for r in range(q):
-            if total < trunc:
-                vals[r] += 1
-                row.append(index[tuple(vals)])
-                vals[r] -= 1
-            else:
-                row.append(-1)
-        plus.append(tuple(row))
-
-    return tuple(tuple(block) for block in by_degree), tuple(plus)
-
-
-def _compositions_desc(total: int, q: int):
-    """Compositions in the same graded order as ``tensordev.util.combinatorics``."""
-    if q == 1:
-        yield (total,)
-        return
-    prefix = [0] * q
-
-    def rec(pos: int, remaining: int):
-        if pos == q - 1:
-            prefix[pos] = remaining
-            yield tuple(prefix)
-            return
-        for first in range(remaining, -1, -1):
-            prefix[pos] = first
-            yield from rec(pos + 1, remaining - first)
-
-    yield from rec(0, total)
 
 
 __all__ = ["init_state", "eval_fg", "update_state"]

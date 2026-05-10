@@ -11,7 +11,7 @@ import pytest
 
 from tensordev.core.jax import Jax
 from tensordev.development import path_signature
-from tensordev.volterra import VolterraKernel, vsig, vsig_fft
+from tensordev.volterra import VolterraKernel, FractionalKernel, GammaKernel, vsig, vsig_fft
 from tensordev.volterra.eval_general import eval_e as eval_e_general
 from tensordev.volterra.eval_general import eval_vte as eval_vte_general
 from tensordev.volterra.eval_scalar import eval_vte as eval_vte_scalar
@@ -47,19 +47,21 @@ def _unit(batch_shape, m, trunc, dtype=jnp.float64):
     )
 
 
-def _manual_volterra(y, kernel, *, times, trunc):
+def _manual_volterra(y, kernel, *, dt=1.0, trunc):
     y = jnp.asarray(y)
     S = y.shape[0]
     batch_shape = y.shape[1:-1] if kernel.q == 1 else y.shape[1:-2]
     unit = _unit(batch_shape, kernel.m, trunc, dtype=y.dtype)
+    dt_arr = jnp.asarray(dt, dtype=y.dtype)
+    if dt_arr.ndim == 0:
+        times = jnp.arange(S + 1, dtype=y.dtype) * dt_arr
+    else:
+        times = jnp.concatenate([jnp.zeros((1,), dtype=y.dtype), jnp.cumsum(dt_arr)])
     history = [unit]
     for j in range(S):
         acc = unit
         for i in range(j + 1):
-            if kernel.kind == "piecewise_constant":
-                coeffs = kernel.coef_from_indices(i, j, trunc=trunc, dtype=y.dtype)
-            else:
-                coeffs = kernel.coef(times[i], times[i + 1], times[j + 1], trunc=trunc, dtype=y.dtype)
+            coeffs = kernel.coef(times[i], times[i + 1], times[j + 1], trunc=trunc, dtype=y.dtype)
             term = _eval_vte(history[i], y[i], coeffs)
             acc = _CORE.tensor_summation(acc, term, trunc=trunc)
         history.append(acc)
@@ -70,7 +72,7 @@ def test_volterra_vsig_one_interval_matches_unit_plus_local_e():
     trunc = 4
     X = jnp.array([[0.0, 0.0], [0.2, -0.5]], dtype=jnp.float64)
     A = jnp.eye(2, dtype=jnp.float64)[None, :, :]
-    kernel = VolterraKernel.fractional(beta=jnp.array([1.0]), A=A)
+    kernel = FractionalKernel(beta=jnp.array([1.0]), A=A)
 
     got = vsig(X, kernel=kernel, dt=0.7, trunc=trunc)
 
@@ -85,44 +87,12 @@ def test_volterra_vsig_two_intervals_matches_explicit_formula():
     trunc = 3
     X = jnp.array([[0.0, 0.0], [0.2, -0.5], [0.3, -0.2]], dtype=jnp.float64)
     A = jnp.eye(2, dtype=jnp.float64)[None, :, :]
-    kernel = VolterraKernel.fractional(beta=jnp.array([0.8]), A=A)
-    times = jnp.array([0.0, 0.4, 1.0], dtype=jnp.float64)
+    kernel = FractionalKernel(beta=jnp.array([0.8]), A=A)
+    dt = jnp.array([0.4, 0.6], dtype=jnp.float64)
 
-    got = vsig(X, kernel=kernel, times=times, trunc=trunc)
+    got = vsig(X, kernel=kernel, dt=dt, trunc=trunc)
     dX = jnp.diff(X, axis=0)
-    expected, _ = _manual_volterra(dX, kernel, times=times, trunc=trunc)
-
-    _assert_dense_allclose(got, expected, atol=2e-10, rtol=2e-10)
-
-
-def test_volterra_vsig_q_gt_one_piecewise_matches_explicit_triangular_recursion():
-    trunc = 3
-    B = jnp.array(
-        [
-            [[1.0, 0.5, -0.2], [0.0, 0.7, 0.4], [0.0, 0.0, 1.2]],
-            [[0.3, -0.1, 0.8], [0.0, 1.1, -0.6], [0.0, 0.0, 0.9]],
-        ],
-        dtype=jnp.float64,
-    )
-    # Block-diagonal A: component 0 reads path dims 0:2, component 1 reads dims 2:4.
-    A = jnp.zeros((2, 2, 4), dtype=jnp.float64)
-    A = A.at[0, :, :2].set(jnp.eye(2, dtype=jnp.float64))
-    A = A.at[1, :, 2:].set(jnp.eye(2, dtype=jnp.float64))
-    kernel = VolterraKernel.piecewise_constant(B=B, A=A)
-    times = jnp.arange(4, dtype=jnp.float64)
-
-    # Flat path increments embedding independent (q, m) values into (S, d=4).
-    dX = jnp.array(
-        [[0.2, -0.5, 0.1, 0.3], [-0.4, 0.7, 0.2, -0.1], [0.3, 0.2, -0.2, 0.5]],
-        dtype=jnp.float64,
-    )
-    X = jnp.concatenate(
-        [jnp.zeros((1, 4), dtype=jnp.float64), jnp.cumsum(dX, axis=0)], axis=0
-    )
-
-    got = vsig(X, kernel=kernel, times=times, trunc=trunc)
-    proj_y = jnp.einsum("qmd,sd->sqm", A, dX)
-    expected, _ = _manual_volterra(proj_y, kernel, times=times, trunc=trunc)
+    expected, _ = _manual_volterra(dX, kernel, dt=dt, trunc=trunc)
 
     _assert_dense_allclose(got, expected, atol=2e-10, rtol=2e-10)
 
@@ -139,7 +109,7 @@ def test_volterra_vsig_beta_one_q_one_recovers_classical_signature():
     )
     trunc = 4
     A = jnp.eye(2, dtype=jnp.float64)[None, :, :]
-    kernel = VolterraKernel.fractional(beta=jnp.array([1.0]), A=A)
+    kernel = FractionalKernel(beta=jnp.array([1.0]), A=A)
 
     got = vsig(X, kernel=kernel, dt=1.0, trunc=trunc)
     expected = path_signature(X, trunc=trunc, axis=-2, core=_CORE)
@@ -151,12 +121,11 @@ def test_volterra_vsig_output_starting_point_returns_padded_history_trajectory()
     trunc = 2
     X = jnp.array([[0.0], [0.2], [0.1], [0.5]], dtype=jnp.float64)
     A = jnp.ones((1, 1, 1), dtype=jnp.float64)
-    kernel = VolterraKernel.fractional(beta=jnp.array([1.0]), A=A)
-    times = jnp.arange(4, dtype=jnp.float64)
+    kernel = FractionalKernel(beta=jnp.array([1.0]), A=A)
 
-    got = vsig(X, kernel=kernel, times=times, trunc=trunc, output_starting_point=True)
+    got = vsig(X, kernel=kernel, dt=1.0, trunc=trunc, output_starting_point=True)
     dX = jnp.diff(X, axis=0)
-    terminal, expected_path = _manual_volterra(dX, kernel, times=times, trunc=trunc)
+    terminal, expected_path = _manual_volterra(dX, kernel, trunc=trunc)
 
     assert got[0].shape == (4, 1)
     for level, expected in zip(got, expected_path):
@@ -174,7 +143,7 @@ def test_volterra_vsig_batched_path_shapes():
     )
     trunc = 3
     A = jnp.eye(2, dtype=jnp.float64)[None, :, :]
-    kernel = VolterraKernel.fractional(beta=jnp.array([1.0]), A=A)
+    kernel = FractionalKernel(beta=jnp.array([1.0]), A=A)
 
     got = vsig(X, kernel=kernel, dt=1.0, trunc=trunc, axis=1)
 
@@ -206,24 +175,10 @@ def test_vsig_fft_fractional_uniform_grid_matches_vsig(trunc, beta):
     X = jnp.array([[0.0, 0.0], [0.2, -0.1], [0.4, 0.3], [0.1, 0.5], [-0.2, 0.2]],
                   dtype=jnp.float64)
     A = jnp.eye(2, dtype=jnp.float64)[None, :, :]
-    kernel = VolterraKernel.fractional(beta=jnp.array([beta]), A=A)
+    kernel = FractionalKernel(beta=jnp.array([beta]), A=A)
 
     ref = vsig(X, kernel=kernel, dt=0.5, trunc=trunc)
     got = vsig_fft(X, kernel=kernel, dt=0.5, trunc=trunc)
-    _assert_fft_allclose(got, ref)
-
-
-@pytest.mark.parametrize("trunc", [1, 2, 3])
-@pytest.mark.parametrize("beta", [0.7, 1.0])
-def test_vsig_fft_fractional_nonuniform_grid_matches_vsig(trunc, beta):
-    """Einsum path (fractional kernel, non-uniform grid) matches the scan-based vsig."""
-    X = jnp.array([[0.0, 0.0], [0.2, -0.1], [0.5, 0.3], [0.1, 0.5]], dtype=jnp.float64)
-    times = jnp.array([0.0, 0.3, 1.0, 1.5], dtype=jnp.float64)
-    A = jnp.eye(2, dtype=jnp.float64)[None, :, :]
-    kernel = VolterraKernel.fractional(beta=jnp.array([beta]), A=A)
-
-    ref = vsig(X, kernel=kernel, times=times, trunc=trunc)
-    got = vsig_fft(X, kernel=kernel, times=times, trunc=trunc)
     _assert_fft_allclose(got, ref)
 
 
@@ -233,7 +188,7 @@ def test_vsig_fft_gamma_uniform_grid_matches_vsig(trunc, beta, rate):
     """FFT path (gamma kernel, uniform grid) matches the scan-based vsig."""
     X = jnp.array([[0.0], [0.3], [-0.1], [0.4], [0.2]], dtype=jnp.float64)
     A = jnp.ones((1, 1, 1), dtype=jnp.float64)
-    kernel = VolterraKernel.gamma(
+    kernel = GammaKernel(
         beta=jnp.array([beta]), A=A, scale=jnp.array([1.5]), rate=jnp.array([rate]),
         quad_order=32,
     )
@@ -243,27 +198,11 @@ def test_vsig_fft_gamma_uniform_grid_matches_vsig(trunc, beta, rate):
     _assert_fft_allclose(got, ref, atol=1e-7)
 
 
-@pytest.mark.parametrize("trunc", [1, 2, 3])
-def test_vsig_fft_piecewise_constant_matches_vsig(trunc):
-    """Einsum path (piecewise-constant kernel) matches the scan-based vsig."""
-    S = 4
-    B = jnp.tril(jnp.ones((1, S, S), dtype=jnp.float64)) * 0.7
-    A = jnp.eye(2, dtype=jnp.float64)[None, :, :]
-    kernel = VolterraKernel.piecewise_constant(B=B, A=A)
-    X = jnp.array([[0.0, 0.0], [0.2, -0.1], [0.4, 0.3], [0.1, 0.5], [-0.1, 0.2]],
-                  dtype=jnp.float64)
-    times = jnp.arange(S + 1, dtype=jnp.float64)
-
-    ref = vsig(X, kernel=kernel, times=times, trunc=trunc)
-    got = vsig_fft(X, kernel=kernel, times=times, trunc=trunc)
-    _assert_fft_allclose(got, ref)
-
-
 def test_vsig_fft_output_starting_point_matches_vsig():
     """Full trajectory (output_starting_point=True) matches vsig level-by-level."""
     X = jnp.array([[0.0, 0.0], [0.2, -0.1], [0.4, 0.3], [0.1, 0.5]], dtype=jnp.float64)
     A = jnp.eye(2, dtype=jnp.float64)[None, :, :]
-    kernel = VolterraKernel.fractional(beta=jnp.array([0.8]), A=A)
+    kernel = FractionalKernel(beta=jnp.array([0.8]), A=A)
     trunc = 3
 
     ref = vsig(X, kernel=kernel, dt=1.0, trunc=trunc, output_starting_point=True)
@@ -281,7 +220,7 @@ def test_vsig_fft_batched_path_matches_vsig():
         dtype=jnp.float64,
     )
     A = jnp.eye(2, dtype=jnp.float64)[None, :, :]
-    kernel = VolterraKernel.fractional(beta=jnp.array([0.9]), A=A)
+    kernel = FractionalKernel(beta=jnp.array([0.9]), A=A)
     trunc = 3
 
     ref = vsig(X, kernel=kernel, dt=1.0, trunc=trunc, axis=1)
@@ -294,7 +233,7 @@ def test_vsig_fft_dyadic_refinement_matches_vsig(dyadic_order):
     """Dyadic path refinement gives the same result as vsig."""
     X = jnp.array([[0.0, 0.0], [0.3, -0.2], [0.1, 0.4]], dtype=jnp.float64)
     A = jnp.eye(2, dtype=jnp.float64)[None, :, :]
-    kernel = VolterraKernel.fractional(beta=jnp.array([0.7]), A=A)
+    kernel = FractionalKernel(beta=jnp.array([0.7]), A=A)
     trunc = 3
 
     ref = vsig(X, kernel=kernel, dt=1.0, trunc=trunc, dyadic_order=dyadic_order)
@@ -304,12 +243,12 @@ def test_vsig_fft_dyadic_refinement_matches_vsig(dyadic_order):
 
 def test_vsig_fft_raises_for_q_gt_one():
     """vsig_fft raises NotImplementedError for q > 1 kernels."""
-    B = jnp.ones((2, 2, 2), dtype=jnp.float64)
     A = jnp.zeros((2, 2, 4), dtype=jnp.float64)
     A = A.at[0, :, :2].set(jnp.eye(2))
     A = A.at[1, :, 2:].set(jnp.eye(2))
-    kernel = VolterraKernel.piecewise_constant(B=B, A=A)
+    beta = jnp.array([1.0, 1.0], dtype=jnp.float64)
+    kernel = FractionalKernel(beta=beta, A=A)
     X = jnp.zeros((3, 4), dtype=jnp.float64)
 
     with pytest.raises(NotImplementedError):
-        vsig_fft(X, kernel=kernel, times=jnp.arange(3, dtype=jnp.float64), trunc=2)
+        vsig_fft(X, kernel=kernel, dt=1.0, trunc=2)

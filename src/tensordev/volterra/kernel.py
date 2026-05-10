@@ -1,16 +1,20 @@
 """Volterra kernels and packed coefficient builders.
 
-The public :class:`VolterraKernel` name is intentionally generic.  Internally,
-the implemented coefficient builders assume the symmetry hypothesis of Part II:
-for a word ``w p``, the coefficient depends on the prefix ``w`` only through its
-multi-index of letter counts.  This covers convolution kernels, including the
-multivariate fractional family, and piecewise constant kernels.
+The public names :class:`FractionalKernel` and :class:`GammaKernel` both
+inherit from the abstract base :class:`VolterraKernel`.  The base class holds
+the shared kernel matrix ``A`` and implements :meth:`coef`, :meth:`coef_grid`,
+and :meth:`lag_weights`; concrete subclasses implement :meth:`alpha`.
+
+The coefficient methods return :class:`VolterraCoefficients`, whose
+``alpha[..., p, ell_idx]`` stores
+
+.. math::
+    \\mathcal{K}_{s,t}^{w(\\ell)\\,p,\\,\\tau} \\,/\\, (t-s)^{|\\ell|+1}.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from functools import partial
 from typing import Optional
 
 import numpy as np
@@ -19,123 +23,45 @@ import jax
 import jax.numpy as jnp
 from jax.scipy.special import betainc, gammaln
 
-from tensordev.util.combinatorics import build_multiindex_layout
+from tensordev.util.combinatorics import MultiIndexLayout, build_multiindex_layout
 from tensordev.volterra.coeffs import VolterraCoefficients
 
 
 Array = jax.Array
 
 
-@jax.tree_util.register_dataclass
 @dataclass(frozen=True, slots=True)
 class VolterraKernel:
-    r"""
-    Volterra kernel data and coefficient builders.
+    r"""Abstract base class for Volterra kernels.
 
-    The kernel is represented as
+    A Volterra kernel is represented as
 
     .. math::
         K(t,s) = \sum_{p=1}^q k_p(t,s)\, A_p,
 
-    where :math:`A_p \in \mathbb{R}^{m \times d}`.  The currently implemented
-    families are:
-
-    - :meth:`fractional`: multivariate fractional convolution kernels
-      :math:`k_p(t,s) = \Gamma(\beta_p)^{-1}(t-s)^{\beta_p - 1}`.
-    - :meth:`gamma`: scalar Gamma kernel (:math:`q = 1`) with
-      :math:`k(t,s) = \mathrm{scale}\cdot e^{-\mathrm{rate}(t-s)}\cdot\Gamma(\beta)^{-1}(t-s)^{\beta-1}`.
-    - :meth:`piecewise_constant`: kernels constant on source/readout cells with
-      coefficients ``B[p, source, readout]``.
-
-    The coefficient methods return :class:`VolterraCoefficients`, whose
-    ``alpha[..., p, ell_idx]`` stores
-
-    .. math::
-        \mathcal{K}_{s,t}^{w(\ell)\,p,\,\tau} \,/\, (t-s)^{|\ell|+1}.
-
-    This normalization follows the definition of :math:`\mathcal{E}` in Part II,
-    where a word of length :math:`|\ell|+1` is divided by :math:`(t-s)^{|\ell|+1}`.
+    where :math:`A_p \in \mathbb{R}^{m \times d}`.  Concrete subclasses
+    implement :meth:`alpha`.
     """
 
-    kind: str = field(metadata={"static": True})
     A: Array
     beta: Array
-    B: Array
-    scale: Array
-    rate: Array
-    quad_order: int = field(default=32, metadata={"static": True})
 
     def __post_init__(self) -> None:
-        """Validate and normalize kernel arrays.
-
-        All array fields are converted to JAX arrays.  Shape and positivity
-        constraints are enforced according to ``kind``.
-        """
         A = jnp.asarray(self.A)
-        beta = jnp.asarray(self.beta)
-        B = jnp.asarray(self.B)
-        scale = jnp.asarray(self.scale)
-        rate = jnp.asarray(self.rate)
-
         if A.ndim != 3:
             raise ValueError(
                 "A must have shape (q, m, d); "
                 f"got {tuple(A.shape)}."
             )
-        if self.kind not in {"fractional", "gamma", "piecewise_constant"}:
-            raise ValueError(
-                "kind must be one of 'fractional', 'gamma', 'piecewise_constant'; "
-                f"got {self.kind!r}."
-            )
-        if self.quad_order <= 0:
-            raise ValueError(f"quad_order must be positive, got {self.quad_order}.")
-
-        q = int(A.shape[0])
-        if self.kind == "fractional":
-            if beta.shape != (q,):
-                raise ValueError(
-                    "fractional beta must have shape (q,), matching A.shape[0]; "
-                    f"got beta.shape={tuple(beta.shape)} and q={q}."
-                )
-            if bool(jnp.any(beta <= 0)):
-                raise ValueError("fractional beta entries must be positive.")
-        elif self.kind == "gamma":
-            if q != 1:
-                raise ValueError("gamma kernels are scalar in this implementation, so A.shape[0] must be 1.")
-            if beta.shape not in [(), (1,)]:
-                raise ValueError(f"gamma beta must be scalar or shape (1,), got {tuple(beta.shape)}.")
-            if scale.shape not in [(), (1,)]:
-                raise ValueError(f"gamma scale must be scalar or shape (1,), got {tuple(scale.shape)}.")
-            if rate.shape not in [(), (1,)]:
-                raise ValueError(f"gamma rate must be scalar or shape (1,), got {tuple(rate.shape)}.")
-            if bool(jnp.any(beta <= 0)):
-                raise ValueError("gamma beta must be positive.")
-            if bool(jnp.any(scale <= 0)):
-                raise ValueError("gamma scale must be positive.")
-            if bool(jnp.any(rate < 0)):
-                raise ValueError("gamma rate must be non-negative.")
-        else:
-            if B.ndim != 3:
-                raise ValueError(
-                    "piecewise constant B must have shape (q, S, R); "
-                    f"got {tuple(B.shape)}."
-                )
-            if B.shape[0] != q:
-                raise ValueError(
-                    "piecewise constant B and A must have the same component axis q; "
-                    f"got B.shape[0]={B.shape[0]} and q={q}."
-                )
-            if B.shape[1] <= 0 or B.shape[2] <= 0:
-                raise ValueError(f"piecewise constant B has invalid shape {tuple(B.shape)}.")
-
         object.__setattr__(self, "A", A)
-        object.__setattr__(self, "beta", beta)
-        object.__setattr__(self, "B", B)
-        object.__setattr__(self, "scale", scale)
-        object.__setattr__(self, "rate", rate)
+        object.__setattr__(self, "beta", jnp.asarray(self.beta))
+
+    # ------------------------------------------------------------------
+    # Factory constructors
+    # ------------------------------------------------------------------
 
     @classmethod
-    def fractional(cls, *, beta: Array, A: Array) -> "VolterraKernel":
+    def fractional(cls, *, beta: Array, A: Array) -> "FractionalKernel":
         r"""Construct a multivariate fractional Volterra kernel.
 
         The scalar kernels are
@@ -144,8 +70,7 @@ class VolterraKernel:
             k_p(t,s) = \frac{(t-s)^{\beta_p - 1}}{\Gamma(\beta_p)},
             \qquad p = 1,\ldots,q,
 
-        where :math:`\beta_p > 0`.  The full kernel is
-        :math:`K(t,s) = \sum_p k_p(t,s)\,A_p`.
+        where :math:`\beta_p > 0`.
 
         Parameters
         ----------
@@ -153,21 +78,8 @@ class VolterraKernel:
             Exponent vector of shape ``(q,)`` with all entries positive.
         A : Array
             Kernel matrices of shape ``(q, m, d)``.
-
-        Returns
-        -------
-        VolterraKernel
-            Fractional kernel instance.
         """
-        return cls(
-            kind="fractional",
-            A=A,
-            beta=beta,
-            B=jnp.empty((0, 0, 0)),
-            scale=jnp.asarray(1.0),
-            rate=jnp.asarray(0.0),
-            quad_order=1,
-        )
+        return FractionalKernel(beta=beta, A=A)
 
     @classmethod
     def gamma(
@@ -178,7 +90,7 @@ class VolterraKernel:
         scale: Array = 1.0,
         rate: Array = 1.0,
         quad_order: int = 32,
-    ) -> "VolterraKernel":
+    ) -> "GammaKernel":
         r"""Construct a scalar Gamma Volterra kernel (:math:`q = 1`).
 
         The kernel is
@@ -202,53 +114,12 @@ class VolterraKernel:
             Non-negative exponential decay rate.
         quad_order : int, default=32
             Number of Gauss-Legendre nodes used when building coefficients.
-
-        Returns
-        -------
-        VolterraKernel
-            Gamma kernel instance.
         """
-        return cls(
-            kind="gamma",
-            A=A,
-            beta=beta,
-            B=jnp.empty((0, 0, 0)),
-            scale=scale,
-            rate=rate,
-            quad_order=quad_order,
-        )
+        return GammaKernel(beta=beta, A=A, scale=scale, rate=rate, quad_order=quad_order)
 
-    @classmethod
-    def piecewise_constant(cls, *, B: Array, A: Array) -> "VolterraKernel":
-        r"""Construct a piecewise constant Volterra kernel.
-
-        The scalar coefficient for component ``p`` when the source variable
-        lies in cell ``i`` and the readout variable lies in cell ``j`` is
-        ``B[p, i, j]``.  The path grid supplied to :meth:`coef_grid` must
-        match the cell structure of ``B``.
-
-        Parameters
-        ----------
-        B : Array
-            Coefficient tensor of shape ``(q, S, R)``, where ``S`` is the
-            number of source cells and ``R`` is the number of readout cells.
-        A : Array
-            Kernel matrices of shape ``(q, m, d)``.
-
-        Returns
-        -------
-        VolterraKernel
-            Piecewise constant kernel instance.
-        """
-        return cls(
-            kind="piecewise_constant",
-            A=A,
-            beta=jnp.empty((0,)),
-            B=B,
-            scale=jnp.asarray(1.0),
-            rate=jnp.asarray(0.0),
-            quad_order=1,
-        )
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
 
     @property
     def q(self) -> int:
@@ -265,6 +136,31 @@ class VolterraKernel:
         """Input path dimension ``d``."""
         return int(self.A.shape[2])
 
+    # ------------------------------------------------------------------
+    # Abstract interface
+    # ------------------------------------------------------------------
+
+    def alpha(
+        self,
+        layout: MultiIndexLayout,
+        *,
+        rho: float | Array = 0.0,
+        dtype: jnp.dtype,
+        s: Array,
+        t: Array,
+        tau: Array,
+    ) -> tuple[Array, Array]:
+        """Evaluate normalized kernel coefficients for time triples ``(s, t, tau)``.
+
+        Returns ``(vals, valid)`` where ``vals`` has shape ``leading + (q, M)``
+        and ``valid`` has shape ``leading``.
+        """
+        raise NotImplementedError(f"{type(self).__name__} must implement alpha.")
+
+    # ------------------------------------------------------------------
+    # Shared coefficient builders
+    # ------------------------------------------------------------------
+
     def coef(
         self,
         s: Array,
@@ -274,20 +170,14 @@ class VolterraKernel:
         trunc: int,
         dtype: Optional[jnp.dtype] = None,
     ) -> VolterraCoefficients:
-        r"""Build packed coefficients for broadcasted triples ``(s,t,tau)``.
+        r"""Build packed coefficients for broadcasted triples ``(s, t, tau)``.
 
         ``s``, ``t`` and ``tau`` are broadcast to a common leading shape.  The
         returned ``alpha`` has shape ``leading + (q, M)``.  Triples outside
         ``s < t <= tau`` are marked invalid and their coefficients are zero.
-
-        Piecewise constant kernels should usually use :meth:`coef_grid`, since
-        their coefficients are indexed by source/readout cells rather than by
-        analytic time triples.
         """
         if trunc <= 0:
             raise ValueError(f"trunc must be positive, got {trunc}.")
-        if self.kind == "piecewise_constant":
-            raise ValueError("piecewise_constant coefficients are cell-indexed; use coef_grid or coef_from_indices.")
 
         real_dtype = jnp.dtype(dtype or self.A.dtype)
         s_arr, t_arr, tau_arr = jnp.broadcast_arrays(
@@ -297,27 +187,7 @@ class VolterraKernel:
         )
         layout = build_multiindex_layout(self.q, trunc - 1)
 
-        if self.kind == "fractional":
-            alpha, valid = _fractional_alpha(
-                s_arr,
-                t_arr,
-                tau_arr,
-                self.beta.astype(real_dtype),
-                layout.ell,
-                layout.degree,
-            )
-        else:
-            alpha, valid = _gamma_alpha(
-                s_arr,
-                t_arr,
-                tau_arr,
-                self.beta.reshape(()).astype(real_dtype),
-                self.scale.reshape(()).astype(real_dtype),
-                self.rate.reshape(()).astype(real_dtype),
-                layout.degree,
-                quad_order=self.quad_order,
-                dtype=real_dtype,
-            )
+        alpha, valid = self.alpha(layout, dtype=real_dtype, s=s_arr, t=t_arr, tau=tau_arr)
 
         return VolterraCoefficients(
             layout=layout,
@@ -370,26 +240,6 @@ class VolterraKernel:
         if tau_arr.ndim != 1:
             raise ValueError(f"tau must be one-dimensional when provided, got {tuple(tau_arr.shape)}.")
 
-        if self.kind == "piecewise_constant":
-            if tau is not None:
-                raise ValueError(
-                    "piecewise_constant coef_grid currently expects tau=None, "
-                    "so readout cells are the same grid cells as the path grid."
-                )
-            S = int(times_arr.shape[0] - 1)
-            if self.B.shape[1:] != (S, S):
-                raise ValueError(
-                    "For piecewise_constant coef_grid, B.shape must be (q, S, S) "
-                    "for the supplied path grid; "
-                    f"got B.shape={tuple(self.B.shape)} and S={S}."
-                )
-            return self.coef_from_indices(
-                jnp.arange(S, dtype=jnp.int32)[:, None],
-                jnp.arange(S, dtype=jnp.int32)[None, :],
-                trunc=trunc,
-                dtype=real_dtype,
-            )
-
         return self.coef(
             s[:, None],
             t[:, None],
@@ -398,47 +248,187 @@ class VolterraKernel:
             dtype=real_dtype,
         )
 
-    def coef_from_indices(
+    def lag_weights(
         self,
-        source: Array,
-        readout: Array,
         *,
-        trunc: int,
-        dtype: Optional[jnp.dtype] = None,
-    ) -> VolterraCoefficients:
-        r"""Build piecewise constant coefficients from source/readout cells."""
-        if self.kind != "piecewise_constant":
-            raise ValueError("coef_from_indices is only defined for piecewise_constant kernels.")
-        if trunc <= 0:
-            raise ValueError(f"trunc must be positive, got {trunc}.")
+        out_len: int,
+        h: Array,
+        theta: Array,
+        q: int,
+        rho: float | Array = 0.0,
+        dtype: jnp.dtype,
+    ) -> Array:
+        r"""Lag-k causal convolution weights for ``k = 0, ..., out_len-1``.
 
-        source_arr, readout_arr = jnp.broadcast_arrays(
-            jnp.asarray(source, dtype=jnp.int32),
-            jnp.asarray(readout, dtype=jnp.int32),
-        )
-        S, R = int(self.B.shape[1]), int(self.B.shape[2])
-        valid = (source_arr >= 0) & (source_arr < S) & (readout_arr >= 0) & (readout_arr < R) & (source_arr <= readout_arr)
-        source_safe = jnp.where(valid, source_arr, 0)
-        readout_safe = jnp.where(valid, readout_arr, 0)
+        Evaluates the degree-``(q-1)`` Volterra coefficients at the time triples
+        ``s=0, t=h, tau=(k+θ)·h``, which are the causal convolution weights for
+        the order-``q`` term of the discrete signature kernel.  Lag 0 is always
+        zero (strict causality, ``tau < t``).
 
-        real_dtype = jnp.dtype(dtype or self.A.dtype)
-        layout = build_multiindex_layout(self.q, trunc - 1)
-        alpha = _piecewise_constant_alpha(
-            self.B.astype(real_dtype),
-            source_safe,
-            readout_safe,
-            layout.ell,
-            layout.degree,
-            valid,
+        Returns an array of shape ``(out_len, self.q, M_{q-1})``, where
+        ``M_{q-1}`` is the number of multi-indices of degree ``q-1`` for
+        ``self.q`` components.
+        """
+        dtype_ = jnp.dtype(dtype)
+        lag = jnp.arange(out_len, dtype=dtype_)
+        layout = build_multiindex_layout(self.q, q - 1)
+        vals, _ = self.alpha(
+            layout,
+            rho=rho,
+            dtype=dtype_,
+            s=jnp.zeros(out_len, dtype=dtype_),
+            t=jnp.full(out_len, h, dtype=dtype_),
+            tau=(lag + theta) * h,
         )
-        return VolterraCoefficients(
-            layout=layout,
-            trunc=trunc,
-            m=self.m,
-            q=self.q,
-            alpha=alpha.astype(real_dtype),
-            valid=valid,
+        start = int(layout.offsets[q - 1])
+        result = vals[..., start:].astype(dtype_)
+        # Strict causality: lag 0 is zero regardless of theta.  alpha uses
+        # tau >= t which admits tau = t when theta = 1, but that is not a
+        # past lag and must be zeroed out explicitly.
+        return result.at[0].set(jnp.zeros_like(result[0]))
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True, slots=True)
+class FractionalKernel(VolterraKernel):
+    r"""Multivariate fractional Volterra kernel.
+
+    The scalar kernels are
+
+    .. math::
+        k_p(t,s) = \frac{(t-s)^{\beta_p - 1}}{\Gamma(\beta_p)},
+        \qquad p = 1,\ldots,q,
+
+    where :math:`\beta_p > 0`.  The full kernel is
+    :math:`K(t,s) = \sum_p k_p(t,s)\,A_p`.
+
+    Parameters
+    ----------
+    beta : Array
+        Exponent vector of shape ``(q,)`` with all entries positive.
+    A : Array
+        Kernel matrices of shape ``(q, m, d)``.
+    """
+
+    def __post_init__(self) -> None:
+        VolterraKernel.__post_init__(self)
+        if self.beta.shape != (self.q,):
+            raise ValueError(
+                "fractional beta must have shape (q,), matching A.shape[0]; "
+                f"got beta.shape={tuple(self.beta.shape)} and q={self.q}."
+            )
+        if bool(jnp.any(self.beta <= 0)):
+            raise ValueError("fractional beta entries must be positive.")
+
+    def alpha(
+        self,
+        layout: MultiIndexLayout,
+        *,
+        rho: float | Array = 0.0,
+        dtype: jnp.dtype,
+        s: Array,
+        t: Array,
+        tau: Array,
+    ) -> tuple[Array, Array]:
+        dtype_ = jnp.dtype(dtype)
+        return _fractional_alpha(
+            s.astype(dtype_),
+            t.astype(dtype_),
+            tau.astype(dtype_),
+            self.beta.astype(dtype_),
+            layout.ell.astype(dtype_),
+            layout.degree.astype(dtype_),
+            rho,
         )
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True, slots=True)
+class GammaKernel(VolterraKernel):
+    r"""Scalar Gamma Volterra kernel (:math:`q = 1`).
+
+    The kernel is
+
+    .. math::
+        k(t,s) = \mathrm{scale} \cdot e^{-\mathrm{rate}(t-s)}
+                 \cdot \frac{(t-s)^{\beta-1}}{\Gamma(\beta)},
+
+    where :math:`\beta > 0`, :math:`\mathrm{scale} > 0` and
+    :math:`\mathrm{rate} \geq 0`.
+
+    Parameters
+    ----------
+    beta : Array
+        Shape parameter, scalar or shape ``(1,)``.  Must be positive.
+    scale : Array
+        Positive scale factor.
+    rate : Array
+        Non-negative exponential decay rate.
+    A : Array
+        Kernel matrix of shape ``(1, m, d)``.
+    quad_order : int, default=32
+        Number of Gauss-Legendre nodes used when building coefficients.
+    """
+
+    scale: Array
+    rate: Array
+    quad_order: int = field(default=32, metadata={"static": True})
+
+    def __post_init__(self) -> None:
+        VolterraKernel.__post_init__(self)
+        scale = jnp.asarray(self.scale)
+        rate = jnp.asarray(self.rate)
+        if self.q != 1:
+            raise ValueError(
+                "gamma kernels are scalar in this implementation, so A.shape[0] must be 1."
+            )
+        if self.beta.shape not in [(), (1,)]:
+            raise ValueError(f"gamma beta must be scalar or shape (1,), got {tuple(self.beta.shape)}.")
+        if scale.shape not in [(), (1,)]:
+            raise ValueError(f"gamma scale must be scalar or shape (1,), got {tuple(scale.shape)}.")
+        if rate.shape not in [(), (1,)]:
+            raise ValueError(f"gamma rate must be scalar or shape (1,), got {tuple(rate.shape)}.")
+        if bool(jnp.any(self.beta <= 0)):
+            raise ValueError("gamma beta must be positive.")
+        if bool(jnp.any(scale <= 0)):
+            raise ValueError("gamma scale must be positive.")
+        if bool(jnp.any(rate < 0)):
+            raise ValueError("gamma rate must be non-negative.")
+        if self.quad_order <= 0:
+            raise ValueError(f"quad_order must be positive, got {self.quad_order}.")
+        object.__setattr__(self, "scale", scale)
+        object.__setattr__(self, "rate", rate)
+
+    def alpha(
+        self,
+        layout: MultiIndexLayout,
+        *,
+        rho: float | Array = 0.0,
+        dtype: jnp.dtype,
+        s: Array,
+        t: Array,
+        tau: Array,
+    ) -> tuple[Array, Array]:
+        dtype_ = jnp.dtype(dtype)
+        nodes_np, weights_np = np.polynomial.legendre.leggauss(int(self.quad_order))
+        return _gamma_alpha(
+            s.astype(dtype_),
+            t.astype(dtype_),
+            tau.astype(dtype_),
+            self.beta.reshape(()).astype(dtype_),
+            self.scale.reshape(()).astype(dtype_),
+            self.rate.reshape(()).astype(dtype_),
+            layout.degree.astype(dtype_),
+            jnp.asarray(nodes_np, dtype=dtype_),
+            jnp.asarray(weights_np, dtype=dtype_),
+            rho,
+        )
+
+from functools import partial
+
+import jax
+import jax.numpy as jnp
+from jax.scipy.special import betainc, gammaln
 
 
 @jax.jit
@@ -449,40 +439,53 @@ def _fractional_alpha(
     beta: Array,
     ell: Array,
     degree: Array,
+    rho: float | Array,
 ) -> tuple[Array, Array]:
-    """Evaluate normalized multivariate fractional coefficients."""
-    dtype = jnp.result_type(s, t, tau, beta)
-    s = s.astype(dtype)
-    t = t.astype(dtype)
-    tau = tau.astype(dtype)
-    beta = beta.astype(dtype)
-    ell = ell.astype(dtype)
-    degree = degree.astype(dtype)
+    r"""Evaluate normalized multivariate fractional coefficients.
 
+    For each multi-index ``m`` (row of ``ell``) and component ``j``, computes
+
+    .. math::
+
+        \alpha_{m,j}(s, t, \tau) =
+            \frac{\Gamma(\rho+1)}{\Gamma\!\left(\rho + \ell_m\!\cdot\!\beta + \beta_j + 1\right)}
+            \cdot
+            \frac{(\tau - s)^{\rho + \ell_m\cdot\beta + \beta_j}}{(t - s)^{|\ell_m| + 1}}
+            \cdot
+            I_{(t-s)/(\tau-s)}\!\left(\rho + \ell_m\!\cdot\!\beta + 1,\; \beta_j\right),
+
+    where :math:`I_z(a, b)` is the regularized incomplete beta function.
+    All inputs are assumed pre-cast to a common floating-point dtype by the
+    calling :meth:`FractionalKernel.alpha`.  The result is zero whenever
+    :math:`s < t \le \tau` is violated.
+
+    Returns ``(vals, valid)`` with ``vals`` of shape ``leading + (q, M)``.
+    """
     h = t - s
     tau_s = tau - s
     valid = (h > 0) & (tau >= t)
-    h_safe = jnp.where(valid, h, jnp.ones_like(h))
-    tau_s_safe = jnp.where(valid, tau_s, jnp.ones_like(tau_s))
+    h_safe = jnp.where(valid, h, 1.0)
+    tau_s_safe = jnp.where(valid, tau_s, 1.0)
     z = jnp.clip(h_safe / tau_s_safe, 0.0, 1.0)
 
     prefix = ell @ beta                      # (M,)
     total = prefix[:, None] + beta[None, :]  # (M, q)
-    a = prefix[:, None] + 1.0
+    a = rho + prefix[:, None] + 1.0
     b = beta[None, :]
 
     # leading + (M, q)
     log_scale = (
-        total * jnp.log(tau_s_safe[..., None, None])
+        (rho + total) * jnp.log(tau_s_safe[..., None, None])
         - (degree[:, None] + 1.0) * jnp.log(h_safe[..., None, None])
-        - gammaln(total + 1.0)
+        + gammaln(rho + 1.0)
+        - gammaln(rho + total + 1.0)
     )
     vals = jnp.exp(log_scale) * betainc(a, b, z[..., None, None])
-    vals = jnp.where(valid[..., None, None], vals, jnp.zeros_like(vals))
+    vals = jnp.where(valid[..., None, None], vals, 0.0)
     return jnp.swapaxes(vals, -1, -2), valid  # leading + (q, M)
 
 
-@partial(jax.jit, static_argnames=("quad_order", "dtype"))
+@jax.jit
 def _gamma_alpha(
     s: Array,
     t: Array,
@@ -491,31 +494,41 @@ def _gamma_alpha(
     scale: Array,
     rate: Array,
     degree: Array,
-    *,
-    quad_order: int,
-    dtype: jnp.dtype,
+    nodes: Array,
+    weights: Array,
+    rho: float | Array,
 ) -> tuple[Array, Array]:
-    """Evaluate normalized scalar Gamma coefficients by Gauss-Legendre quadrature."""
-    dtype = jnp.dtype(dtype)
-    s = s.astype(dtype)
-    t = t.astype(dtype)
-    tau = tau.astype(dtype)
-    beta = beta.astype(dtype)
-    scale = scale.astype(dtype)
-    rate = rate.astype(dtype)
-    degree = degree.astype(dtype)
+    r"""Evaluate normalized scalar Gamma coefficients by Gauss-Legendre quadrature.
 
-    nodes_np, weights_np = np.polynomial.legendre.leggauss(int(quad_order))
-    nodes = jnp.asarray(nodes_np, dtype=dtype)
-    weights = jnp.asarray(weights_np, dtype=dtype)
+    Computes
 
+    .. math::
+
+        \alpha_m(s, t, \tau;\, \rho) =
+            \frac{\Gamma(\rho+1)}{(t-s)^{n}}
+            \int_s^t \!\left(\frac{u-s}{t-s}\right)^{\!\rho}
+            \dot{\kappa}(u;\, t,\tau,\, n)\,\mathrm{d}u,
+
+    where :math:`n = |\ell_m| + 1` and :math:`\dot{\kappa}` is the closed-form
+    dot-kappa of the scalar Gamma kernel.  The weight
+    :math:`\bigl((u-s)/(t-s)\bigr)^\rho` reduces to :math:`1` at
+    :math:`\rho = 0`, recovering the standard coefficient.  For the
+    Gauss-Legendre nodes :math:`\xi_k` on :math:`[-1,1]`, the weight at node
+    :math:`k` is :math:`((\xi_k+1)/2)^\rho`.
+
+    All inputs are pre-cast to a common floating-point dtype and the quadrature
+    nodes/weights pre-computed by the calling :meth:`GammaKernel.alpha`.
+
+    Returns ``(vals, valid)`` with ``vals`` of shape ``leading + (1, M)``.
+    """
     h = t - s
     valid = (h > 0) & (tau >= t)
-    h_safe = jnp.where(valid, h, jnp.ones_like(h))
+    h_safe = jnp.where(valid, h, 1.0)
 
-    # u has shape leading + (Q,)
+    # u has shape leading + (Q,); (u - s) / (t - s) = (nodes + 1) / 2
     u = s[..., None] + 0.5 * h_safe[..., None] * (nodes + 1.0)
-    quad_w = 0.5 * h_safe[..., None] * weights
+    # fold rho weight into quadrature weights: leading + (Q,)
+    effective_w = 0.5 * h_safe[..., None] * weights * (((nodes + 1.0) * 0.5) ** rho)
 
     n = degree + 1.0  # (M,)
 
@@ -528,9 +541,9 @@ def _gamma_alpha(
         scale,
         rate,
     )  # leading + (Q, M)
-    kappa = jnp.sum(quad_w[..., None] * dot, axis=-2)  # leading + (M,)
-    alpha = kappa / (h_safe[..., None] ** n)
-    alpha = jnp.where(valid[..., None], alpha, jnp.zeros_like(alpha))
+    kappa = jnp.sum(effective_w[..., None] * dot, axis=-2)  # leading + (M,)
+    alpha = jnp.exp(gammaln(rho + 1.0)) * kappa / (h_safe[..., None] ** n)
+    alpha = jnp.where(valid[..., None], alpha, 0.0)
     return alpha[..., None, :], valid
 
 
@@ -543,20 +556,21 @@ def _gamma_dot_kappa(
     scale: Array,
     rate: Array,
 ) -> Array:
-    """Closed-form dot-kappa for the scalar Gamma kernel."""
+    """Closed-form dot-kappa integrand for the scalar Gamma kernel."""
     tau_u = tau - u
     x = jnp.clip((t - u) / tau_u, 0.0, 1.0)
     nbeta = n * beta
+    exp_decay = jnp.exp(-rate * tau_u)
 
     dot_n1 = (
         scale
-        * jnp.exp(-rate * tau_u)
+        * exp_decay
         * (tau_u ** (beta - 1.0))
         / jnp.exp(gammaln(beta))
     )
     dot_ngt1 = (
         (scale ** n)
-        * jnp.exp(-rate * tau_u)
+        * exp_decay
         * (tau_u ** (nbeta - 1.0))
         * betainc((n - 1.0) * beta, beta, x)
         / jnp.exp(gammaln(nbeta))
@@ -564,29 +578,4 @@ def _gamma_dot_kappa(
     return jnp.where(n == 1.0, dot_n1, dot_ngt1)
 
 
-@jax.jit
-def _piecewise_constant_alpha(
-    B: Array,
-    source: Array,
-    readout: Array,
-    ell: Array,
-    degree: Array,
-    valid: Array,
-) -> Array:
-    """Evaluate normalized piecewise constant coefficients from cell indices."""
-    dtype = B.dtype
-    ell_f = ell.astype(dtype)
-    degree_f = degree.astype(dtype)
-
-    # B_diag: leading + (q,), B_out: leading + (q,)
-    diag = jnp.moveaxis(B[:, source, source], 0, -1)
-    out = jnp.moveaxis(B[:, source, readout], 0, -1)
-
-    # product_r diag_r ** ell_r, shape leading + (M,)
-    prefix = jnp.prod(diag[..., None, :] ** ell_f, axis=-1)
-    inv_fact = jnp.exp(-gammaln(degree_f + 2.0))  # 1 / (|ell| + 1)!
-    vals = out[..., :, None] * prefix[..., None, :] * inv_fact
-    return jnp.where(valid[..., None, None], vals, jnp.zeros_like(vals))
-
-
-__all__ = ["VolterraKernel"]
+__all__ = ["VolterraKernel", "FractionalKernel", "GammaKernel"]

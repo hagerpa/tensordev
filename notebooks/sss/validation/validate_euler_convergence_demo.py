@@ -48,6 +48,7 @@ import plot_config  # noqa: F401 — applies rcParams; must come after matplotli
 from plot_config import new_fig, savefig_fig, COLORS, MARKERS
 
 from tensordev.sss import StateSpaceSignature
+from tensordev.util.random_paths import unit_speed_paths
 from euler_general import fssk_euler_vsig
 from helpers import random_fssk
 
@@ -58,7 +59,6 @@ from helpers import random_fssk
 _DEFAULT_J = 32
 _DEFAULT_N = 7
 _DEFAULT_M = 2
-_DEFAULT_D = 2
 _DEFAULT_N_PATHS = 2
 _DEFAULT_MAX_DYADIC = 7
 _DEFAULT_PATH_SEED = 20226
@@ -74,13 +74,6 @@ _DEFAULT_SETUPS = [
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _brownian_paths(n_paths: int, J: int, d: int, seed: int, dt: float) -> np.ndarray:
-    """Return iid Brownian paths of shape (n_paths, J, d)."""
-    rng = np.random.default_rng(seed)
-    dX = rng.normal(0.0, np.sqrt(dt), size=(n_paths, J - 1, d))
-    X = np.concatenate([np.zeros((n_paths, 1, d)), np.cumsum(dX, axis=1)], axis=1)
-    return X.astype(np.float64)
-
 
 def _per_level_scaled_errors(exact: tuple, approx: tuple) -> np.ndarray:
     """Max error over paths per signature level, scaled by level!
@@ -95,7 +88,7 @@ def _per_level_scaled_errors(exact: tuple, approx: tuple) -> np.ndarray:
         if k == 0:
             continue
         diff = np.abs(np.asarray(e) - np.asarray(a))
-        errors.append(float(diff.max()) * factorial(k))
+        errors.append((float(diff.max()) * factorial(k)))
     return np.array(errors)
 
 
@@ -123,10 +116,10 @@ def parse_args():
     p.add_argument("--J", type=int, default=_DEFAULT_J, help="Path grid points (J-1 increments)")
     p.add_argument("--N", type=int, default=_DEFAULT_N, help="Signature truncation level")
     p.add_argument("--m", type=int, default=_DEFAULT_M, help="Latent-path dimension")
-    p.add_argument("--d", type=int, default=_DEFAULT_D, help="Input-path dimension")
     p.add_argument("--n-paths", type=int, default=_DEFAULT_N_PATHS, help="Batch size (number of paths)")
     p.add_argument("--max-dyadic", type=int, default=_DEFAULT_MAX_DYADIC, help="Sweep dyadic orders 0..max-dyadic")
     p.add_argument("--path-seed", type=int, default=_DEFAULT_PATH_SEED, help="RNG seed for path generation")
+    p.add_argument("--d", type=int, default=3, help="Ignored; paths are always 3D unit-speed")
     p.add_argument(
         "--setups",
         type=str,
@@ -152,7 +145,7 @@ def main():
     J = args.J
     N = args.N
     m = args.m
-    d = args.d
+    d = 3
     n_paths = args.n_paths
     dt = 1.0 / (J - 1)
 
@@ -169,7 +162,7 @@ def main():
     else:
         SETUPS = _DEFAULT_SETUPS
 
-    X = _brownian_paths(n_paths=n_paths, J=J, d=d, seed=args.path_seed, dt=dt)
+    X = unit_speed_paths(dt=dt, dt_fine=dt / 8, n_paths=n_paths, dim=3, seed=args.path_seed)
 
     # error_rows: one row per (setup, dyadic_order, level)
     error_rows: list[dict] = []
@@ -185,7 +178,7 @@ def main():
         print(f"\n── {label} ──────────────────────────────")
 
         # Build kernel
-        Lambda_np, A_np, b_np = random_fssk(q=q, R=R, m=m, d=d, seed=seed, eig_min=1.0, eig_max=2.0)
+        Lambda_np, A_np, b_np = random_fssk(q=q, R=R, m=m, d=d, seed=seed, eig_min=0.0, eig_max=1.0)
         sss = StateSpaceSignature.from_matrix(Lambda=Lambda_np, A=A_np, b=b_np, trunc=N)
 
         # Exact signature (computed once per setup)

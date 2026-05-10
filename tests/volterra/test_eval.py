@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from tensordev.core.jax import Jax
-from tensordev.volterra import VolterraKernel
+from tensordev.volterra import VolterraKernel, FractionalKernel
 from tensordev.volterra.eval_general import eval_e as eval_e_general
 from tensordev.volterra.eval_general import eval_vte as eval_vte_general
 from tensordev.volterra.eval_scalar import eval_vte as eval_vte_scalar
@@ -72,7 +72,7 @@ def test_eval_e_q1_beta_one_is_exponential_increment_minus_unit():
     m = 2
     trunc = 5
     A = jnp.ones((1, m, 3), dtype=jnp.float64)
-    kernel = VolterraKernel.fractional(beta=jnp.array([1.0]), A=A)
+    kernel = FractionalKernel(beta=jnp.array([1.0]), A=A)
     coeffs = kernel.coef(s=0.0, t=0.4, tau=0.4, trunc=trunc)
     y = jnp.array([0.3, -0.7], dtype=jnp.float64)
 
@@ -89,7 +89,7 @@ def test_eval_e_q1_beta_one_is_exponential_increment_minus_unit():
 
 def test_eval_e_q1_accepts_explicit_component_axis():
     A = jnp.ones((1, 2, 1), dtype=jnp.float64)
-    kernel = VolterraKernel.fractional(beta=jnp.array([1.0]), A=A)
+    kernel = FractionalKernel(beta=jnp.array([1.0]), A=A)
     coeffs = kernel.coef(s=0.0, t=1.0, tau=1.0, trunc=3)
     y = jnp.array([[0.2, 0.5]], dtype=jnp.float64)
 
@@ -100,32 +100,11 @@ def test_eval_e_q1_accepts_explicit_component_axis():
         _assert_level_allclose(got, expected)
 
 
-def test_eval_e_q_gt_one_matches_bruteforce_word_enumeration():
-    q, m, trunc = 2, 2, 3
-    A = jnp.ones((q, m, 1), dtype=jnp.float64)
-    B = jnp.array(
-        [
-            [[1.2]],
-            [[-0.4]],
-        ],
-        dtype=jnp.float64,
-    )
-    kernel = VolterraKernel.piecewise_constant(B=B, A=A)
-    coeffs = kernel.coef_from_indices(source=0, readout=0, trunc=trunc)
-    y = jnp.array([[0.2, -0.3], [0.7, 0.5]], dtype=jnp.float64)
-
-    E = eval_e(y, coeffs)
-    expected = _bruteforce_e_from_coeffs(y, coeffs)
-
-    for n in range(trunc + 1):
-        _assert_level_allclose(E[n], expected[n])
-
-
 def test_eval_vte_matches_explicit_tensor_product_with_eval_e():
     m = 2
     trunc = 4
     A = jnp.ones((1, m, 1), dtype=jnp.float64)
-    kernel = VolterraKernel.fractional(beta=jnp.array([1.0]), A=A)
+    kernel = FractionalKernel(beta=jnp.array([1.0]), A=A)
     coeffs = kernel.coef(s=0.0, t=1.0, tau=1.0, trunc=trunc)
     y = jnp.array([0.4, -0.1], dtype=jnp.float64)
     v = _make_dense_element(
@@ -149,7 +128,7 @@ def test_eval_vte_matches_explicit_tensor_product_with_eval_e():
 
 def test_eval_e_broadcasts_coefficients_and_increment_batches():
     A = jnp.ones((1, 2, 1), dtype=jnp.float64)
-    kernel = VolterraKernel.fractional(beta=jnp.array([1.0]), A=A)
+    kernel = FractionalKernel(beta=jnp.array([1.0]), A=A)
     coeffs = kernel.coef(
         s=jnp.array([0.0, 0.1]),
         t=jnp.array([0.5, 0.6]),
@@ -166,12 +145,3 @@ def test_eval_e_broadcasts_coefficients_and_increment_batches():
     assert E[3].shape == (2, 8)
 
 
-@pytest.mark.parametrize("bad_y", [jnp.ones((3,)), jnp.ones((2, 1))])
-def test_eval_e_rejects_bad_increment_shape_for_q_gt_one(bad_y):
-    A = jnp.ones((2, 2, 1), dtype=jnp.float64)
-    B = jnp.ones((2, 1, 1), dtype=jnp.float64)
-    kernel = VolterraKernel.piecewise_constant(B=B, A=A)
-    coeffs = kernel.coef_from_indices(source=0, readout=0, trunc=2)
-
-    with pytest.raises(ValueError, match="trailing shape"):
-        eval_e(bad_y, coeffs)

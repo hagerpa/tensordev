@@ -7,7 +7,7 @@ from typing import Optional
 import jax
 
 from tensordev.core.universal import DenseElem
-from tensordev.volterra.kernel import VolterraKernel
+from tensordev.volterra.kernel import VolterraKernel, FractionalKernel, GammaKernel
 from tensordev.volterra.iteration import vsig as _vsig
 
 Array = jax.Array
@@ -35,7 +35,7 @@ class VolterraSignature:
             raise ValueError(f"trunc must be positive, got {self.trunc}.")
 
     # ------------------------------------------------------------------
-    # Convenience constructors — thin wrappers around VolterraKernel factories.
+    # Convenience constructors — thin wrappers around kernel constructors.
     # ------------------------------------------------------------------
 
     @classmethod
@@ -45,8 +45,8 @@ class VolterraSignature:
             trunc: int,
             **kwargs,
     ) -> "VolterraSignature":
-        """Construct from a fractional kernel. Forwards all kwargs to :meth:`VolterraKernel.fractional`."""
-        return cls(kernel=VolterraKernel.fractional(**kwargs), trunc=trunc)
+        """Construct from a fractional kernel. Forwards all kwargs to :class:`FractionalKernel`."""
+        return cls(kernel=FractionalKernel(**kwargs), trunc=trunc)
 
     @classmethod
     def gamma(
@@ -55,18 +55,8 @@ class VolterraSignature:
             trunc: int,
             **kwargs,
     ) -> "VolterraSignature":
-        """Construct from a Gamma kernel. Forwards all kwargs to :meth:`VolterraKernel.gamma`."""
-        return cls(kernel=VolterraKernel.gamma(**kwargs), trunc=trunc)
-
-    @classmethod
-    def piecewise_constant(
-            cls,
-            *,
-            trunc: int,
-            **kwargs,
-    ) -> "VolterraSignature":
-        """Construct from a piecewise constant kernel. Forwards all kwargs to :meth:`VolterraKernel.piecewise_constant`."""
-        return cls(kernel=VolterraKernel.piecewise_constant(**kwargs), trunc=trunc)
+        """Construct from a Gamma kernel. Forwards all kwargs to :class:`GammaKernel`."""
+        return cls(kernel=GammaKernel(**kwargs), trunc=trunc)
 
     # ------------------------------------------------------------------
     # Forwarded properties

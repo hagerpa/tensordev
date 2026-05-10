@@ -21,7 +21,6 @@ Helpers
 -------
 new_fig(size="half", aspect=1.45)  → (fig, ax) with correct dimensions
 savefig_fig(fig, stem, formats)    → save fig to stem.{fmt} for each fmt
-finish_plot(...)                   → legacy finishing helper (still works)
 """
 
 from __future__ import annotations
@@ -203,43 +202,3 @@ def savefig_fig(
         path = stem.with_suffix(f".{fmt}")
         fig.savefig(path, **kw)
         print(f"  Saved: {path}")
-
-
-# ---------------------------------------------------------------------------
-# Legacy helper (kept for backwards-compatibility)
-# ---------------------------------------------------------------------------
-
-
-def finish_plot(
-    *,
-    title: str | None = None,
-    xlabel: str | None = None,
-    ylabel: str | None = None,
-    xscale: str | None = None,
-    yscale: str | None = None,
-    legend: bool = True,
-    legend_ncol: int = 1,
-    legend_loc: str = "best",
-) -> None:
-    """Apply consistent finishing touches to the current axes."""
-    ax = plt.gca()
-
-    if title is not None:
-        ax.set_title(title, pad=8)
-    if xlabel is not None:
-        ax.set_xlabel(xlabel)
-    if ylabel is not None:
-        ax.set_ylabel(ylabel)
-    if xscale is not None:
-        ax.set_xscale(xscale)
-    if yscale is not None:
-        ax.set_yscale(yscale)
-
-    ax.minorticks_on()
-    ax.grid(True, which="major", alpha=0.30)
-    ax.grid(True, which="minor", alpha=0.12)
-
-    if legend:
-        ax.legend(loc=legend_loc, ncol=legend_ncol, frameon=True, fancybox=True)
-
-    plt.show()

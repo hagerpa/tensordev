@@ -180,7 +180,7 @@ def plot_flops_vs_work(
         #r"\ \ (J{-}1)R^2 N m^N\ \text{for}\ q{>}1\bigr)$",
     )
     ax.set_ylabel(r"XLA FLOPs")
-    ax.set_title(r"FSSK -- $\mathrm{VSig}$ costs")
+    ax.set_title(r"FSSK $\mathrm{VSig}$ -- FLOP Count")
     ax.minorticks_on()
     ax.grid(True, which="minor", alpha=0.12)
     ax.legend(ncol=len(qs), loc="upper left")

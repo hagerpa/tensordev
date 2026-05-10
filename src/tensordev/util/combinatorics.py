@@ -13,6 +13,7 @@ from functools import lru_cache
 from math import comb, factorial as int_factorial
 from typing import Iterator, Sequence, Tuple
 
+import numpy as np
 import jax
 import jax.numpy as jnp
 
@@ -267,9 +268,63 @@ def _compositions_desc(total: int, q: int) -> Iterator[Tuple[int, ...]]:
     yield from rec(0, total)
 
 
+@lru_cache(maxsize=None)
+def multiindex_batched_navigation(
+    q: int,
+    trunc: int,
+) -> tuple[
+    tuple[np.ndarray, ...],
+    tuple[tuple[np.ndarray, ...] | None, ...],
+]:
+    """Host-side precomputation for the batched (stacked multi-index) recursion.
+
+    Returns ``(global_idx_by_deg, succ_local_by_n_r)`` where
+
+    - ``global_idx_by_deg[n]`` is a NumPy integer array of the global packed
+      indices for all multi-indices of total degree ``n``.
+    - ``succ_local_by_n_r[n]`` is ``None`` when ``n == trunc``; otherwise a
+      tuple of ``q`` NumPy integer arrays, where entry ``r`` gives the *local*
+      index (within the degree-``(n+1)`` block) of ``plus[idx][r]`` for each
+      ``idx`` in ``global_idx_by_deg[n]``.
+
+    NumPy arrays are used intentionally: they are host-side objects that JAX
+    never traces, so they can safely be stored in this ``lru_cache`` and used
+    as concrete static indices inside ``jax.jit`` without causing tracer leaks.
+    """
+    tuples: list[Tuple[int, ...]] = []
+    offsets: list[int] = [0]
+    for n in range(trunc + 1):
+        tuples.extend(_compositions_desc(total=n, q=q))
+        offsets.append(len(tuples))
+
+    index = {multi: i for i, multi in enumerate(tuples)}
+
+    raw_global = [list(range(offsets[n], offsets[n + 1])) for n in range(trunc + 1)]
+
+    succ_local_list: list[tuple[np.ndarray, ...] | None] = []
+    for n in range(trunc + 1):
+        if n == trunc:
+            succ_local_list.append(None)
+            continue
+        block = raw_global[n]
+        start_next = offsets[n + 1]
+        succ_r: list[list[int]] = [[] for _ in range(q)]
+        for idx in block:
+            vals = list(tuples[idx])
+            for r in range(q):
+                vals[r] += 1
+                succ_r[r].append(index[tuple(vals)] - start_next)
+                vals[r] -= 1
+        succ_local_list.append(tuple(np.array(sr, dtype=np.intp) for sr in succ_r))
+
+    global_idx_by_deg = tuple(np.array(blk, dtype=np.intp) for blk in raw_global)
+    return global_idx_by_deg, tuple(succ_local_list)
+
+
 __all__ = [
     "MultiIndexLayout",
     "build_multiindex_layout",
+    "multiindex_batched_navigation",
     "num_multiindices_exact",
     "num_multiindices_leq",
 ]

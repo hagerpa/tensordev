@@ -1,10 +1,11 @@
+#TODO: Implement higher order scheme for general non-uniform grid branch.
+#TODO: Implement q>1 in FFT branch.
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import replace, dataclass
 
 import jax
 import jax.numpy as jnp
-import jax.scipy.special as jsp
 from jax import lax
 
 from tensordev.core.jax import Jax
@@ -14,23 +15,21 @@ from tensordev.volterra.kernel import VolterraKernel
 from tensordev.volterra.eval_scalar import eval_vte as eval_vte_scalar
 from tensordev.volterra.eval_general import eval_vte as eval_vte_general
 
-
 Array = jax.Array
 
 _CORE = Jax()
 
 
 def vsig(
-    X: Array,
-    *,
-    kernel: VolterraKernel,
-    trunc: int,
-    times: Array | None = None,
-    dt: Array | float | None = None,
-    axis: int = -2,
-    output_starting_point: bool = False,
-    increment_input: bool = False,
-    dyadic_order: int = 0,
+        X: Array,
+        *,
+        kernel: VolterraKernel,
+        trunc: int,
+        dt: Array | float = 1.0,
+        axis: int = -2,
+        output_starting_point: bool = False,
+        increment_input: bool = False,
+        dyadic_order: int = 0,
 ) -> DenseElem:
     r"""
     Compute a truncated Volterra signature from path nodes or increments.
@@ -52,12 +51,9 @@ def vsig(
         Volterra kernel supplying projections and coefficient builders.
     trunc:
         Tensor truncation level (positive integer).
-    times:
-        Optional one-dimensional node times of shape ``(S + 1,)``.  Mutually
-        exclusive with ``dt``.
     dt:
-        Optional scalar uniform step size.  If both ``times`` and ``dt`` are
-        omitted, ``dt=1`` is used.
+        Step size(s).  A scalar gives a uniform grid; a 1-D array of length
+        ``S`` gives a non-uniform grid via cumulative sums (default ``1.0``).
     axis:
         Step/node axis of ``X``.
     output_starting_point:
@@ -69,8 +65,8 @@ def vsig(
     dyadic_order:
         Non-negative integer.  Each original increment is split into
         ``2**dyadic_order`` equal sub-increments (each multiplied by
-        ``1 / 2**dyadic_order``), and ``dt`` / ``times`` are refined
-        accordingly.  ``dyadic_order=0`` (default) leaves the path unchanged.
+        ``1 / 2**dyadic_order``) and ``dt`` is refined accordingly.
+        ``dyadic_order=0`` (default) leaves the path unchanged.
 
     Returns
     -------
@@ -106,45 +102,30 @@ def vsig(
         factor = 1 << int(dyadic_order)
         dX = jnp.repeat(dX / factor, factor, axis=axis_norm)
         S = dX.shape[axis_norm]
-        times, dt = _refine_times_or_dt(times, dt, factor=factor, dtype=dtype)
+        dt = _refine_dt(dt, factor=factor, dtype=dtype)
 
     projected = jnp.einsum("qmd,...d->...qm", kernel.A.astype(dtype), dX)
     y = projected[..., 0, :] if kernel.q == 1 else projected
 
     y_time = jnp.moveaxis(y, axis_norm, 0)
     y_time = _normalize_projected_y_time(y_time, kernel)
-    times_arr = _normalize_times(times, dt, S=S, dtype=dtype)
+    times_arr = _normalize_times(dt, S=S, dtype=dtype)
 
-    batch_shape = _projected_batch_shape(y_time, kernel)
+    batch_shape = tuple(y_time.shape[1:-1]) if kernel.q == 1 else tuple(y_time.shape[1:-2])
     unit = _make_unit(batch_shape=batch_shape, m=kernel.m, trunc=trunc, dtype=dtype)
     history0 = _make_history_seed(S=S, unit=unit, m=kernel.m, trunc=trunc, dtype=dtype)
     source = jnp.arange(S, dtype=jnp.int32)
 
-    # For continuous kernels (fractional, gamma) the coefficient computation
-    # involves expensive special functions (betainc).  Precomputing the full
-    # (S × S) grid in one batched call before the scan is much more efficient
-    # than evaluating one column at a time inside the scan body.
-    # Piecewise-constant kernels are already a cheap gather and are left as-is.
-    if kernel.kind != "piecewise_constant":
-        _precomp = kernel.coef_grid(times_arr, trunc=trunc, dtype=dtype)
-    else:
-        _precomp = None
+    # Precomputing the full (S × S) coefficient grid in one batched call before
+    # the scan is much more efficient than evaluating one column at a time inside
+    # the scan body (avoids repeated betainc / quadrature calls).
+    _precomp = kernel.coef_grid(times_arr, trunc=trunc, dtype=dtype)
 
     def step(history: DenseElem, j: Array) -> tuple[DenseElem, DenseElem]:
         v_prev = tuple(level[:S] for level in history)
-        if _precomp is not None:
-            coef_j = _precomp[:, j]
-        else:
-            coef_j = _coef_row(
-                kernel,
-                source=source,
-                readout=j,
-                times=times_arr,
-                trunc=trunc,
-                dtype=dtype,
-            )
+        coef_j = _precomp[:, j]
         coef_j = _insert_singleton_batch_axes(coef_j, batch_ndim=len(batch_shape))
-        terms = _eval_vte(v_prev, y_time, coef_j)
+        terms = eval_vte_scalar(v_prev, y_time, coef_j) if coef_j.q == 1 else eval_vte_general(v_prev, y_time, coef_j)
         contribution = tuple(jnp.sum(level, axis=0) for level in terms)
         V_j = _CORE.tensor_summation(unit, contribution, trunc=trunc)
         history_next = tuple(level.at[j + 1].set(V_j[n]) for n, level in enumerate(history))
@@ -162,58 +143,6 @@ def vsig(
         return out
 
     return tuple(level[-1] for level in history_final)
-
-
-def _refine_times_or_dt(
-    times: Array | None,
-    dt: Array | float | None,
-    *,
-    factor: int,
-    dtype: jnp.dtype,
-) -> tuple[Array | None, Array | float | None]:
-    """Refine ``times`` or ``dt`` for a dyadic subdivision by ``factor``."""
-    if times is not None:
-        times_arr = jnp.asarray(times, dtype=dtype)
-        # Fine grid: for each coarse interval subdivide into `factor` equal parts.
-        fine_dts = jnp.repeat(jnp.diff(times_arr) / factor, factor)
-        fine_times = jnp.concatenate([times_arr[:1], times_arr[:1] + jnp.cumsum(fine_dts)])
-        return fine_times, None
-
-    # scalar dt (or None → defaults to 1)
-    dt_val = 1.0 if dt is None else dt
-    dt_arr = jnp.asarray(dt_val, dtype=dtype)
-    if dt_arr.ndim != 0:
-        raise ValueError(f"dt must be scalar when using dyadic_order, got shape {dt_arr.shape}.")
-    return None, dt_arr / factor
-
-
-def _eval_vte(v: DenseElem, y: Array, coef: VolterraCoefficients) -> DenseElem:
-    """Local recursion dispatcher matching the scalar/general split."""
-    if coef.q == 1:
-        return eval_vte_scalar(v, y, coef)
-    return eval_vte_general(v, y, coef)
-
-
-def _coef_row(
-    kernel: VolterraKernel,
-    *,
-    source: Array,
-    readout: Array,
-    times: Array,
-    trunc: int,
-    dtype: jnp.dtype,
-) -> VolterraCoefficients:
-    """Build coefficients for all source intervals at one readout index."""
-    if kernel.kind == "piecewise_constant":
-        return kernel.coef_from_indices(source, readout, trunc=trunc, dtype=dtype)
-
-    return kernel.coef(
-        times[:-1],
-        times[1:],
-        times[readout + 1],
-        trunc=trunc,
-        dtype=dtype,
-    )
 
 
 def _normalize_projected_y_time(y_time: Array, kernel: VolterraKernel) -> Array:
@@ -236,46 +165,50 @@ def _normalize_projected_y_time(y_time: Array, kernel: VolterraKernel) -> Array:
     return y_time
 
 
-def _projected_batch_shape(y_time: Array, kernel: VolterraKernel) -> tuple[int, ...]:
-    """Batch shape of time-first projected increments."""
-    if kernel.q == 1:
-        return tuple(y_time.shape[1:-1])
-    return tuple(y_time.shape[1:-2])
+def _refine_dt(
+        dt: Array | float,
+        *,
+        factor: int,
+        dtype: jnp.dtype,
+) -> Array | float:
+    """Subdivide ``dt`` for dyadic refinement by ``factor``.
+
+    Scalar ``dt`` divides by ``factor``.  A per-step array produces a refined
+    array repeated ``factor`` times per original step.
+    """
+    dt_arr = jnp.asarray(dt, dtype=dtype)
+    if dt_arr.ndim == 0:
+        return dt_arr / factor
+    return jnp.repeat(dt_arr / factor, factor)
 
 
 def _normalize_times(
-    times: Array | None,
-    dt: Array | float | None,
-    *,
-    S: int,
-    dtype: jnp.dtype,
+        dt: Array | float,
+        *,
+        S: int,
+        dtype: jnp.dtype,
 ) -> Array:
-    """Return one-dimensional node times of shape ``(S + 1,)``."""
-    if times is not None and dt is not None:
-        raise ValueError("Provide either times or dt, not both.")
+    """Return node times of shape ``(S + 1,)`` from a scalar or per-step ``dt``.
 
-    if times is None:
-        dt_arr = jnp.asarray(1.0 if dt is None else dt, dtype=dtype)
-        if dt_arr.ndim != 0:
-            raise ValueError(f"dt must be scalar for volterra_vsig, got shape {dt_arr.shape}.")
+    - Scalar ``dt``: uniform grid ``[0, dt, 2·dt, …, S·dt]``.
+    - 1-D array of length ``S``: ``[0, dt[0], dt[0]+dt[1], …]``.
+    """
+    dt_arr = jnp.asarray(dt, dtype=dtype)
+    if dt_arr.ndim == 0:
         return jnp.arange(S + 1, dtype=dtype) * dt_arr
-
-    times_arr = jnp.asarray(times, dtype=dtype)
-    if times_arr.ndim != 1:
-        raise ValueError(f"times must be one-dimensional, got shape {times_arr.shape}.")
-    if times_arr.shape[0] != S + 1:
-        raise ValueError(
-            f"times must have length S + 1 = {S + 1}, got {times_arr.shape[0]}."
-        )
-    return times_arr
+    if dt_arr.ndim == 1 and dt_arr.shape[0] == S:
+        return jnp.concatenate([jnp.zeros((1,), dtype=dtype), jnp.cumsum(dt_arr)])
+    raise ValueError(
+        f"dt must be a scalar or a 1-D array of length S={S}, got shape {dt_arr.shape}."
+    )
 
 
 def _make_unit(
-    *,
-    batch_shape: tuple[int, ...],
-    m: int,
-    trunc: int,
-    dtype: jnp.dtype,
+        *,
+        batch_shape: tuple[int, ...],
+        m: int,
+        trunc: int,
+        dtype: jnp.dtype,
 ) -> DenseElem:
     """Tensor unit with zero positive levels."""
     return (
@@ -288,12 +221,12 @@ def _make_unit(
 
 
 def _make_history_seed(
-    *,
-    S: int,
-    unit: DenseElem,
-    m: int,
-    trunc: int,
-    dtype: jnp.dtype,
+        *,
+        S: int,
+        unit: DenseElem,
+        m: int,
+        trunc: int,
+        dtype: jnp.dtype,
 ) -> DenseElem:
     """Padded history ``[unit, 0, ..., 0]`` with length ``S + 1``."""
     batch_shape = unit[0].shape[:-1]
@@ -306,9 +239,9 @@ def _make_history_seed(
 
 
 def _insert_singleton_batch_axes(
-    coef: VolterraCoefficients,
-    *,
-    batch_ndim: int,
+        coef: VolterraCoefficients,
+        *,
+        batch_ndim: int,
 ) -> VolterraCoefficients:
     """Make a source-row coefficient broadcast over path batch axes."""
     if batch_ndim <= 0:
@@ -321,98 +254,259 @@ def _insert_singleton_batch_axes(
     )
 
 
-def vsig_fft(
-    X: Array,
-    *,
+@dataclass(frozen=True, slots=True)
+class FFTContext:
+    """Shared prepared data for all FFT Volterra-signature schemes.
+
+    This deliberately does not contain ``kernel``: kernels usually contain
+    Python methods and configuration, so we pass them explicitly instead of
+    making them part of the JAX pytree state.
+    """
+
+    y_time: Array
+    y_powers: DenseElem
+    times: Array
+    h: Array
+    unit: DenseElem
+
+    S: int
+    m: int
+    trunc: int
+    batch_shape: tuple[int, ...]
+    dtype: jnp.dtype
+
+
+@dataclass(frozen=True, slots=True)
+class BasisExpansionSpec:
+    """Basis/interpolation specification for higher-order FFT schemes.
+
+    ``rhos`` and ``thetas`` have the same length ``B = (order+1)(order+2)//2``.
+    The constant basis element ``s^0 = 1`` is always ``rhos[0] = 0``.
+    """
+
+    rhos: tuple[Array, ...]
+    thetas: tuple[Array, ...]
+    interpolation_inverse: Array
+
+
+@dataclass(frozen=True, slots=True)
+class BasisExpansionFFTState:
+    """State for basis-expansion FFT schemes.
+
+    components[b][ell] stores the level-ell history for basis component b.
+
+    For the current order=1 scheme:
+
+        components[0] == C0
+        components[1] == Cb
+        components[2] == C1
+    """
+
+    components: tuple[DenseElem, ...]
+    spec: BasisExpansionSpec
+
+
+@dataclass(frozen=True, slots=True)
+class LagFFTTable:
+    """Precomputed FFTs of lag weights.
+
+    weights[q - 1][b] is the FFT of the lag-weight sequence for tensor
+    increment order q and basis component b.
+    """
+
+    weights: tuple[tuple[Array, ...], ...]
+    nfft: int
+    out_len: int
+
+
+@dataclass(frozen=True, slots=True)
+class PrecomputedLagTables:
+    """Lag FFT tables for one (kernel, grid, order, trunc) configuration.
+
+    Build once with :func:`precompute_lag_tables` and pass to
+    :func:`vsig_fft` via ``lag_tables=`` to skip the (potentially
+    expensive) ``betainc`` / quadrature + rfft work on every call.
+
+    Only useful for the basis-expansion FFT schemes (``order >= 1``).
+    """
+
+    theta_tables: tuple[LagFFTTable, ...]
+    output_table: LagFFTTable
+    S: int
+    trunc: int
+    order: int
+
+
+def precompute_lag_tables(
     kernel: VolterraKernel,
+    *,
+    S: int,
+    h: float | Array,
+    order: int,
     trunc: int,
-    times: Array | None = None,
-    dt: Array | float | None = None,
-    axis: int = -2,
-    output_starting_point: bool = False,
-    increment_input: bool = False,
-    dyadic_order: int = 0,
-    order: int = 0,
+    dtype: jnp.dtype,
+) -> PrecomputedLagTables:
+    """Precompute lag FFT tables for :func:`vsig_fft`.
+
+    Call once per (kernel, grid, order, trunc, dtype) configuration, then
+    pass the result as ``lag_tables=`` to :func:`vsig_fft`.  This avoids
+    recomputing the kernel-dependent weights on every call when only the
+    path data changes.
+
+    This approach is fully JAX JIT-friendly: the tables are plain JAX
+    arrays computed eagerly outside of any JIT boundary.  Under
+    ``jax.jit`` the arrays are captured as XLA constants, so there is no
+    runtime overhead.
+
+    Parameters
+    ----------
+    kernel:
+        Volterra kernel.
+    S:
+        Number of increments (after any dyadic refinement).
+    h:
+        Uniform step size.
+    order:
+        FFT scheme order (1 or 2).  Order 0 (Horner/Toeplitz) does not use
+        lag tables.
+    trunc:
+        Tensor truncation level.
+    dtype:
+        Floating-point dtype.
+
+    Returns
+    -------
+    PrecomputedLagTables
+        Pass directly to ``vsig_fft(..., lag_tables=...)``.
+    """
+    if order == 0:
+        raise ValueError(
+            "order=0 (Horner/Toeplitz) does not use lag tables; "
+            "precompute_lag_tables is only needed for order >= 1."
+        )
+    if order not in (1, 2):
+        raise ValueError(f"order must be 1 or 2, got {order}.")
+
+    dtype_ = jnp.dtype(dtype)
+    h_arr = jnp.asarray(h, dtype=dtype_)
+    beta = jnp.atleast_1d(kernel.beta)[0].astype(dtype_)
+    rhos = _basis_rhos(order, beta=beta, dtype=dtype_)
+    thetas = _chebyshev_lobatto_thetas(n=len(rhos), dtype=dtype_)
+
+    theta_tables = tuple(
+        _make_lag_fft_table(
+            kernel=kernel,
+            S=S,
+            h=h_arr,
+            trunc=trunc,
+            dtype=dtype_,
+            out_len=S,
+            theta=theta,
+            rhos=rhos,
+        )
+        for theta in thetas
+    )
+    output_table = _make_lag_fft_table(
+        kernel=kernel,
+        S=S,
+        h=h_arr,
+        trunc=trunc,
+        dtype=dtype_,
+        out_len=S + 1,
+        theta=jnp.asarray(0.0, dtype=dtype_),
+        rhos=rhos,
+    )
+    return PrecomputedLagTables(
+        theta_tables=theta_tables,
+        output_table=output_table,
+        S=S,
+        trunc=trunc,
+        order=order,
+    )
+
+
+def vsig_fft(
+        X: Array,
+        *,
+        kernel: VolterraKernel,
+        trunc: int,
+        dt: Array | float = 1.0,
+        axis: int = -2,
+        output_starting_point: bool = False,
+        increment_input: bool = False,
+        dyadic_order: int = 0,
+        order: int = 0,
+        lag_tables: PrecomputedLagTables | None = None,
 ) -> DenseElem:
-    r"""Level-by-level Volterra signature using FFT convolution (q=1 only).
+    r"""Level-by-level Volterra signature using FFT convolution.
 
-    Restructures the sequential readout scan of :func:`vsig` into a
-    per-level pass that evaluates all readout times simultaneously.  The
-    key identity is the Horner expansion
+    The implementation is organized around FFT schemes rather than hard-coded
+    ``order == 0`` / ``order == 1`` internals.
 
-    .. math::
-        (V_i \otimes_N E_{ij})^{(n)}
-        = \sum_{k=0}^{n-1} \alpha[i,j,n{-}k{-}1]\,
-          \bigl(V_i^{(k)} \otimes y_i^{\otimes(n-k)}\bigr),
+    ``order=0`` uses the Horner/Toeplitz scheme.
 
-    so :math:`V_j^{(n)}` for **all** :math:`j` simultaneously is a causal
-    discrete convolution computable via FFT in :math:`O(S \log S)`.
-
-    This path is only taken for **convolution kernels** (``fractional``,
-    ``gamma``) on a **uniform grid** (``times=None``), where the coefficient
-    matrix is Toeplitz and only the :math:`O(S \cdot M)` impulse-response
-    row needs to be stored — not an :math:`O(S^2 \cdot M)` grid.
-
-    For all other cases (non-uniform grids, ``piecewise_constant``) the call
-    is forwarded to :func:`vsig`, which retains its :math:`O(S \cdot M)`
-    per-step memory footprint via the scan.
+    ``order>=1`` uses a basis-expansion scheme.  ``order=1`` uses the
+    fractional three-point basis ``{1, s^beta, s}``; ``order=2`` uses the
+    five-point basis ``{1, s^beta, s, s^(beta+1), s^2}``.
 
     Parameters
     ----------
     X, kernel, trunc, times, dt, axis, output_starting_point,
     increment_input, dyadic_order:
         Same semantics as :func:`vsig`.
+
     order:
-        Quadrature order for the local kernel expansion.  ``0`` (default)
-        uses the standard Horner scheme; ``1`` uses a three-point
-        :math:`\theta \in \{0, \tfrac{1}{2}, 1\}` interpolation that fits
-        the singular basis :math:`\{1, s^\beta, s\}` explicitly, giving
-        higher accuracy per step for fractional kernels with
-        :math:`\beta \in (\tfrac{1}{2}, 1)`.  ``order=1`` requires
-        ``kernel.kind == "fractional"`` and a uniform grid (``times=None``).
+        FFT quadrature/scheme order.
+
+        ``0``:
+            Standard Horner/Toeplitz FFT scheme.  Supports convolution kernels
+            ``fractional`` and ``gamma`` on a uniform grid.
+
+        ``1``:
+            Fractional basis-expansion scheme using the basis
+            ``{1, s^beta, s}``.
+
+        ``2``:
+            Fractional basis-expansion scheme using the basis
+            ``{1, s^beta, s, s^(beta+1), s^2}``.
+
+        Higher-order schemes require ``kernel.kind == "fractional"`` and a
+        uniform grid.
+
+    lag_tables:
+        Optional precomputed lag FFT tables returned by
+        :func:`precompute_lag_tables`.  When supplied the kernel-dependent
+        weight computation is skipped entirely, which is the main cost for
+        higher-order schemes.  The tables must have been built for the same
+        ``S`` (after dyadic refinement), ``trunc``, and ``order`` as this
+        call; a :exc:`ValueError` is raised otherwise.  Ignored when
+        ``order=0``.
 
     Returns
     -------
     DenseElem
-        Terminal signature (or full trajectory with ``output_starting_point``),
-        numerically equivalent to the output of :func:`vsig`.
+        Terminal signature, or full trajectory if ``output_starting_point`` is
+        true.
 
     Raises
     ------
+    ValueError
+        For invalid truncation, dyadic order, axis, or unsupported scheme order.
+
     NotImplementedError
-        If ``kernel.q != 1``, or if ``order=1`` with a non-fractional kernel.
+        If the kernel is unsupported by the requested FFT scheme.
     """
     if trunc <= 0:
         raise ValueError(f"trunc must be positive, got {trunc}.")
     if dyadic_order < 0:
         raise ValueError(f"dyadic_order must be non-negative, got {dyadic_order}.")
-    if order not in (0, 1):
-        raise ValueError(f"order must be 0 or 1, got {order}.")
+    if order not in (0, 1, 2):
+        raise ValueError(f"order must currently be 0, 1, or 2, got {order}.")
     if kernel.q != 1:
         raise NotImplementedError(
             f"vsig_fft only supports scalar kernels (q=1); got q={kernel.q}."
         )
-    if order == 1:
-        if kernel.kind != "fractional":
-            raise NotImplementedError(
-                "order=1 only supports fractional kernels; "
-                f"got kernel.kind={kernel.kind!r}. Use order=0 for gamma kernels."
-            )
-        if times is not None:
-            raise NotImplementedError(
-                "order=1 requires a uniform grid; pass times=None and use dt instead."
-            )
 
-    # Non-Toeplitz fallback (order=0 only): piecewise_constant or non-uniform grid.
-    # Forward to vsig which holds only one column at a time (O(S·M) memory).
-    if order == 0 and not (kernel.kind in ("fractional", "gamma") and times is None):
-        return vsig(
-            X, kernel=kernel, trunc=trunc, times=times, dt=dt, axis=axis,
-            output_starting_point=output_starting_point,
-            increment_input=increment_input, dyadic_order=dyadic_order,
-        )
-
-    # --- FFT path (convolution kernel, uniform grid) ---
     X = jnp.asarray(X)
     if X.ndim < 2:
         raise ValueError("X must have at least a step axis and a trailing path dimension.")
@@ -426,7 +520,10 @@ def vsig_fft(
         )
 
     dtype = X.dtype
-    dX = (X if increment_input else jnp.diff(X, axis=axis_norm)).astype(dtype)
+
+    dX = X if increment_input else jnp.diff(X, axis=axis_norm)
+    dX = dX.astype(dtype)
+
     S = dX.shape[axis_norm]
     if S == 0:
         raise ValueError("vsig_fft requires at least one increment.")
@@ -435,272 +532,534 @@ def vsig_fft(
         factor = 1 << int(dyadic_order)
         dX = jnp.repeat(dX / factor, factor, axis=axis_norm)
         S = dX.shape[axis_norm]
-        times, dt = _refine_times_or_dt(times, dt, factor=factor, dtype=dtype)
+        dt = _refine_dt(dt, factor=factor, dtype=dtype)
 
     projected = jnp.einsum("qmd,...d->...qm", kernel.A.astype(dtype), dX)
-    y_time = jnp.moveaxis(projected[..., 0, :], axis_norm, 0)  # (S, *batch, m)
-    times_arr = _normalize_times(times, dt, S=S, dtype=dtype)
+    y_time = jnp.moveaxis(projected[..., 0, :], axis_norm, 0)
+
+    times_arr = _normalize_times(dt, S=S, dtype=dtype)
+    h = times_arr[1] - times_arr[0]
+
     batch_shape = tuple(y_time.shape[1:-1])
     m = kernel.m
 
-    unit = _make_unit(batch_shape=batch_shape, m=m, trunc=trunc, dtype=dtype)
+    unit = _make_unit(
+        batch_shape=batch_shape,
+        m=m,
+        trunc=trunc,
+        dtype=dtype,
+    )
+
+    y_powers = _tensor_powers(
+        y_time,
+        trunc=trunc,
+        dtype=dtype,
+    )
+
+    ctx = FFTContext(
+        y_time=y_time,
+        y_powers=y_powers,
+        times=times_arr,
+        h=h,
+        unit=unit,
+        S=S,
+        m=m,
+        trunc=trunc,
+        batch_shape=batch_shape,
+        dtype=dtype,
+    )
+
+    # Validate precomputed tables if provided.
+    if lag_tables is not None and order != 0:
+        if lag_tables.S != S:
+            raise ValueError(
+                f"lag_tables.S={lag_tables.S} does not match the effective S={S} "
+                f"(after dyadic refinement).  Rebuild with precompute_lag_tables."
+            )
+        if lag_tables.trunc != trunc:
+            raise ValueError(
+                f"lag_tables.trunc={lag_tables.trunc} != trunc={trunc}."
+            )
+        if lag_tables.order != order:
+            raise ValueError(
+                f"lag_tables.order={lag_tables.order} != order={order}."
+            )
 
     if order == 0:
-        return _vsig_fft_order0(
-            y_time=y_time,
-            times_arr=times_arr,
-            kernel=kernel,
-            trunc=trunc,
-            S=S,
-            m=m,
-            batch_shape=batch_shape,
-            unit=unit,
-            axis_norm=axis_norm,
-            output_starting_point=output_starting_point,
-            dtype=dtype,
-        )
+        out_levels = _run_horner_fft(ctx=ctx, kernel=kernel)
     else:
-        return _vsig_fft_order1(
-            y_time=y_time,
-            times_arr=times_arr,
-            kernel=kernel,
-            trunc=trunc,
-            S=S,
-            m=m,
-            batch_shape=batch_shape,
-            axis_norm=axis_norm,
-            output_starting_point=output_starting_point,
-            dtype=dtype,
-        )
+        out_levels = _run_basis_fft(ctx=ctx, kernel=kernel, order=order, lag_tables=lag_tables)
+
+    if output_starting_point:
+        if axis_norm == 0:
+            return tuple(out_levels)
+        return tuple(jnp.moveaxis(level, 0, axis_norm) for level in out_levels)
+    return tuple(level[-1] for level in out_levels)
 
 
-def _vsig_fft_order0(
-    *,
-    y_time: Array,
-    times_arr: Array,
-    kernel: VolterraKernel,
-    trunc: int,
-    S: int,
-    m: int,
-    batch_shape: tuple[int, ...],
-    unit: DenseElem,
-    axis_norm: int,
-    output_starting_point: bool,
-    dtype: jnp.dtype,
+def _tensor_powers(
+        y_time: Array,
+        *,
+        trunc: int,
+        dtype: jnp.dtype,
 ) -> DenseElem:
-    """Standard Horner-expansion FFT scheme (order=0)."""
-    # Toeplitz impulse response — only O(S·M) memory.
-    g_coef = kernel.coef(times_arr[0], times_arr[1], times_arr[1:], trunc=trunc, dtype=dtype)
-    g = g_coef.alpha[..., 0, :]  # shape (S, M)
-    fft_n = _next_pow2(2 * S)
-    G = jnp.fft.rfft(g, n=fft_n, axis=0)  # (fft_n//2+1, M)
+    """Compute ``y_time^{⊗r}`` for ``r = 0, ..., trunc``."""
 
-    y_pow: list[Array] = [
+    S = y_time.shape[0]
+    batch_shape = tuple(y_time.shape[1:-1])
+
+    powers: list[Array] = [
         jnp.ones((S,) + batch_shape + (1,), dtype=dtype),
         y_time,
     ]
-    for r in range(2, trunc + 1):
-        y_pow.append(_CORE.tensor_product_homogeneous(y_pow[r - 1], y_time))
 
-    # V_all[n] shape: (S+1, *batch, m^n).  Slot 0 = unit[n]; slot j+1 = V_j^(n).
-    V_all: list[Array] = [jnp.ones((S + 1,) + batch_shape + (1,), dtype=dtype)]
-    extra_bc = (1,) * (len(batch_shape) + 1)  # broadcasts G over batch+tensor dims
+    for _ in range(2, trunc + 1):
+        powers.append(_CORE.tensor_product_homogeneous(powers[-1], y_time))
 
-    for n in range(1, trunc + 1):
-        m_n = m ** n
-        acc = jnp.zeros((S,) + batch_shape + (m_n,), dtype=dtype)
+    return tuple(powers[: trunc + 1])
+
+
+def _finish_fft_output(
+        out_levels: DenseElem,
+        *,
+        axis_norm: int,
+        output_starting_point: bool,
+) -> DenseElem:
+    """Return either the full trajectory or only the terminal signature."""
+
+    if output_starting_point:
+        if axis_norm == 0:
+            return tuple(out_levels)
+        return tuple(jnp.moveaxis(level, 0, axis_norm) for level in out_levels)
+
+    return tuple(level[-1] for level in out_levels)
+
+
+def _run_horner_fft(
+        *,
+        ctx: FFTContext,
+        kernel: VolterraKernel,
+) -> DenseElem:
+    """Order-0 Horner/Toeplitz FFT scheme."""
+
+    g_coef = kernel.coef(
+        ctx.times[0],
+        ctx.times[1],
+        ctx.times[1:],
+        trunc=ctx.trunc,
+        dtype=ctx.dtype,
+    )
+    g = g_coef.alpha[..., 0, :]
+
+    fft_n = _next_pow2(2 * ctx.S)
+    G = jnp.fft.rfft(g, n=fft_n, axis=0)
+    # Pre-expand G with trailing singletons for broadcasting against (batch, m^n).
+    G_bcast = G.reshape(G.shape + (1,) * (len(ctx.batch_shape) + 1))
+
+    out_levels: list[Array] = [
+        jnp.ones((ctx.S + 1,) + ctx.batch_shape + (1,), dtype=ctx.dtype)
+    ]
+
+    for n in range(1, ctx.trunc + 1):
+        acc = jnp.zeros(
+            (ctx.S,) + ctx.batch_shape + (ctx.m ** n,),
+            dtype=ctx.dtype,
+        )
+
         for k in range(n):
             ell_idx = n - k - 1
-            signal = _CORE.tensor_product_homogeneous(V_all[k][:S], y_pow[n - k])
-            g_ell = G[:, ell_idx].reshape((-1,) + extra_bc)
+
+            signal = _CORE.tensor_product_homogeneous(
+                out_levels[k][: ctx.S],
+                ctx.y_powers[n - k],
+            )
+
             SIG = jnp.fft.rfft(signal, n=fft_n, axis=0)
-            acc = acc + jnp.fft.irfft(g_ell * SIG, n=fft_n, axis=0)[:S]
-        V_all.append(jnp.concatenate([unit[n][None], unit[n] + acc], axis=0))
+            acc = acc + jnp.fft.irfft(
+                G_bcast[:, ell_idx] * SIG,
+                n=fft_n,
+                axis=0,
+            )[: ctx.S]
 
-    if output_starting_point:
-        out = tuple(V_all)
-        if axis_norm != 0:
-            out = tuple(jnp.moveaxis(lev, 0, axis_norm) for lev in out)
-        return out
-    return tuple(lev[-1] for lev in V_all)
-
-
-def _vsig_fft_order1(
-    *,
-    y_time: Array,
-    times_arr: Array,
-    kernel: VolterraKernel,
-    trunc: int,
-    S: int,
-    m: int,
-    batch_shape: tuple[int, ...],
-    axis_norm: int,
-    output_starting_point: bool,
-    dtype: jnp.dtype,
-) -> DenseElem:
-    """Higher-order 3-point θ interpolation FFT scheme for fractional kernels (order=1).
-
-    Fits a local basis {1, s^β, s} at each interval to resolve the
-    singularity of the fractional kernel explicitly.
-    """
-    beta = kernel.beta[0].astype(dtype)  # scalar β, shape ()
-    h0 = times_arr[1] - times_arr[0]
-
-    theta_half = jnp.asarray(0.5, dtype=dtype)
-    theta_beta = theta_half ** beta
-
-    y_powers: list[Array] = [
-        jnp.ones((S,) + batch_shape + (1,), dtype=dtype),
-        y_time,
-    ]
-    for q in range(2, trunc + 1):
-        y_powers.append(_CORE.tensor_product_homogeneous(y_powers[-1], y_time))
-
-    # C0/Cb/C1 histories: C_levels[ell] has shape (S, *batch, m^ell).
-    C0_levels: list[Array] = [jnp.ones((S,) + batch_shape + (1,), dtype=dtype)]
-    Cb_levels: list[Array] = [jnp.zeros((S,) + batch_shape + (1,), dtype=dtype)]
-    C1_levels: list[Array] = [jnp.zeros((S,) + batch_shape + (1,), dtype=dtype)]
-
-    for ell in range(1, trunc + 1):
-        F0 = _compute_level_higher(ell, 0.0, S, C0_levels, Cb_levels, C1_levels, y_powers, h0, beta, m, batch_shape, dtype)
-        Fh = _compute_level_higher(ell, 0.5, S, C0_levels, Cb_levels, C1_levels, y_powers, h0, beta, m, batch_shape, dtype)
-        F1 = _compute_level_higher(ell, 1.0, S, C0_levels, Cb_levels, C1_levels, y_powers, h0, beta, m, batch_shape, dtype)
-
-        d_half = Fh - F0
-        d_full = F1 - F0
-        denom_beta = (h0 ** beta) * (theta_beta - theta_half)
-        denom_one = h0 * (theta_beta - theta_half)
-
-        C0_levels.append(F0)
-        Cb_levels.append((d_half - theta_half * d_full) / denom_beta)
-        C1_levels.append((theta_beta * d_full - d_half) / denom_one)
-
-    # Trajectory at all S+1 nodes: F^ell(θ=0) evaluated with out_len=S+1.
-    out_levels: list[Array] = [jnp.ones((S + 1,) + batch_shape + (1,), dtype=dtype)]
-    for ell in range(1, trunc + 1):
         out_levels.append(
-            _compute_level_higher(ell, 0.0, S + 1, C0_levels, Cb_levels, C1_levels, y_powers, h0, beta, m, batch_shape, dtype)
+            jnp.concatenate(
+                [ctx.unit[n][None], ctx.unit[n] + acc],
+                axis=0,
+            )
         )
 
-    if output_starting_point:
-        out = tuple(out_levels)
-        if axis_norm != 0:
-            out = tuple(jnp.moveaxis(lev, 0, axis_norm) for lev in out)
-        return out
-    return tuple(lev[-1] for lev in out_levels)
+    return tuple(out_levels)
+
+
+def _run_basis_fft(
+        *,
+        ctx: FFTContext,
+        kernel: VolterraKernel,
+        order: int,
+        lag_tables: PrecomputedLagTables | None = None,
+) -> DenseElem:
+    """Higher-order basis-expansion FFT scheme.
+
+    The structure is basis-generic: adding another order mostly means adding
+    another ``_basis_spec_order*`` function.
+    """
+
+    spec = _basis_spec(
+        ctx=ctx,
+        kernel=kernel,
+        order=order,
+    )
+    state = _init_basis_state(ctx=ctx, spec=spec)
+
+    if lag_tables is not None:
+        theta_tables = lag_tables.theta_tables
+        output_table = lag_tables.output_table
+    else:
+        theta_tables = tuple(
+            _make_lag_fft_table(
+                kernel=kernel,
+                S=ctx.S,
+                h=ctx.h,
+                trunc=ctx.trunc,
+                dtype=ctx.dtype,
+                out_len=ctx.S,
+                theta=theta,
+                rhos=spec.rhos,
+            )
+            for theta in spec.thetas
+        )
+        output_table = _make_lag_fft_table(
+            kernel=kernel,
+            S=ctx.S,
+            h=ctx.h,
+            trunc=ctx.trunc,
+            dtype=ctx.dtype,
+            out_len=ctx.S + 1,
+            theta=jnp.asarray(0.0, dtype=ctx.dtype),
+            rhos=spec.rhos,
+        )
+
+    for ell in range(1, ctx.trunc + 1):
+        evaluations = tuple(
+            _compute_basis_level(
+                ell,
+                ctx=ctx,
+                state=state,
+                table=table,
+            )
+            for table in theta_tables
+        )
+
+        state = _append_interpolated_basis_level(
+            state=state,
+            evaluations=evaluations,
+        )
+
+    return _basis_output_levels(
+        ctx=ctx,
+        state=state,
+        table=output_table,
+    )
+
+
+def _basis_spec(
+        *,
+        ctx: FFTContext,
+        kernel: VolterraKernel,
+        order: int,
+) -> BasisExpansionSpec:
+    """Return the basis/interpolation specification for a higher-order scheme.
+
+    The only thing that varies across orders is the exponent tuple ``rhos``.
+    Chebyshev-Lobatto nodes are used for all orders; for order=1 (n=3) they
+    coincide with ``{0, 1/2, 1}``.
+    """
+    beta = jnp.atleast_1d(kernel.beta)[0].astype(ctx.dtype)
+    rhos = _basis_rhos(order, beta=beta, dtype=ctx.dtype)
+    thetas = _chebyshev_lobatto_thetas(n=len(rhos), dtype=ctx.dtype)
+    interpolation = _basis_interpolation_matrix(
+        h=ctx.h,
+        thetas=thetas,
+        rhos=rhos,
+        dtype=ctx.dtype,
+    )
+    return BasisExpansionSpec(
+        rhos=rhos,
+        thetas=thetas,
+        interpolation_inverse=jnp.linalg.inv(interpolation),
+    )
+
+
+def _basis_rhos(
+        order: int,
+        *,
+        beta: Array,
+        dtype: jnp.dtype,
+) -> tuple[Array, ...]:
+    """Basis exponents for the fractional FFT scheme of the given order.
+
+    order=1: ``{1, s^beta, s}``              → ``(0, beta, 1)``
+    order=2: ``{1, s^beta, s, s^(beta+1), s^2}`` → ``(0, beta, 1, beta+1, 2)``
+    """
+    zero = jnp.asarray(0.0, dtype=dtype)
+    one = jnp.asarray(1.0, dtype=dtype)
+    if order == 1:
+        return (zero, beta, one)
+    if order == 2:
+        return (zero, beta, one, beta + one, jnp.asarray(2.0, dtype=dtype))
+    raise NotImplementedError(
+        f"Basis-expansion FFT scheme order={order} is not implemented yet."
+    )
+
+
+def _chebyshev_lobatto_thetas(
+        *,
+        n: int,
+        dtype: jnp.dtype,
+) -> tuple[Array, ...]:
+    """Chebyshev-Lobatto nodes on ``[0, 1]``.
+
+    The nodes include both endpoints.  For ``n=5`` this gives
+
+        0, 1/2 - sqrt(2)/4, 1/2, 1/2 + sqrt(2)/4, 1.
+    """
+
+    if n < 2:
+        raise ValueError(f"Need at least two interpolation nodes, got n={n}.")
+
+    k = jnp.arange(n, dtype=dtype)
+    one = jnp.asarray(1.0, dtype=dtype)
+    two = jnp.asarray(2.0, dtype=dtype)
+    nodes = (one - jnp.cos(jnp.pi * k / jnp.asarray(n - 1, dtype=dtype))) / two
+
+    return tuple(nodes[i] for i in range(n))
+
+
+def _basis_interpolation_matrix(
+        *,
+        h: Array,
+        thetas: tuple[Array, ...],
+        rhos: tuple[Array, ...],
+        dtype: jnp.dtype,
+) -> Array:
+    """Matrix mapping basis coefficients to point evaluations.
+
+    Entry ``V[a, b]`` is the value of basis component ``b`` at interpolation
+    point ``theta[a]``.
+    """
+
+    rows = []
+
+    for theta in thetas:
+        row = []
+
+        for rho in rhos:
+            is_const = rho == jnp.asarray(0.0, dtype=dtype)
+
+            value = jnp.where(
+                is_const,
+                jnp.asarray(1.0, dtype=dtype),
+                (theta * h) ** rho,
+            )
+            row.append(value)
+
+        rows.append(jnp.stack(row, axis=0))
+
+    return jnp.stack(rows, axis=0)
+
+
+def _init_basis_state(
+        *,
+        ctx: FFTContext,
+        spec: BasisExpansionSpec,
+) -> BasisExpansionFFTState:
+    """Initial level-0 basis histories."""
+
+    components: list[DenseElem] = []
+
+    for b in range(len(spec.rhos)):
+        if b == 0:
+            level0 = jnp.ones(
+                (ctx.S,) + ctx.batch_shape + (1,),
+                dtype=ctx.dtype,
+            )
+        else:
+            level0 = jnp.zeros(
+                (ctx.S,) + ctx.batch_shape + (1,),
+                dtype=ctx.dtype,
+            )
+
+        components.append((level0,))
+
+    return BasisExpansionFFTState(
+        components=tuple(components),
+        spec=spec,
+    )
+
+
+def _append_interpolated_basis_level(
+        *,
+        state: BasisExpansionFFTState,
+        evaluations: DenseElem,
+) -> BasisExpansionFFTState:
+    """Append one level of basis coefficients from point evaluations."""
+
+    F = jnp.stack(evaluations, axis=0)
+    # One GEMM for all basis components instead of B separate dot products.
+    all_coeffs = jnp.tensordot(state.spec.interpolation_inverse, F, axes=1)
+
+    components = tuple(
+        levels + (all_coeffs[b],)
+        for b, levels in enumerate(state.components)
+    )
+
+    return BasisExpansionFFTState(
+        components=components,
+        spec=state.spec,
+    )
+
+
+def _basis_output_levels(
+        *,
+        ctx: FFTContext,
+        state: BasisExpansionFFTState,
+        table: LagFFTTable,
+) -> DenseElem:
+    """Build trajectory levels from the final basis-expansion state."""
+
+    out_levels: list[Array] = [
+        jnp.ones((ctx.S + 1,) + ctx.batch_shape + (1,), dtype=ctx.dtype)
+    ]
+
+    for ell in range(1, ctx.trunc + 1):
+        out_levels.append(
+            _compute_basis_level(
+                ell,
+                ctx=ctx,
+                state=state,
+                table=table,
+            )
+        )
+
+    return tuple(out_levels)
+
+
+def _make_lag_fft_table(
+        *,
+        kernel: VolterraKernel,
+        S: int,
+        h: Array,
+        trunc: int,
+        dtype: jnp.dtype,
+        out_len: int,
+        theta: Array,
+        rhos: tuple[Array, ...],
+) -> LagFFTTable:
+    """Precompute FFTs of all lag weights needed for one interpolation point."""
+
+    nfft = _next_pow2(S + out_len - 1)
+    rows: list[tuple[Array, ...]] = []
+
+    for q_ord in range(1, trunc + 1):
+        cols = []
+
+        for rho in rhos:
+            w = kernel.lag_weights(
+                out_len=out_len,
+                h=h,
+                theta=theta,
+                q=q_ord,
+                rho=rho,
+                dtype=dtype,
+            )[..., 0, 0]
+            cols.append(jnp.fft.rfft(w, n=nfft))
+
+        rows.append(tuple(cols))
+
+    return LagFFTTable(
+        weights=tuple(rows),
+        nfft=nfft,
+        out_len=out_len,
+    )
+
+
+def _compute_basis_level(
+    ell: int,
+    *,
+    ctx: FFTContext,
+    state: BasisExpansionFFTState,
+    table: LagFFTTable,
+) -> Array:
+    r"""Compute one level for a basis-expansion FFT scheme.
+
+    Computes
+
+    .. math::
+
+        F_j^\ell(\theta) = \sum_{i < j}
+            \sum_{q=1}^{\ell} \sum_b w_{q,b}(j-i+\theta) C_{i,\ell-q,b} \otimes y_i^{\otimes q}
+
+    using causal FFT convolutions.
+    """
+
+    acc = jnp.zeros(
+        (table.out_len,) + ctx.batch_shape + (ctx.m ** ell,),
+        dtype=ctx.dtype,
+    )
+
+    for q_ord in range(1, ell + 1):
+        Yq = ctx.y_powers[q_ord]
+        # Stack all B source arrays and their precomputed weight FFTs so XLA
+        # can execute one batched FFT instead of B sequential ones.
+        srcs = jnp.stack(
+            [_CORE.tensor_product_homogeneous(levels[ell - q_ord], Yq)
+             for levels in state.components],
+            axis=0,
+        )  # (B, S, ..., m^ell)
+        Ws = jnp.stack(
+            [table.weights[q_ord - 1][b] for b in range(len(state.components))],
+            axis=0,
+        )  # (B, nfft//2+1)
+        acc = acc + jnp.sum(
+            _causal_conv_fft_batched(srcs, Ws, nfft=table.nfft, out_len=table.out_len),
+            axis=0,
+        )
+
+    return acc
+
 
 
 def _next_pow2(n: int) -> int:
     return 1 if n <= 1 else 1 << (n - 1).bit_length()
 
 
-def _causal_conv_fft(src: Array, w: Array, *, out_len: int) -> Array:
-    """Causal discrete convolution out[t] = sum_{s: lag=t-s >= 1} src[s]*w[lag] via FFT.
+def _causal_conv_fft_batched(
+        srcs: Array,
+        Ws: Array,
+        *,
+        nfft: int,
+        out_len: int,
+) -> Array:
+    """Batched causal FFT convolution over B source/weight pairs.
 
-    src shape: (S, *trailing)
-    w shape:   (out_len,)
-    output:    (out_len, *trailing)
+    Args:
+        srcs: ``(B, S, ..., m^ell)``
+        Ws:   ``(B, nfft//2+1)`` — precomputed rfft of lag weights.
+
+    Returns:
+        ``(B, out_len, ..., m^ell)``
     """
-    S = src.shape[0]
-    trailing = src.shape[1:]
-    src_flat = src.reshape((S, -1))
-    nfft = _next_pow2(S + w.shape[0] - 1)
-    src_pad = jnp.pad(src_flat, ((0, nfft - S), (0, 0)))
-    w_pad = jnp.pad(w, (0, nfft - w.shape[0]))
+    B, S = srcs.shape[:2]
+    trailing = srcs.shape[2:]
+
+    srcs_flat = srcs.reshape((B, S, -1))  # (B, S, prod(trailing))
+    SRC = jnp.fft.rfft(srcs_flat, n=nfft, axis=1)  # (B, nfft//2+1, prod(trailing))
     out_flat = jnp.fft.irfft(
-        jnp.fft.rfft(src_pad, axis=0) * jnp.fft.rfft(w_pad)[:, None],
-        n=nfft, axis=0,
-    )
-    return out_flat[:out_len].reshape((out_len,) + trailing)
+        SRC * Ws[:, :, None],
+        n=nfft,
+        axis=1,
+    )  # (B, nfft, prod(trailing))
+    return out_flat[:, :out_len].reshape((B, out_len) + trailing)
 
 
-def _outer_tensor(C: Array, Yq: Array, *, m: int, out_level: int) -> Array:
-    """Pointwise outer product C_i ⊗ Yq_i along the leading source axis.
-
-    C shape:   (S, *batch, m^a)
-    Yq shape:  (S, *batch, m^b)  where a + b == out_level
-    output:    (S, *batch, m^out_level)
-    """
-    prod = C[..., :, None] * Yq[..., None, :]
-    return prod.reshape(C.shape[:-1] + (m ** out_level,))
-
-
-def _frac_lag_weights(
-    *,
-    out_len: int,
-    h: Array,
-    theta: Array,
-    q: int,
-    rho: Array,
-    beta: Array,
-    dtype: jnp.dtype,
-) -> Array:
-    r"""Lag-k weights w_{q,ρ}(k+θ) for the fractional order=1 higher-order scheme.
-
-    For lag k >= 1, D = (k + θ) * h and
-
-        w = Γ(ρ+1)/Γ(ρ+qβ+1) * D^{ρ+qβ} * I_{h/D}(ρ+(q-1)β+1, β) / h^q.
-
-    Lag 0 is always set to zero (strict causal constraint i < j).
-    """
-    lag = jnp.arange(out_len, dtype=dtype)
-    valid = lag >= 1.0
-    D = (lag + theta) * h
-    safe_D = jnp.where(valid, D, jnp.ones_like(D))
-    z = jnp.clip(h / safe_D, 0.0, 1.0)
-    alpha_b = rho + (q - 1) * beta + 1.0
-    log_pf = jsp.gammaln(rho + 1.0) - jsp.gammaln(rho + q * beta + 1.0)
-    w = (
-        jnp.exp(log_pf)
-        * (safe_D ** (rho + q * beta))
-        * jsp.betainc(alpha_b, beta, z)
-        / (h ** q)
-    )
-    return jnp.where(valid, w, jnp.zeros_like(w)).astype(dtype)
-
-
-def _compute_level_higher(
-    ell: int,
-    theta: float,
-    out_len: int,
-    C0_levels: list[Array],
-    Cb_levels: list[Array],
-    C1_levels: list[Array],
-    y_powers: list[Array],
-    h: Array,
-    beta: Array,
-    m: int,
-    batch_shape: tuple[int, ...],
-    dtype: jnp.dtype,
-) -> Array:
-    r"""F_j^ell(θ) for the order=1 higher-order fractional scheme.
-
-    Computes:
-        F_j^ell(θ) = sum_{i<j} sum_{q=1}^{ell} sum_{ρ∈{0,β,1}}
-                       w_{q,ρ}(j-i+θ) * C_{i,ell-q,ρ} ⊗ y_i^⊗q
-
-    via FFT causal convolution.  Output shape: (out_len, *batch, m^ell).
-    """
-    theta_arr = jnp.asarray(theta, dtype=dtype)
-    rho_zero = jnp.asarray(0.0, dtype=dtype)
-    rho_one = jnp.asarray(1.0, dtype=dtype)
-    rho_values = (rho_zero, beta, rho_one)
-    C_lists = (C0_levels, Cb_levels, C1_levels)
-
-    acc = jnp.zeros((out_len,) + batch_shape + (m ** ell,), dtype=dtype)
-
-    for q in range(1, ell + 1):
-        Yq = y_powers[q]
-        for rho, C_levels in zip(rho_values, C_lists):
-            C_src = C_levels[ell - q]
-            src = _outer_tensor(C_src, Yq, m=m, out_level=ell)
-            w = _frac_lag_weights(
-                out_len=out_len, h=h, theta=theta_arr,
-                q=q, rho=rho, beta=beta, dtype=dtype,
-            )
-            acc = acc + _causal_conv_fft(src, w, out_len=out_len)
-
-    return acc
-
-
-__all__ = ["vsig", "vsig_fft"]
+__all__ = ["vsig", "vsig_fft", "precompute_lag_tables", "PrecomputedLagTables"]
