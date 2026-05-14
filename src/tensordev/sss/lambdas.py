@@ -1521,7 +1521,7 @@ class JordanLambda(Lambda):
                 raise ValueError("alpha must be provided when real blocks are present.")
             alpha_arr = jnp.asarray(alpha)
             if alpha_arr.ndim != 2 or alpha_arr.shape[1] != sum(self.real_sizes):
-                raise ValueError("alpha must have shape (q, sum(real_sizes)).")
+                raise ValueError("alpha must have shape (n, sum(real_sizes)).")
             q = int(alpha_arr.shape[0])
             start = 0
             out_parts: list[Array] = []
@@ -1538,10 +1538,10 @@ class JordanLambda(Lambda):
             delta_arr = jnp.asarray(delta, dtype=beta_arr.dtype)
             total_osc = sum(self.osc_sizes)
             if beta_arr.ndim != 2 or beta_arr.shape != delta_arr.shape or beta_arr.shape[1] != total_osc:
-                raise ValueError("beta and delta must have shape (q, sum(osc_sizes)).")
+                raise ValueError("beta and delta must have shape (n, sum(osc_sizes)).")
             q = int(beta_arr.shape[0]) if q is None else q
             if int(beta_arr.shape[0]) != q:
-                raise ValueError("alpha, beta and delta must share the same leading q axis.")
+                raise ValueError("alpha, beta and delta must share the same leading n axis.")
             start = 0
             osc_parts: list[Array] = []
             for size in self.osc_sizes:

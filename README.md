@@ -203,8 +203,8 @@ sss = StateSpaceSignature.from_jordan(
     osc_decays=jnp.array([0.5]),
     osc_freqs=jnp.array([2 * jnp.pi]),
     osc_sizes=(1,),
-    A=jnp.eye(2)[None],   # (q=1, m=2, d=2)
-    b=jnp.ones((1, 3)),   # (q=1, R=3)
+    A=jnp.eye(2)[None],   # (n=1, m=2, d=2)
+    b=jnp.ones((1, 3)),   # (n=1, R=3)
     trunc=3,
 )
 
@@ -238,17 +238,17 @@ Volterra signatures for fractional, Gamma, and piecewise-constant kernel familie
 
 ```python
 import jax.numpy as jnp
-from tensordev.volterra import VolterraKernel, VolterraSignature, vsig
+from tensordev.volterra import ConvolutionKernel, VolterraSignature, vsig
 
-A = jnp.eye(2)[None]   # (q=1, m=2, d=2)
+A = jnp.eye(2)[None]  # (n=1, m=2, d=2)
 dt = 1.0 / 32
 
 # functional API — fractional kernel k(t,s) = (t-s)^{β-1} / Γ(β)
-kernel = VolterraKernel.fractional(beta=jnp.array([0.8]), A=A)
+kernel = ConvolutionKernel.fractional(beta=jnp.array([0.8]), A=A)
 result = vsig(X, kernel=kernel, dt=dt, trunc=3)
 
 # class-based — Gamma kernel, adding exponential damping to the fractional kernel
-kernel_g = VolterraKernel.gamma(
+kernel_g = ConvolutionKernel.gamma(
     beta=jnp.array([0.8]),
     rate=jnp.array([1.0]),
     scale=jnp.array([1.0]),

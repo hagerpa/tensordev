@@ -5,7 +5,7 @@ Checks the identity:
 
     SSS_{Lambda=0}(X) == Sig(Y),   Y_t = [sum_p sum_r b[p,r] A[p]] X_t
 
-for q = 1 and q > 1 over truncation levels N = 1 .. N_max.
+for n = 1 and n > 1 over truncation levels N = 1 .. N_max.
 
 Usage
 -----
@@ -17,8 +17,8 @@ from pathlib import Path
 
 # Make tensordev importable when running the script directly.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # notebooks/
 
-import math
 import numpy as np
 import pandas as pd
 import jax
@@ -31,7 +31,8 @@ from tensordev.sss import StateSpaceSignature
 from tensordev.development import path_signature
 from tensordev.util.random_paths import unit_speed_paths
 
-from helpers import random_fssk
+from fssk_setup import random_fssk
+from _validation_util.analysis_utils import compare_levelwise
 
 JaxCore = get_default_core()
 
@@ -46,32 +47,16 @@ def transformed_lambda0_path(X, A, b):
     Parameters
     ----------
     X : (B, L, d)
-    A : (q, m, d)
-    b : (q, R)
+    A : (n, m, d)
+    b : (n, R)
 
     Returns
     -------
     Y : (B, L, m)
     """
-    c = jnp.sum(b, axis=1)               # (q,)
+    c = jnp.sum(b, axis=1)               # (n,)
     M = jnp.einsum("p,pmd->md", c, A)    # (m, d)
     return jnp.einsum("md,bld->blm", M, X)
-
-
-def compare_levelwise(sig_a, sig_b):
-    """Return per-level error statistics between two signature tuples."""
-    rows = []
-    for n, (Sa, Sb) in enumerate(zip(sig_a, sig_b)):
-        err = np.asarray(jnp.abs(Sa - Sb))
-        fac = math.factorial(n)
-        rows.append({
-            "level":        n,
-            "mean_abs":     float(err.mean()),
-            "max_abs":      float(err.max()),
-            "mean_scaled":  float(fac * err.mean()),
-            "max_scaled":   float(fac * err.max()),
-        })
-    return rows
 
 
 def lambda0_validation_case(
@@ -86,7 +71,7 @@ def lambda0_validation_case(
     dt_fine=1 / 4096,
     seed=0,
 ):
-    """Run the Lambda=0 validation for one (q, R, m, d) configuration."""
+    """Run the Lambda=0 validation for one (n, R, m, d) configuration."""
     _, A_np, b_np = random_fssk(q=q, R=R, m=m, d=d, seed=seed)
 
     Lambda = jnp.zeros((R, R), dtype=jnp.float64)

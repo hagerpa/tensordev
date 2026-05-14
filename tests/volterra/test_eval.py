@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from tensordev.core.jax import Jax
-from tensordev.volterra import VolterraKernel, FractionalKernel
+from tensordev.volterra import ConvolutionKernel, FractionalKernel
 from tensordev.volterra.eval_general import eval_e as eval_e_general
 from tensordev.volterra.eval_general import eval_vte as eval_vte_general
 from tensordev.volterra.eval_scalar import eval_vte as eval_vte_scalar

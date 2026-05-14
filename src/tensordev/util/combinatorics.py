@@ -27,8 +27,8 @@ class MultiIndexLayout:
     """
     Packed graded layout of multi-indices.
 
-    For fixed ``q`` and ``trunc``, this object stores all multi-indices
-    ``ell in N^q`` with ``|ell| <= trunc`` in graded order. Within each degree,
+    For fixed ``n`` and ``trunc``, this object stores all multi-indices
+    ``ell in N^n`` with ``|ell| <= trunc`` in graded order. Within each degree,
     the ordering is deterministic and chosen so that lower-degree blocks are
     prefixes of higher-degree layouts.
 
@@ -116,8 +116,8 @@ class MultiIndexLayout:
         Ordered representative word corresponding to ``ell[idx]``.
 
         This returns the canonical word
-            1^{ell_1} 2^{ell_2} ... q^{ell_q}
-        encoded as a 1D ``int32`` array with alphabet ``{0, ..., q-1}``.
+            1^{ell_1} 2^{ell_2} ... n^{ell_q}
+        encoded as a 1D ``int32`` array with alphabet ``{0, ..., n-1}``.
         It is intended for preprocessing only.
         """
         counts = self.ell[int(idx)]
@@ -141,18 +141,18 @@ def _layout_index_cache(q: int, trunc: int) -> dict[Tuple[int, ...], int]:
 
 
 def num_multiindices_exact(q: int, n: int) -> int:
-    """Return ``# { ell in N^q : |ell| = n }``."""
+    """Return ``# { ell in N^n : |ell| = n }``."""
     if q <= 0:
-        raise ValueError(f"q must be positive, got {q}.")
+        raise ValueError(f"n must be positive, got {q}.")
     if n < 0:
         return 0
     return comb(n + q - 1, q - 1)
 
 
 def num_multiindices_leq(q: int, trunc: int) -> int:
-    """Return ``# { ell in N^q : |ell| <= trunc }``."""
+    """Return ``# { ell in N^n : |ell| <= trunc }``."""
     if q <= 0:
-        raise ValueError(f"q must be positive, got {q}.")
+        raise ValueError(f"n must be positive, got {q}.")
     if trunc < 0:
         return 0
     return comb(trunc + q, q)
@@ -160,7 +160,7 @@ def num_multiindices_leq(q: int, trunc: int) -> int:
 
 def build_multiindex_layout(q: int, trunc: int) -> MultiIndexLayout:
     """
-    Build the packed graded multi-index layout for ``N^q`` up to degree ``trunc``.
+    Build the packed graded multi-index layout for ``N^n`` up to degree ``trunc``.
 
     Parameters
     ----------
@@ -172,10 +172,10 @@ def build_multiindex_layout(q: int, trunc: int) -> MultiIndexLayout:
     Returns
     -------
     MultiIndexLayout
-        Layout containing all ``ell in N^q`` with ``|ell| <= trunc``.
+        Layout containing all ``ell in N^n`` with ``|ell| <= trunc``.
     """
     if q <= 0:
-        raise ValueError(f"q must be positive, got {q}.")
+        raise ValueError(f"n must be positive, got {q}.")
     if trunc < 0:
         raise ValueError(f"trunc must be non-negative, got {trunc}.")
 
@@ -244,9 +244,9 @@ def build_multiindex_layout(q: int, trunc: int) -> MultiIndexLayout:
 
 def _compositions_desc(total: int, q: int) -> Iterator[Tuple[int, ...]]:
     """
-    Enumerate compositions of ``total`` into ``q`` non-negative parts.
+    Enumerate compositions of ``total`` into ``n`` non-negative parts.
 
-    The order is descending in the earliest coordinates, e.g. for ``q=3`` and
+    The order is descending in the earliest coordinates, e.g. for ``n=3`` and
     ``total=2``:
         (2,0,0), (1,1,0), (1,0,1), (0,2,0), (0,1,1), (0,0,2)
     """
@@ -283,7 +283,7 @@ def multiindex_batched_navigation(
     - ``global_idx_by_deg[n]`` is a NumPy integer array of the global packed
       indices for all multi-indices of total degree ``n``.
     - ``succ_local_by_n_r[n]`` is ``None`` when ``n == trunc``; otherwise a
-      tuple of ``q`` NumPy integer arrays, where entry ``r`` gives the *local*
+      tuple of ``n`` NumPy integer arrays, where entry ``r`` gives the *local*
       index (within the degree-``(n+1)`` block) of ``plus[idx][r]`` for each
       ``idx`` in ``global_idx_by_deg[n]``.
 

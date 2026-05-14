@@ -60,7 +60,7 @@ def fractional_fssk(
         Number of exponential factors in the BL2 approximation. This is also
         the state-space dimension of the returned FSSK.
     A:
-        Kernel matrices with shape ``(q, m, d)``.
+        Kernel matrices with shape ``(n, m, d)``.
     T:
         Approximation horizon. Default is ``1.0``.
     coef_quad_order:
@@ -87,7 +87,7 @@ def fractional_fssk(
     A_arr = jnp.asarray(A)
     if A_arr.ndim != 3:
         raise ValueError(
-            "A must have shape (q, m, d); "
+            "A must have shape (n, m, d); "
             f"got shape {tuple(A_arr.shape)}."
         )
 

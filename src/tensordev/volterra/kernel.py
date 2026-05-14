@@ -1,7 +1,7 @@
 """Volterra kernels and packed coefficient builders.
 
 The public names :class:`FractionalKernel` and :class:`GammaKernel` both
-inherit from the abstract base :class:`VolterraKernel`.  The base class holds
+inherit from the abstract base :class:`ConvolutionKernel`.  The base class holds
 the shared kernel matrix ``A`` and implements :meth:`coef`, :meth:`coef_grid`,
 and :meth:`lag_weights`; concrete subclasses implement :meth:`alpha`.
 
@@ -31,16 +31,17 @@ Array = jax.Array
 
 
 @dataclass(frozen=True, slots=True)
-class VolterraKernel:
-    r"""Abstract base class for Volterra kernels.
+class ConvolutionKernel:
+    r"""Abstract base class for Volterra convolution kernels.
 
     A Volterra kernel is represented as
 
     .. math::
-        K(t,s) = \sum_{p=1}^q k_p(t,s)\, A_p,
+        K(t,s) = \sum_{p=1}^n k_p(t-s)\, A_p,
 
-    where :math:`A_p \in \mathbb{R}^{m \times d}`.  Concrete subclasses
-    implement :meth:`alpha`.
+    where :math:`A_p \in \mathbb{R}^{m \times d}` and :math:`\beta_p > 0` is
+    the fractional order of :math:`k_p` (:math:`\beta_p = 1` for smooth kernels).
+    Concrete subclasses implement :meth:`alpha`.
     """
 
     A: Array
@@ -50,7 +51,7 @@ class VolterraKernel:
         A = jnp.asarray(self.A)
         if A.ndim != 3:
             raise ValueError(
-                "A must have shape (q, m, d); "
+                "A must have shape (n, m, d); "
                 f"got {tuple(A.shape)}."
             )
         object.__setattr__(self, "A", A)
@@ -68,16 +69,16 @@ class VolterraKernel:
 
         .. math::
             k_p(t,s) = \frac{(t-s)^{\beta_p - 1}}{\Gamma(\beta_p)},
-            \qquad p = 1,\ldots,q,
+            \qquad p = 1,\ldots,n,
 
         where :math:`\beta_p > 0`.
 
         Parameters
         ----------
         beta : Array
-            Exponent vector of shape ``(q,)`` with all entries positive.
+            Exponent vector of shape ``(n,)`` with all entries positive.
         A : Array
-            Kernel matrices of shape ``(q, m, d)``.
+            Kernel matrices of shape ``(n, m, d)``.
         """
         return FractionalKernel(beta=beta, A=A)
 
@@ -91,7 +92,7 @@ class VolterraKernel:
         rate: Array = 1.0,
         quad_order: int = 32,
     ) -> "GammaKernel":
-        r"""Construct a scalar Gamma Volterra kernel (:math:`q = 1`).
+        r"""Construct a scalar Gamma Volterra kernel (:math:`n = 1`).
 
         The kernel is
 
@@ -152,7 +153,7 @@ class VolterraKernel:
     ) -> tuple[Array, Array]:
         """Evaluate normalized kernel coefficients for time triples ``(s, t, tau)``.
 
-        Returns ``(vals, valid)`` where ``vals`` has shape ``leading + (q, M)``
+        Returns ``(vals, valid)`` where ``vals`` has shape ``leading + (n, M)``
         and ``valid`` has shape ``leading``.
         """
         raise NotImplementedError(f"{type(self).__name__} must implement alpha.")
@@ -168,13 +169,20 @@ class VolterraKernel:
         tau: Array,
         *,
         trunc: int,
+        rho: float | Array = 0.0,
         dtype: Optional[jnp.dtype] = None,
     ) -> VolterraCoefficients:
         r"""Build packed coefficients for broadcasted triples ``(s, t, tau)``.
 
         ``s``, ``t`` and ``tau`` are broadcast to a common leading shape.  The
-        returned ``alpha`` has shape ``leading + (q, M)``.  Triples outside
+        returned ``alpha`` has shape ``leading + (n, M)``.  Triples outside
         ``s < t <= tau`` are marked invalid and their coefficients are zero.
+
+        Parameters
+        ----------
+        rho:
+            Basis exponent for higher-order schemes.  ``rho=0`` (default)
+            recovers the standard Euler coefficients.
         """
         if trunc <= 0:
             raise ValueError(f"trunc must be positive, got {trunc}.")
@@ -187,7 +195,7 @@ class VolterraKernel:
         )
         layout = build_multiindex_layout(self.q, trunc - 1)
 
-        alpha, valid = self.alpha(layout, dtype=real_dtype, s=s_arr, t=t_arr, tau=tau_arr)
+        alpha, valid = self.alpha(layout, rho=rho, dtype=real_dtype, s=s_arr, t=t_arr, tau=tau_arr)
 
         return VolterraCoefficients(
             layout=layout,
@@ -203,6 +211,7 @@ class VolterraKernel:
         times: Array,
         *,
         trunc: int,
+        rho: float | Array = 0.0,
         tau: Optional[Array] = None,
         dtype: Optional[jnp.dtype] = None,
     ) -> VolterraCoefficients:
@@ -213,6 +222,9 @@ class VolterraKernel:
         times:
             Path grid of shape ``(S + 1,)``.  Source interval ``i`` is
             ``[times[i], times[i+1]]``.
+        rho:
+            Basis exponent for higher-order schemes.  ``rho=0`` (default)
+            recovers the standard Euler coefficients.
         tau:
             Optional readout times of shape ``(R,)``.  If omitted,
             ``tau = times[1:]`` and the leading coefficient shape is ``(S, S)``.
@@ -245,6 +257,7 @@ class VolterraKernel:
             t[:, None],
             tau_arr[None, :],
             trunc=trunc,
+            rho=rho,
             dtype=real_dtype,
         )
 
@@ -254,24 +267,24 @@ class VolterraKernel:
         out_len: int,
         h: Array,
         theta: Array,
-        q: int,
+        n: int,
         rho: float | Array = 0.0,
         dtype: jnp.dtype,
     ) -> Array:
         r"""Lag-k causal convolution weights for ``k = 0, ..., out_len-1``.
 
-        Evaluates the degree-``(q-1)`` Volterra coefficients at the time triples
+        Evaluates the degree-``(n-1)`` Volterra coefficients at the time triples
         ``s=0, t=h, tau=(k+θ)·h``, which are the causal convolution weights for
-        the order-``q`` term of the discrete signature kernel.  Lag 0 is always
+        the order-``n`` term of the discrete signature kernel.  Lag 0 is always
         zero (strict causality, ``tau < t``).
 
-        Returns an array of shape ``(out_len, self.q, M_{q-1})``, where
-        ``M_{q-1}`` is the number of multi-indices of degree ``q-1`` for
-        ``self.q`` components.
+        Returns an array of shape ``(out_len, self.q, M_{n-1})``, where
+        ``M_{n-1}`` is the number of multi-indices of degree ``n-1`` for
+        ``self.n`` components.
         """
         dtype_ = jnp.dtype(dtype)
         lag = jnp.arange(out_len, dtype=dtype_)
-        layout = build_multiindex_layout(self.q, q - 1)
+        layout = build_multiindex_layout(self.q, n - 1)
         vals, _ = self.alpha(
             layout,
             rho=rho,
@@ -280,7 +293,7 @@ class VolterraKernel:
             t=jnp.full(out_len, h, dtype=dtype_),
             tau=(lag + theta) * h,
         )
-        start = int(layout.offsets[q - 1])
+        start = int(layout.offsets[n - 1])
         result = vals[..., start:].astype(dtype_)
         # Strict causality: lag 0 is zero regardless of theta.  alpha uses
         # tau >= t which admits tau = t when theta = 1, but that is not a
@@ -290,32 +303,35 @@ class VolterraKernel:
 
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True, slots=True)
-class FractionalKernel(VolterraKernel):
+class FractionalKernel(ConvolutionKernel):
     r"""Multivariate fractional Volterra kernel.
 
     The scalar kernels are
 
     .. math::
         k_p(t,s) = \frac{(t-s)^{\beta_p - 1}}{\Gamma(\beta_p)},
-        \qquad p = 1,\ldots,q,
+        \qquad p = 1,\ldots,n,
 
-    where :math:`\beta_p > 0`.  The full kernel is
+    where :math:`\beta_p > 0` is the fractional order of :math:`k_p`
+    (in particular :math:`\beta_p = 1` gives the flat kernel
+    :math:`k_p \equiv 1`).  The full kernel is
     :math:`K(t,s) = \sum_p k_p(t,s)\,A_p`.
 
     Parameters
     ----------
     beta : Array
-        Exponent vector of shape ``(q,)`` with all entries positive.
+        Fractional-order vector of shape ``(n,)`` with all entries positive
+        (:math:`\beta_p = 1` recovers the flat/classical case).
     A : Array
-        Kernel matrices of shape ``(q, m, d)``.
+        Kernel matrices of shape ``(n, m, d)``.
     """
 
     def __post_init__(self) -> None:
-        VolterraKernel.__post_init__(self)
+        ConvolutionKernel.__post_init__(self)
         if self.beta.shape != (self.q,):
             raise ValueError(
-                "fractional beta must have shape (q,), matching A.shape[0]; "
-                f"got beta.shape={tuple(self.beta.shape)} and q={self.q}."
+                "fractional beta must have shape (n,), matching A.shape[0]; "
+                f"got beta.shape={tuple(self.beta.shape)} and n={self.q}."
             )
         if bool(jnp.any(self.beta <= 0)):
             raise ValueError("fractional beta entries must be positive.")
@@ -344,8 +360,8 @@ class FractionalKernel(VolterraKernel):
 
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True, slots=True)
-class GammaKernel(VolterraKernel):
-    r"""Scalar Gamma Volterra kernel (:math:`q = 1`).
+class GammaKernel(ConvolutionKernel):
+    r"""Scalar Gamma Volterra kernel (:math:`n = 1`).
 
     The kernel is
 
@@ -375,7 +391,7 @@ class GammaKernel(VolterraKernel):
     quad_order: int = field(default=32, metadata={"static": True})
 
     def __post_init__(self) -> None:
-        VolterraKernel.__post_init__(self)
+        ConvolutionKernel.__post_init__(self)
         scale = jnp.asarray(self.scale)
         rate = jnp.asarray(self.rate)
         if self.q != 1:
@@ -459,7 +475,7 @@ def _fractional_alpha(
     calling :meth:`FractionalKernel.alpha`.  The result is zero whenever
     :math:`s < t \le \tau` is violated.
 
-    Returns ``(vals, valid)`` with ``vals`` of shape ``leading + (q, M)``.
+    Returns ``(vals, valid)`` with ``vals`` of shape ``leading + (n, M)``.
     """
     h = t - s
     tau_s = tau - s
@@ -469,11 +485,11 @@ def _fractional_alpha(
     z = jnp.clip(h_safe / tau_s_safe, 0.0, 1.0)
 
     prefix = ell @ beta                      # (M,)
-    total = prefix[:, None] + beta[None, :]  # (M, q)
+    total = prefix[:, None] + beta[None, :]  # (M, n)
     a = rho + prefix[:, None] + 1.0
     b = beta[None, :]
 
-    # leading + (M, q)
+    # leading + (M, n)
     log_scale = (
         (rho + total) * jnp.log(tau_s_safe[..., None, None])
         - (degree[:, None] + 1.0) * jnp.log(h_safe[..., None, None])
@@ -482,7 +498,7 @@ def _fractional_alpha(
     )
     vals = jnp.exp(log_scale) * betainc(a, b, z[..., None, None])
     vals = jnp.where(valid[..., None, None], vals, 0.0)
-    return jnp.swapaxes(vals, -1, -2), valid  # leading + (q, M)
+    return jnp.swapaxes(vals, -1, -2), valid  # leading + (n, M)
 
 
 @jax.jit
@@ -578,4 +594,4 @@ def _gamma_dot_kappa(
     return jnp.where(n == 1.0, dot_n1, dot_ngt1)
 
 
-__all__ = ["VolterraKernel", "FractionalKernel", "GammaKernel"]
+__all__ = ["ConvolutionKernel", "FractionalKernel", "GammaKernel"]

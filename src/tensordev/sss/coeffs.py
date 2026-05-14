@@ -36,7 +36,7 @@ class FSSKCoefficients:
     R: int = field(metadata={"static": True})
     E: Array                # leading + (R, R)
     psi: Array              # leading + (M, R)
-    phi: Array              # leading + (q, Mphi, R, R)
+    phi: Array              # leading + (n, Mphi, R, R)
 
     @property
     def leading_shape(self) -> tuple[int, ...]:

@@ -25,7 +25,7 @@ def init_state(
     The state is stored in first-on format: level ``r`` carries tensor degree
     ``r + 1`` and has shape
 
-        ``batch + (q, 1, R, m**(r + 1))``.
+        ``batch + (n, 1, R, m**(r + 1))``.
 
     Parameters
     ----------
@@ -65,12 +65,12 @@ def eval_fg(
     Parameters
     ----------
     y:
-        Projected increment with trailing shape ``(q, m)``. For the q=1 sanity
+        Projected increment with trailing shape ``(n, m)``. For the n=1 sanity
         path, trailing shape ``(m,)`` is also accepted and normalized to
         ``(1, m)`` internally.
     coef:
         Step-local FSSK coefficients. ``coef.layout`` must be the packed
-        multi-index layout for ``q`` and degree ``coef.trunc - 1``.
+        multi-index layout for ``n`` and degree ``coef.trunc - 1``.
     core:
         Standard tensor-algebra core, used for level-wise summation and shuffle.
 
@@ -81,23 +81,23 @@ def eval_fg(
         ``batch + (1, R, m**r)``.
     G:
         Dense element with degrees ``0, ..., N-2`` when ``N > 1``. Level ``r``
-        has shape ``batch + (q, R, R, m**r)``. For ``N == 1`` a single zero
+        has shape ``batch + (n, R, R, m**r)``. For ``N == 1`` a single zero
         degree-0 level is returned for shape stability.
 
     Notes
     -----
     **Batched multi-index recursion** (compilation-cost reduction)
 
-    The inner loop over multi-indices (whose count grows as C(N+q-2,q)) is
+    The inner loop over multi-indices (whose count grows as C(N+n-2,n)) is
     replaced by a single batched operation per ``(degree, r)`` pair.  Instead
     of one ``DenseElem`` per multi-index, we keep one ``DenseElem`` per degree
     where the multi-index axis is a leading batch dimension:
 
     * ``F_stack[n]``: level ``k`` has shape ``batch + (num_n, 1, R, m**k)``
-    * ``G_stack[n]``: level ``k`` has shape ``batch + (num_n, q, R, R, m**k)``
+    * ``G_stack[n]``: level ``k`` has shape ``batch + (num_n, n, R, R, m**k)``
 
     All gather / scale / shuffle / summation operations act on these batched
-    tensors, reducing the number of XLA ops from O(q·C(N+q-2,q)) to O(N·q).
+    tensors, reducing the number of XLA ops from O(n·C(N+n-2,n)) to O(N·n).
     """
     y = _normalize_y(y, coef)
 
@@ -123,12 +123,12 @@ def eval_fg(
     global_idx_by_deg, succ_local_by_n_r = multiindex_batched_navigation(q, N - 1)
 
     inv_factorial = coef.layout.inv_factorial.astype(dtype)
-    back_trans = coef.layout.backward_transition.astype(dtype)  # (layout.size, q)
+    back_trans = coef.layout.backward_transition.astype(dtype)  # (layout.size, n)
 
-    g_zero = _zero_g0(y, coef)  # batch + (q, R, R, 1)
+    g_zero = _zero_g0(y, coef)  # batch + (n, R, R, 1)
 
     # F_stack[n]: DenseElem, level k shape → batch + (num_n, 1, R, m**k)
-    # G_stack[n]: DenseElem, level k shape → batch + (num_n, q, R, R, m**k)
+    # G_stack[n]: DenseElem, level k shape → batch + (num_n, n, R, R, m**k)
     F_stack: list[DenseElem | None] = [None] * N
     G_stack: list[DenseElem | None] = [None] * N
 
@@ -153,9 +153,9 @@ def eval_fg(
 
         # ── G base ────────────────────────────────────────────────────────
         if n <= N - 2:
-            # coef.phi[..., :, idx_n, :, :] → batch + (q, num_n, R, R)
-            # swapaxes(-4,-3)              → batch + (num_n, q, R, R)
-            # [..., None] * scale          → batch + (num_n, q, R, R, 1)
+            # coef.phi[..., :, idx_n, :, :] → batch + (n, num_n, R, R)
+            # swapaxes(-4,-3)              → batch + (num_n, n, R, R)
+            # [..., None] * scale          → batch + (num_n, n, R, R, 1)
             phi_gathered = jnp.swapaxes(
                 coef.phi[..., :, idx_n, :, :], -4, -3
             )
@@ -166,8 +166,8 @@ def eval_fg(
             g_stack_n: DenseElem = (g_base_n,)
         else:
             # n == N-1: no phi base, broadcast g_zero over num_n
-            # g_zero: batch + (q, R, R, 1)
-            # expand to: batch + (1, q, R, R, 1) then broadcast to num_n
+            # g_zero: batch + (n, R, R, 1)
+            # expand to: batch + (1, n, R, R, 1) then broadcast to num_n
             g_zero_exp = jnp.expand_dims(g_zero, axis=g_zero.ndim - 4)
             g_base_n = jnp.broadcast_to(
                 g_zero_exp,
@@ -177,7 +177,7 @@ def eval_fg(
 
         # ── Accumulate over components r ──────────────────────────────────
         if n <= N - 2:
-            succ_local_r = succ_local_by_n_r[n]  # tuple of q numpy int arrays
+            succ_local_r = succ_local_by_n_r[n]  # tuple of n numpy int arrays
 
             for r in range(q):
                 sl = succ_local_r[r]  # shape (num_n,) — local indices into degree n+1
@@ -206,8 +206,8 @@ def eval_fg(
                 )
 
                 # ── G: gather → scale → shuffle → accumulate ──────────────
-                # G_stack[n+1][k]: batch + (num_{n+1}, q, R, R, m**k)
-                # After gather:    batch + (num_n,    q, R, R, m**k)
+                # G_stack[n+1][k]: batch + (num_{n+1}, n, R, R, m**k)
+                # After gather:    batch + (num_n,    n, R, R, m**k)
                 G_gathered = tuple(
                     lvl[..., sl, :, :, :, :] for lvl in G_stack[n + 1]
                 )
@@ -235,7 +235,7 @@ def eval_fg(
     if N == 1:
         g0: DenseElem = (g_zero,)
     else:
-        # G_stack[0][k]: batch + (1, q, R, R, m**k)  →  batch + (q, R, R, m**k)
+        # G_stack[0][k]: batch + (1, n, R, R, m**k)  →  batch + (n, R, R, m**k)
         g0 = tuple(lvl[..., 0, :, :, :, :] for lvl in G_stack[0])
 
     return f0, g0
@@ -260,7 +260,7 @@ def update_state(
 
         ``B = f + sum_l Z^l . G^l``.
 
-    This is the q-component analogue of the scalar Horner update, with ``f``
+    This is the n-component analogue of the scalar Horner update, with ``f``
     and ``G`` supplied by the Part II shuffle recursion.
     """
     y = _normalize_y(y, coef)
@@ -299,7 +299,7 @@ def update_state(
         trunc=coef.trunc - 1,
     )
 
-    # Insert the q/component axis into B and multiply by the degree-1 letters
+    # Insert the n/component axis into B and multiply by the degree-1 letters
     # y_p.  This uses the ordinary tensor product, not the shuffle product.
     B_by_component = tuple(jnp.expand_dims(level, axis=-3) for level in B)
     y_letters = (y[..., :, None, None, :],)
@@ -316,7 +316,7 @@ def update_state(
 
 
 def _normalize_y(y: Array, coef: FSSKCoefficients) -> Array:
-    """Return projected increments with trailing shape ``(q, m)``."""
+    """Return projected increments with trailing shape ``(n, m)``."""
     y = jnp.asarray(y, dtype=coef.E.dtype)
     if coef.q == 1 and y.shape[-1] == coef.m:
         if y.ndim >= 2 and y.shape[-2:] == (1, coef.m):
@@ -330,7 +330,7 @@ def _normalize_y(y: Array, coef: FSSKCoefficients) -> Array:
 
 
 def _zero_g0(y: Array, coef: FSSKCoefficients) -> Array:
-    """Degree-0 zero for the q-family of G matrices."""
+    """Degree-0 zero for the n-family of G matrices."""
     batch_shape = jnp.broadcast_shapes(coef.E.shape[:-2], y.shape[:-2])
     return jnp.zeros(batch_shape + (coef.q, coef.R, coef.R, 1), dtype=coef.E.dtype)
 

@@ -8,7 +8,7 @@ cell. Across coarse cells, the past Volterra signature is frozen at the
 left endpoint of the cell, matching the structural approximation used by the
 general quadratic algorithm.
 
-For q=1 and fractional kernel
+For n=1 and fractional kernel
 
     K_beta(t, s) = (t - s) ** (beta - 1) / Gamma(beta),
 
@@ -77,7 +77,7 @@ def fractional_cell_euler_vsig(
             K_beta(t, s) = (t - s) ** (beta - 1) / Gamma(beta).
 
     A:
-        Projection matrix with shape ``(1, m, d)`` or ``(m, d)``. Only q=1 is
+        Projection matrix with shape ``(1, m, d)`` or ``(m, d)``. Only n=1 is
         supported.
     dt:
         Scalar step size or one-dimensional array of coarse step sizes.
@@ -119,7 +119,7 @@ def fractional_cell_euler_vsig(
     dX = X if increment_input else jnp.diff(X, axis=axis_norm)
     dX_time = jnp.moveaxis(dX, axis_norm, 0)
 
-    # q=1 projection: dY[..., a] = sum_d A[0, a, d] dX[..., d].
+    # n=1 projection: dY[..., a] = sum_d A[0, a, d] dX[..., d].
     dY_time = jnp.einsum("md,...d->...m", A[0].astype(dX_time.dtype), dX_time)
 
     out = _fractional_cell_euler_time_first(
@@ -157,7 +157,7 @@ def fractional_cell_euler_vsig_from_increments(
     output_starting_point: bool = False,
     dyadic_order: int = 0,
 ) -> DenseElem:
-    """Cellwise Euler scheme from already projected q=1 increments.
+    """Cellwise Euler scheme from already projected n=1 increments.
 
     Parameters
     ----------
@@ -530,7 +530,7 @@ def _normalize_A(A: Array) -> Array:
         return A
 
     raise ValueError(
-        "Only q=1 projections are supported. "
+        "Only n=1 projections are supported. "
         "A must have shape (m, d) or (1, m, d)."
     )
 

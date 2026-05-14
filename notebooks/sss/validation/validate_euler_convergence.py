@@ -19,7 +19,7 @@ Usage
     python validate_euler_convergence_demo.py --J 64 --N 8      # override grid/trunc
     python validate_euler_convergence_demo.py --output-dir /tmp/out
     python validate_euler_convergence_demo.py \\
-        --setups '[{"q":1,"R":2,"seed":42},{"q":3,"R":3,"seed":7}]'
+        --setups '[{"n":1,"R":2,"seed":42},{"n":3,"R":3,"seed":7}]'
 """
 
 from __future__ import annotations
@@ -41,16 +41,17 @@ import matplotlib.pyplot as plt
 jax.config.update("jax_enable_x64", True)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # notebooks/
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # validation/
 
-import plot_config  # noqa: F401 — applies rcParams; must come after matplotlib.use()
-from plot_config import new_fig, savefig_fig, COLORS, MARKERS
+import _validation_util.plot_config as plot_config  # noqa: F401 — applies rcParams; must come after matplotlib.use()
+from _validation_util.plot_config import new_fig, savefig_fig, COLORS, MARKERS
+from _validation_util.analysis_utils import fit_slope
 
 from tensordev.sss import StateSpaceSignature
 from tensordev.util.random_paths import unit_speed_paths
 from euler_general import fssk_euler_vsig
-from helpers import random_fssk
+from fssk_setup import random_fssk
 
 # ---------------------------------------------------------------------------
 # Default experimental design (overridable via CLI)
@@ -64,9 +65,9 @@ _DEFAULT_MAX_DYADIC = 7
 _DEFAULT_PATH_SEED = 20226
 
 _DEFAULT_SETUPS = [
-    dict(label="q=1, R=2", q=1, R=2, seed=4221),
-    dict(label="q=2, R=2", q=2, R=2, seed=4313),
-    dict(label="q=4, R=3", q=4, R=3, seed=4133),
+    dict(label="n=1, R=2", q=1, R=2, seed=4221),
+    dict(label="n=2, R=2", q=2, R=2, seed=4313),
+    dict(label="n=4, R=3", q=4, R=3, seed=4133),
 ]
 
 
@@ -92,16 +93,6 @@ def _per_level_scaled_errors(exact: tuple, approx: tuple) -> np.ndarray:
     return np.array(errors)
 
 
-def _fit_slope(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
-    """Fit log2(y) = slope * x + intercept via OLS; returns (slope, intercept)."""
-    log_y = np.log2(np.where(y > 0, y, np.nan))
-    valid = np.isfinite(log_y)
-    if valid.sum() < 2:
-        return float("nan"), float("nan")
-    coeffs = np.polyfit(x[valid], log_y[valid], 1)
-    return float(coeffs[0]), float(coeffs[1])
-
-
 def _label_to_slug(label: str) -> str:
     """Convert a setup label to a safe filename component."""
     return re.sub(r"[^a-zA-Z0-9]+", "_", label).strip("_")
@@ -125,7 +116,7 @@ def parse_args():
         type=str,
         default=None,
         help=(
-            'JSON list of setup dicts, e.g. \'[{"q":1,"R":2,"seed":42},...]\'. '
+            'JSON list of setup dicts, e.g. \'[{"n":1,"R":2,"seed":42},...]\'. '
             "Each dict may include an optional \"label\" key."
         ),
     )
@@ -156,8 +147,8 @@ def main():
         raw = json.loads(args.setups)
         SETUPS = []
         for s in raw:
-            q, R, seed = s["q"], s["R"], s.get("seed", 0)
-            label = s.get("label", f"q={q}, R={R}")
+            q, R, seed = s["n"], s["R"], s.get("seed", 0)
+            label = s.get("label", f"n={q}, R={R}")
             SETUPS.append(dict(label=label, q=q, R=R, seed=seed))
     else:
         SETUPS = _DEFAULT_SETUPS
@@ -171,7 +162,7 @@ def main():
 
     for setup in SETUPS:
         label = setup["label"]
-        q = setup["q"]
+        q = setup["n"]
         R = setup["R"]
         seed = setup["seed"]
 
@@ -207,7 +198,7 @@ def main():
 
         # Fit slope per level
         for k in range(n_levels):
-            slope, intercept = _fit_slope(x_dyadic, per_level_errors[:, k])
+            slope, intercept = fit_slope(x_dyadic, per_level_errors[:, k])
             print(f"  level {k + 1} slope: {slope:.3f}")
             rate_rows.append(dict(
                 label=label, q=q, R=R,
@@ -242,7 +233,7 @@ def main():
         ax.set_xlabel("dyadic order $p$")
         ax.set_ylabel(r"$\delta V_{n,p}$")
         ax.set_title(
-            fr"FSSK - Euler convergence  $q={q},\,R={R}$")  # fr"($J={J},\,N={N},\,m={m},\,d={d}$)"        ax.set_xticks(DYADIC_ORDERS)
+            fr"FSSK - Euler convergence  $n={q},\,R={R}$")  # fr"($J={J},\,N={N},\,m={m},\,d={d}$)"        ax.set_xticks(DYADIC_ORDERS)
         ax.minorticks_on()
         ax.grid(True, which="minor", alpha=0.12)
         ax.legend(ncol=min(n_levels, 4), loc="upper right")

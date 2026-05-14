@@ -14,8 +14,8 @@ where
 and ``Y`` is the projected path.  The scheme is intended as a transparent
 numerical-validation reference for exact/quadratic Volterra algorithms.
 
-Only the q=1 fractional case is implemented here.  This is the case needed for
-checking ``VolterraKernel.fractional(beta=..., A=...)`` against a direct
+Only the n=1 fractional case is implemented here.  This is the case needed for
+checking ``ConvolutionKernel.fractional(beta=..., A=...)`` against a direct
 tensor-algebra-valued Volterra equation solver.
 
 The optional ``dyadic_order`` parameter linearly refines each input interval
@@ -89,7 +89,7 @@ def fractional_pc_vsig(
         Fractional parameter in ``K_beta(u) = u**(beta - 1) / Gamma(beta)``.
         This is static for JIT compilation.
     A:
-        Projection matrix with shape ``(1, m, d)`` or ``(m, d)``.  Only q=1 is
+        Projection matrix with shape ``(1, m, d)`` or ``(m, d)``.  Only n=1 is
         supported.
     dt:
         Scalar step size or a one-dimensional array of step sizes of length
@@ -147,7 +147,7 @@ def fractional_pc_vsig(
     dX = X if increment_input else jnp.diff(X, axis=axis_norm)
     dX_time = jnp.moveaxis(dX, axis_norm, 0)
 
-    # q=1 projection: dY[..., a] = sum_d A[0, a, d] dX[..., d].
+    # n=1 projection: dY[..., a] = sum_d A[0, a, d] dX[..., d].
     dY_time = jnp.einsum("md,...d->...m", A[0].astype(dX_time.dtype), dX_time)
 
     return fractional_pc_vsig_from_increments(
@@ -192,7 +192,7 @@ def fractional_pc_vsig_from_increments(
     Parameters
     ----------
     dY:
-        Projected q=1 increments with trailing shape ``(m,)``.  The time axis is
+        Projected n=1 increments with trailing shape ``(m,)``.  The time axis is
         selected by ``axis``.
     beta:
         Fractional parameter in ``K_beta(u) = u**(beta - 1) / Gamma(beta)``.
@@ -635,7 +635,7 @@ def _normalize_A(A: Array) -> Array:
         return A
 
     raise ValueError(
-        "Only q=1 projections are supported. "
+        "Only n=1 projections are supported. "
         "A must have shape (m, d) or (1, m, d)."
     )
 

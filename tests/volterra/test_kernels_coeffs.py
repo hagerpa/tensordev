@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tensordev.volterra import VolterraCoefficients, VolterraKernel, FractionalKernel, GammaKernel
+from tensordev.volterra import VolterraCoefficients, ConvolutionKernel, FractionalKernel, GammaKernel
 from tensordev.volterra.coeffs import validate_volterra_coefficients
 
 

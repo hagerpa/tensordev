@@ -25,6 +25,8 @@ savefig_fig(fig, stem, formats)    → save fig to stem.{fmt} for each fmt
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Iterable
 
@@ -51,7 +53,6 @@ _LATEX_PREAMBLE = r"\usepackage{amsmath}"
 _USE_LATEX = False
 
 try:
-    import subprocess
     subprocess.run(["latex", "--version"], capture_output=True, check=True, timeout=5)
     _USE_LATEX = True
 except Exception:
@@ -80,7 +81,7 @@ mpl.rcParams.update({
     # --- figure size & DPI ------------------------------------------------
     "figure.figsize":  (HALF_WIDTH, HALF_WIDTH / _HALF_ASPECT),
     "figure.dpi":       120,
-    "savefig.dpi":      300,
+    "savefig.dpi":      600,
     "savefig.bbox":     "tight",
 
     # --- font sizes (calibrated for HALF_WIDTH target) --------------------
@@ -195,10 +196,14 @@ def savefig_fig(
     dpi : int, optional — overrides savefig.dpi rcParam
     """
     stem = Path(stem)
-    kw = dict(bbox_inches="tight")
+    kw = dict(bbox_inches="tight", pad_inches=0)
     if dpi is not None:
         kw["dpi"] = dpi
+    _pdfcrop = shutil.which("pdfcrop")
     for fmt in formats:
         path = stem.with_suffix(f".{fmt}")
         fig.savefig(path, **kw)
+        if fmt == "pdf" and _pdfcrop:
+            subprocess.run([_pdfcrop, str(path), str(path)],
+                           capture_output=True, check=False)
         print(f"  Saved: {path}")

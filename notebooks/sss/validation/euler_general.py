@@ -8,10 +8,10 @@ from Part I, Proposition ``mean_reverting_prop``:
 
 where
 
-    d(Bx)^ell_t = sum_{p=1}^q b[p, ell] A[p] dx_t.
+    d(Bx)^ell_t = sum_{p=1}^n b[p, ell] A[p] dx_t.
 
 It is intended as a transparent numerical-validation reference for the exact
-Part II algorithms. It is general in q, R, m and truncation. The optional
+Part II algorithms. It is general in n, R, m and truncation. The optional
 ``dyadic_order`` parameter linearly refines each input interval into
 ``2**dyadic_order`` Euler substeps by splitting both increments and time steps
 uniformly.

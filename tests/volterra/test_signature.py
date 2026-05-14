@@ -11,7 +11,7 @@ import pytest
 
 from tensordev.core.jax import Jax
 from tensordev.development import path_signature
-from tensordev.volterra import VolterraKernel, FractionalKernel, GammaKernel, vsig, vsig_fft
+from tensordev.volterra import ConvolutionKernel, FractionalKernel, GammaKernel, vsig, vsig_fft
 from tensordev.volterra.eval_general import eval_e as eval_e_general
 from tensordev.volterra.eval_general import eval_vte as eval_vte_general
 from tensordev.volterra.eval_scalar import eval_vte as eval_vte_scalar
@@ -242,7 +242,7 @@ def test_vsig_fft_dyadic_refinement_matches_vsig(dyadic_order):
 
 
 def test_vsig_fft_raises_for_q_gt_one():
-    """vsig_fft raises NotImplementedError for q > 1 kernels."""
+    """vsig_fft raises NotImplementedError for n > 1 kernels."""
     A = jnp.zeros((2, 2, 4), dtype=jnp.float64)
     A = A.at[0, :, :2].set(jnp.eye(2))
     A = A.at[1, :, 2:].set(jnp.eye(2))

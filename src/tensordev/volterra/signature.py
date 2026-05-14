@@ -1,4 +1,4 @@
-"""VolterraSignature — composition wrapper around VolterraKernel."""
+"""VolterraSignature — composition wrapper around ConvolutionKernel."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -7,7 +7,7 @@ from typing import Optional
 import jax
 
 from tensordev.core.universal import DenseElem
-from tensordev.volterra.kernel import VolterraKernel, FractionalKernel, GammaKernel
+from tensordev.volterra.kernel import ConvolutionKernel, FractionalKernel, GammaKernel
 from tensordev.volterra.iteration import vsig as _vsig
 
 Array = jax.Array
@@ -17,7 +17,7 @@ Array = jax.Array
 @dataclass(frozen=True, slots=True)
 class VolterraSignature:
     """
-    Thin wrapper around :class:`VolterraKernel` that bundles a truncation level.
+    Thin wrapper around :class:`ConvolutionKernel` that bundles a truncation level.
 
     Parameters
     ----------
@@ -27,7 +27,7 @@ class VolterraSignature:
         Tensor truncation level. Required. Static (changes cause retracing).
     """
 
-    kernel: VolterraKernel
+    kernel: ConvolutionKernel
     trunc: int = field(metadata={"static": True})
 
     def __post_init__(self) -> None:

@@ -26,11 +26,12 @@ import pandas as pd
 jax.config.update("jax_enable_x64", True)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # notebooks/
 
 from tensordev.sss import StateSpaceSignature
 from tensordev.sss.state_update import fssk_state_from_coef
-from xla_utils import compile_and_profile
-from regime_configs import REGIMES
+from _validation_util.xla_utils import compile_and_profile
+from fssk_setup import REGIMES, random_fssk
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -71,34 +72,6 @@ def parse_args():
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def random_fssk_params(
-    *, q: int, R: int, m: int, d: int, seed: int,
-    eig_min: float = 0.1, eig_max: float = 1.5, jordan_alpha: float = 0.25,
-    dtype=np.float64,
-):
-    """Generate random FSSK parameters (Lambda, A, b)."""
-    rng = np.random.default_rng(seed)
-    eigs = rng.uniform(eig_min, eig_max, size=R)
-    Jmat = np.diag(eigs)
-    for i in range(R - 1):
-        Jmat[i, i + 1] = jordan_alpha
-    G = rng.normal(size=(R, R))
-    Q, _ = np.linalg.qr(G)
-    Lambda = Q @ Jmat @ Q.T
-    A = np.empty((q, m, d), dtype=dtype)
-    for p in range(q):
-        G = rng.normal(size=(d, m) if m <= d else (m, d))
-        Qp, _ = np.linalg.qr(G)
-        A[p] = Qp.T if m <= d else Qp
-    b = rng.normal(size=(q, R))
-    b /= np.sum(np.abs(b), axis=0, keepdims=True)
-    return (
-        jnp.asarray(Lambda.astype(dtype)),
-        jnp.asarray(A.astype(dtype)),
-        jnp.asarray(b.astype(dtype)),
-    )
-
 
 def build_design(cfg: "RegimeConfig") -> pd.DataFrame:
     """Delegate to cfg.sample_flop() — uniform random sampling over ranges."""
@@ -157,14 +130,12 @@ def main():
 
         print(
             f"[{idx + 1:04d}/{len(df_design)}]  "
-            f"q={q}  J={J}  R={R}  N={N}  m={m}  d={d}",
+            f"n={q}  J={J}  R={R}  N={N}  m={m}  d={d}",
             flush=True,
         )
 
         # Generate FSSK parameters (concrete arrays for Lambda, A, b).
-        Lambda, A, b = random_fssk_params(
-            q=q, R=R, m=m, d=d, seed=seed0 + idx
-        )
+        Lambda, A, b = random_fssk(q=q, R=R, m=m, d=d, seed=seed0 + idx, eig_min=0.1, eig_max=1.5, normalise_b=False)
 
         # Construct the StateSpaceSignature object.
         # This step does NOT run expensive JAX ops; it only stores parameters.
@@ -248,7 +219,7 @@ def main():
         # experiment.
         coef_runtime = {}
         if args.coef_runtime_repeats > 0:
-            from timing_utils import aggregate_timing, time_hot_calls, time_warmup
+            from _validation_util.timing_utils import aggregate_timing, time_hot_calls, time_warmup
 
             coef_jit = jax.jit(coef_fn)
             time_warmup(coef_jit, dt_scalar, n_warmup=1)

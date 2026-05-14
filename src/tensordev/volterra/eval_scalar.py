@@ -18,10 +18,10 @@ def eval_vte(
     y: Array,
     coef: VolterraCoefficients,
 ) -> DenseElem:
-    r"""Evaluate ``v ⊗_N E`` via the Horner scheme (Algorithm EvalVtE, q=1).
+    r"""Evaluate ``v ⊗_N E`` via the Horner scheme (Algorithm EvalVtE, n=1).
 
     Computes v' = v ⊗_N E directly without forming E first, following
-    the Horner-type algorithm from the paper (scalar case q=1).
+    the Horner-type algorithm from the paper (scalar case n=1).
     The outer loop over output levels n is data-independent and can be
     parallelised; the inner recursion over k is sequential.
 
@@ -38,10 +38,10 @@ def eval_vte(
     if coef.trunc <= 0:
         raise ValueError(f"trunc must be positive, got {coef.trunc}.")
     if coef.q != 1:
-        raise ValueError(f"Horner scheme requires q == 1, got q={coef.q}.")
+        raise ValueError(f"Horner scheme requires n == 1, got n={coef.q}.")
     if coef.alpha.shape[-2:] != (1, coef.trunc):
         raise ValueError(
-            "For q == 1, alpha.shape[-2:] must be (1, trunc); "
+            "For n == 1, alpha.shape[-2:] must be (1, trunc); "
             f"got {coef.alpha.shape[-2:]} and trunc={coef.trunc}."
         )
 

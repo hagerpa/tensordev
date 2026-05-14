@@ -23,9 +23,9 @@ def eval_e(
     r"""Evaluate the packed multi-index local Volterra increment ``E``.
 
     The returned dense element has levels ``0, ..., trunc`` and degree-zero
-    level equal to zero.  This evaluator implements the general ``q >= 1``
+    level equal to zero.  This evaluator implements the general ``n >= 1``
     packed multi-index recursion under the coefficient symmetry hypothesis.
-    In the outer algorithm it is used for ``q > 1``; ``q == 1`` has a cheaper
+    In the outer algorithm it is used for ``n > 1``; ``n == 1`` has a cheaper
     scalar fast path in :mod:`tensordev.volterra.eval_scalar`.
     """
     e_first = _eval_e_first_on(y, coef, core=_CORE)
@@ -88,9 +88,9 @@ def _eval_e_first_on(
     q = coef.q
     global_idx_by_deg, succ_local_by_n_r = multiindex_batched_navigation(q, N - 1)
     inv_factorial = coef.layout.inv_factorial.astype(dtype)
-    back_trans = coef.layout.backward_transition.astype(dtype)  # (layout.size, q)
+    back_trans = coef.layout.backward_transition.astype(dtype)  # (layout.size, n)
 
-    # F_stack[n]: DenseElem, level k shape → batch + (num_n, q, m**k)
+    # F_stack[n]: DenseElem, level k shape → batch + (num_n, n, m**k)
     F_stack: list[DenseElem | None] = [None] * N
 
     for n in range(N - 1, -1, -1):
@@ -101,14 +101,14 @@ def _eval_e_first_on(
         # scale factors: shape (num_n,)
         scale_n = inv_factorial[idx_n]
 
-        # alpha[..., :, idx_n] → batch + (q, num_n)
-        # moveaxis → batch + (num_n, q); [..., None] → batch + (num_n, q, 1)
+        # alpha[..., :, idx_n] → batch + (n, num_n)
+        # moveaxis → batch + (num_n, n); [..., None] → batch + (num_n, n, 1)
         alpha_gathered = jnp.moveaxis(alpha[..., :, idx_n], -1, -2)
         f_base_n = alpha_gathered[..., None] * scale_n[:, None, None]
         f_stack_n: DenseElem = (f_base_n,)
 
         if n <= N - 2:
-            succ_local_r = succ_local_by_n_r[n]  # tuple of q numpy int arrays
+            succ_local_r = succ_local_by_n_r[n]  # tuple of n numpy int arrays
 
             for r in range(q):
                 sl = succ_local_r[r]  # shape (num_n,) — local indices into degree n+1
@@ -116,8 +116,8 @@ def _eval_e_first_on(
                 # transition scalars: shape (num_n,)
                 trans_r = back_trans[idx_n, r]
 
-                # F_stack[n+1][k]: batch + (num_{n+1}, q, m**k)
-                # After gather:    batch + (num_n,     q, m**k)
+                # F_stack[n+1][k]: batch + (num_{n+1}, n, m**k)
+                # After gather:    batch + (num_n,     n, m**k)
                 F_gathered = tuple(
                     lvl[..., sl, :, :] for lvl in F_stack[n + 1]
                 )
@@ -137,7 +137,7 @@ def _eval_e_first_on(
 
         F_stack[n] = f_stack_n
 
-    # F_stack[0][k]: batch + (1, q, m**k) → batch + (q, m**k)
+    # F_stack[0][k]: batch + (1, n, m**k) → batch + (n, m**k)
     root: DenseElem = tuple(lvl[..., 0, :, :] for lvl in F_stack[0])
 
     by_final_letter = core.tensor_product(
@@ -150,7 +150,7 @@ def _eval_e_first_on(
 
 
 def _normalize_y_multiindex(y: Array, coef: VolterraCoefficients) -> Array:
-    """Return projected increment with trailing shape ``(q, m)``."""
+    """Return projected increment with trailing shape ``(n, m)``."""
     y = jnp.asarray(y, dtype=coef.alpha.dtype)
     if coef.q == 1 and y.shape[-1:] == (coef.m,) and (y.ndim == 1 or y.shape[-2] != 1):
         return y[..., None, :]

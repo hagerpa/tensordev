@@ -31,7 +31,7 @@ class FSSK:
 
     .. math::
         K_{A,b}^{\Lambda}(t, s)
-        = \sum_{r=1}^q \big(\mathbf 1^\top e^{-\Lambda(t-s)} b_r\big) A_r,
+        = \sum_{r=1}^n \big(\mathbf 1^\top e^{-\Lambda(t-s)} b_r\big) A_r,
 
     where ``A_r in R^{m x d}``, ``b_r in R^R`` and ``Lambda`` is a state-space
     operator providing ``expm`` and shifted linear solves.
@@ -49,8 +49,8 @@ class FSSK:
     def __post_init__(self) -> None:
         """Validate and normalize the kernel arrays.
 
-        The kernel matrices ``A`` are stored with shape ``(q, m, d)`` and the
-        state vectors ``b`` with shape ``(q, R)``. Both arrays are converted to
+        The kernel matrices ``A`` are stored with shape ``(n, m, d)`` and the
+        state vectors ``b`` with shape ``(n, R)``. Both arrays are converted to
         JAX arrays so that the resulting kernel is a valid pytree and can be
         passed into jitted helper functions.
         """
@@ -59,17 +59,17 @@ class FSSK:
 
         if A.ndim != 3:
             raise ValueError(
-                "A must have shape (q, m, d); "
+                "A must have shape (n, m, d); "
                 f"got {tuple(A.shape)}."
             )
         if b.ndim != 2:
             raise ValueError(
-                "b must have shape (q, R); "
+                "b must have shape (n, R); "
                 f"got {tuple(b.shape)}."
             )
         if A.shape[0] != b.shape[0]:
             raise ValueError(
-                "A and b must have the same leading component axis q; "
+                "A and b must have the same leading component axis n; "
                 f"got A.shape[0]={A.shape[0]} and b.shape[0]={b.shape[0]}."
             )
         if b.shape[1] != self.Lambda.state_dim:
@@ -98,7 +98,7 @@ class FSSK:
 
         .. math::
             K_{A,b}^{\Lambda}(t,s)
-            = \sum_{r=1}^q \big(\mathbf 1^\top e^{-\Lambda (t-s)} b_r\big) A_r,
+            = \sum_{r=1}^n \big(\mathbf 1^\top e^{-\Lambda (t-s)} b_r\big) A_r,
 
         where:
 
@@ -118,9 +118,9 @@ class FSSK:
         Lambda : Array
             Dense state matrix with shape ``(R, R)``.
         A : Array
-            Kernel matrices with shape ``(q, m, d)``.
+            Kernel matrices with shape ``(n, m, d)``.
         b : Array
-            State vectors with shape ``(q, R)``.
+            State vectors with shape ``(n, R)``.
         quad_order : int, default=32
             Number of contour quadrature nodes used by :meth:`coef`.
 
@@ -157,7 +157,7 @@ class FSSK:
 
         .. math::
             K_{A,b}^{\Lambda}(t,s)
-            = \sum_{r=1}^q \big(\mathbf 1^\top e^{-\Lambda (t-s)} b_r\big) A_r.
+            = \sum_{r=1}^n \big(\mathbf 1^\top e^{-\Lambda (t-s)} b_r\big) A_r.
 
         For each component :math:`r`, the vector :math:`b_r` is assembled
         blockwise in the Jordan basis.
@@ -223,7 +223,7 @@ class FSSK:
         Parameters
         ----------
         A : Array
-            Kernel matrices with shape ``(q, m, d)``.
+            Kernel matrices with shape ``(n, m, d)``.
         real_rates, real_sizes : array-like
             Rates and Jordan block sizes for the real scalar poles.
         osc_decays, osc_freqs, osc_sizes : array-like
@@ -232,10 +232,10 @@ class FSSK:
         alpha, beta, delta : Array, optional
             Prony coefficients used to construct ``b``.
 
-            - ``alpha`` must have shape ``(q, sum(real_sizes))`` when real
+            - ``alpha`` must have shape ``(n, sum(real_sizes))`` when real
               blocks are present.
             - ``beta`` and ``delta`` must both have shape
-              ``(q, sum(osc_sizes))`` when oscillatory blocks are present.
+              ``(n, sum(osc_sizes))`` when oscillatory blocks are present.
 
         quad_order : int, default=32
             Number of contour quadrature nodes used by :meth:`coef`.
@@ -279,7 +279,7 @@ class FSSK:
 
         .. math::
             K_{A,b}^{\Lambda}(t,s)
-            = \sum_{r=1}^q \big(\mathbf 1^\top e^{-\Lambda (t-s)} b_r\big) A_r.
+            = \sum_{r=1}^n \big(\mathbf 1^\top e^{-\Lambda (t-s)} b_r\big) A_r.
 
         Here :math:`\Lambda` is not passed as a dense matrix. Instead it is
         specified through its Jordan structure:
@@ -295,9 +295,9 @@ class FSSK:
         Parameters
         ----------
         A : Array
-            Kernel matrices with shape ``(q, m, d)``.
+            Kernel matrices with shape ``(n, m, d)``.
         b : Array
-            State vectors with shape ``(q, R)``, expressed in the Jordan basis
+            State vectors with shape ``(n, R)``, expressed in the Jordan basis
             induced by the supplied block data.
         real_rates, real_sizes : array-like
             Rates and Jordan block sizes for the real scalar poles.
@@ -356,7 +356,7 @@ class FSSK:
 
         - ``E``:   ``batch_shape + (R, R)``
         - ``psi``: ``batch_shape + (M, R)``
-        - ``phi``: ``batch_shape + (q, Mphi, R, R)``
+        - ``phi``: ``batch_shape + (n, Mphi, R, R)``
 
         where ``M`` and ``Mphi`` are determined by the packed multi-index layout.
 
@@ -428,7 +428,7 @@ def _eval_phi_psi(
 
     - ``E``: ``batch_shape + (R, R)``,
     - ``psi_hat``: ``batch_shape + (M, R)``,
-    - ``phi_hat``: ``batch_shape + (q, M, R, R)``.
+    - ``phi_hat``: ``batch_shape + (n, M, R, R)``.
 
     Only the prefix of ``phi_hat`` indexed by ``|ell| <= trunc - 2`` is used by
     the FSSK recursion.
@@ -476,7 +476,7 @@ def _eval_phi_psi(
         out_axes=0,
     )(zeta)
 
-    # dt_flat: (B,), r: (m, B, R), u: (m, B, q, R)
+    # dt_flat: (B,), r: (m, B, R), u: (m, B, n, R)
     beta = jnp.einsum("mbr,pr->mbp", r, b_c)
     gamma = jnp.prod(
         beta[None, :, :, :] ** ell.astype(complex_dtype)[:, None, None, :],
@@ -502,7 +502,7 @@ def _eval_phi_psi(
         axis=1,
     )  # (B, M, R)
 
-    outer = u[:, :, :, :, None] * r[:, :, None, None, :]  # (m, B, q, R, R)
+    outer = u[:, :, :, :, None] * r[:, :, None, None, :]  # (m, B, n, R, R)
     phi = jnp.sum(
         2.0
         * jnp.real(
@@ -511,8 +511,8 @@ def _eval_phi_psi(
             * outer[None, :, :, :, :, :]
         ),
         axis=1,
-    )  # (M, B, q, R, R)
-    phi = jnp.transpose(phi, (1, 2, 0, 3, 4))  # (B, q, M, R, R)
+    )  # (M, B, n, R, R)
+    phi = jnp.transpose(phi, (1, 2, 0, 3, 4))  # (B, n, M, R, R)
 
     E = E.reshape(batch_shape + (R, R))
     psi = psi.reshape(batch_shape + psi.shape[-2:])

@@ -313,7 +313,7 @@ def _diag_psi_row_word_confluent(
     return out
 
 
-@pytest.mark.parametrize("q", [1, 3])
+@pytest.mark.parametrize("n", [1, 3])
 def test_multiindex_layout_starts_with_unique_empty_word(q):
     ker = FSSK.from_matrix(
         Lambda=jnp.zeros((1, 1), dtype=jnp.float64),

@@ -35,8 +35,8 @@ class VolterraCoefficients:
 
         K_{s,t}^{w(ell) p, tau} / (t - s)^{|ell| + 1}.
 
-    Consequently, ``alpha`` has trailing shape ``(q, M)``, where
-    ``M = #{ell in N^q : |ell| <= trunc - 1}``.  All axes before ``(q, M)``
+    Consequently, ``alpha`` has trailing shape ``(n, M)``, where
+    ``M = #{ell in N^n : |ell| <= trunc - 1}``.  All axes before ``(n, M)``
     are generic leading axes.  For grid precomputation these leading axes are
     usually ``(source_interval, readout_index)``.
     """
@@ -45,7 +45,7 @@ class VolterraCoefficients:
     trunc: int = field(metadata={"static": True})
     m: int = field(metadata={"static": True})
     q: int = field(metadata={"static": True})
-    alpha: Array        # leading + (q, M)
+    alpha: Array        # leading + (n, M)
     valid: Array        # leading, boolean mask for Delta^3-valid triples
 
     @property

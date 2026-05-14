@@ -260,13 +260,13 @@ def fssk_sigkernel(
         mixed-derivative formula
 
         .. math::
-            G_{q,p}^{i,j} = k(A_q X_{i+1}, A_p Y_{j+1})
+            G_{n,p}^{i,j} = k(A_q X_{i+1}, A_p Y_{j+1})
                            - k(A_q X_i,   A_p Y_{j+1})
                            - k(A_q X_{i+1}, A_p Y_j)
                            + k(A_q X_i,   A_p Y_j)
 
         followed by contraction
-        :math:`\\gamma[R,S] = \\sum_{q,p} b_{q,R}\\, G_{q,p}\\, b_{p,S}`.
+        :math:`\\gamma[R,S] = \\sum_{n,p} b_{n,R}\\, G_{n,p}\\, b_{p,S}`.
         The default ``LinearKernel(scale=1.0)`` is equivalent to the original
         increment-based projection.
 
@@ -782,7 +782,7 @@ def _build_gamma_grid_static(X_nodes, Y_nodes, *, kernel, static_kernel, pairwis
 
     .. math::
         \\gamma[R, S]
-        = \\sum_{q, p} b_{q,R}\\,
+        = \\sum_{n, p} b_{n,R}\\,
           \\bigl[
             k(A_q X_{i+1}, A_p Y_{j+1})
           - k(A_q X_i,   A_p Y_{j+1})
@@ -799,8 +799,8 @@ def _build_gamma_grid_static(X_nodes, Y_nodes, *, kernel, static_kernel, pairwis
     X_nodes : ``(bx, s_nodes, d)``
     Y_nodes : ``(by, t_nodes, d)``
     """
-    A = kernel.A.astype(dtype)   # (q, m, d)
-    b = kernel.b.astype(dtype)   # (q, R)
+    A = kernel.A.astype(dtype)   # (n, m, d)
+    b = kernel.b.astype(dtype)   # (n, R)
 
     batch_shape_x = X_nodes.shape[:-2]
     batch_shape_y = Y_nodes.shape[:-2]
@@ -813,15 +813,15 @@ def _build_gamma_grid_static(X_nodes, Y_nodes, *, kernel, static_kernel, pairwis
     Y_flat = Y_nodes.reshape(-1, t_nodes, Y_nodes.shape[-1]).astype(dtype)
     bx, by = X_flat.shape[0], Y_flat.shape[0]
 
-    # Projected nodes: AX[b, i, q, :] = A[q] @ X_flat[b, i, :]
-    AX = jnp.einsum("qmd,bid->biqm", A, X_flat)  # (bx, s_nodes, q, m)
-    AY = jnp.einsum("qmd,bjd->bjqm", A, Y_flat)  # (by, t_nodes, q, m)
+    # Projected nodes: AX[b, i, n, :] = A[n] @ X_flat[b, i, :]
+    AX = jnp.einsum("qmd,bid->biqm", A, X_flat)  # (bx, s_nodes, n, m)
+    AY = jnp.einsum("qmd,bjd->bjqm", A, Y_flat)  # (by, t_nodes, n, m)
     AX_flat = AX.reshape(bx, s_nodes * q, m)
     AY_flat = AY.reshape(by, t_nodes * q, m)
 
     if pairwise:
         batch_shape = batch_shape_x + batch_shape_y
-        # Gram_matrix → (bx, by, s_nodes*q, t_nodes*q); merge outer batch dims
+        # Gram_matrix → (bx, by, s_nodes*n, t_nodes*n); merge outer batch dims
         K = static_kernel.Gram_matrix(AX_flat, AY_flat).reshape(bx * by, s_nodes * q, t_nodes * q)
     else:
         if batch_shape_x != batch_shape_y:
@@ -829,12 +829,12 @@ def _build_gamma_grid_static(X_nodes, Y_nodes, *, kernel, static_kernel, pairwis
                 f"Batchwise evaluation requires matching batch shapes; got {batch_shape_x} and {batch_shape_y}."
             )
         batch_shape = batch_shape_x
-        K = static_kernel.batch_kernel(AX_flat, AY_flat)  # (bx, s_nodes*q, t_nodes*q)
+        K = static_kernel.batch_kernel(AX_flat, AY_flat)  # (bx, s_nodes*n, t_nodes*n)
 
-    # Reshape, transpose q-axes adjacent, apply discrete mixed derivative, contract with b
+    # Reshape, transpose n-axes adjacent, apply discrete mixed derivative, contract with b
     K = K.reshape(bx * by if pairwise else bx, s_nodes, q, t_nodes, q)
-    K = jnp.transpose(K, (0, 1, 3, 2, 4))             # (..., s_nodes, t_nodes, q, q)
-    G = K[:, 1:, 1:] - K[:, :-1, 1:] - K[:, 1:, :-1] + K[:, :-1, :-1]  # (..., s_iv, t_iv, q, q)
+    K = jnp.transpose(K, (0, 1, 3, 2, 4))             # (..., s_nodes, t_nodes, n, n)
+    G = K[:, 1:, 1:] - K[:, :-1, 1:] - K[:, 1:, :-1] + K[:, :-1, :-1]  # (..., s_iv, t_iv, n, n)
     gamma_cell = jnp.einsum("qR,bijqp,pS->bijRS", b, G, b)
     gamma_padded = jnp.pad(gamma_cell, ((0, 0), (0, 1), (0, 1), (0, 0), (0, 0)))
     return gamma_padded, batch_shape

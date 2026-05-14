@@ -36,7 +36,7 @@ def init_state(
     ----------
     coef : FSSKCoefficients
         Scalar step-local FSSK coefficients. This function requires
-        ``coef.q == 1``.
+        ``coef.n == 1``.
     core : Jax
         JAX core object. It is accepted for interface consistency with the
         non-scalar recursion module, but is not used directly here.
@@ -49,7 +49,7 @@ def init_state(
     del core
 
     if coef.q != 1:
-        raise ValueError(f"recursion_scalar requires coef.q == 1, got {coef.q}.")
+        raise ValueError(f"recursion_scalar requires coef.n == 1, got {coef.q}.")
 
     # First-on format: trunc levels, index r = degree r+1 (degree-0 is always zero).
     batch_shape = coef.E.shape[:-2]
@@ -91,7 +91,7 @@ def eval_fg(
         Projected path increment with shape ``batch + (m,)``.
     coef : FSSKCoefficients
         Scalar step-local FSSK coefficients. This function requires
-        ``coef.q == 1``.
+        ``coef.n == 1``.
     core : Jax
         JAX core object.
 
@@ -113,7 +113,7 @@ def eval_fg(
         explicit family axis.
     """
     if coef.q != 1:
-        raise ValueError(f"recursion_scalar requires coef.q == 1, got {coef.q}.")
+        raise ValueError(f"recursion_scalar requires coef.n == 1, got {coef.q}.")
     if y.shape[-1] != coef.m:
         raise ValueError(
             f"y must have trailing shape ({coef.m},), got {tuple(y.shape)}."
@@ -199,7 +199,7 @@ def update_state(
         Projected path increment with shape ``batch + (m,)``.
     coef : FSSKCoefficients
         Scalar step-local FSSK coefficients. This function requires
-        ``coef.q == 1``.
+        ``coef.n == 1``.
     core : Jax
         JAX core object.
 
@@ -209,7 +209,7 @@ def update_state(
         Updated state in the same representation as ``Z``.
     """
     if coef.q != 1:
-        raise ValueError(f"recursion_scalar requires coef.q == 1, got {coef.q}.")
+        raise ValueError(f"recursion_scalar requires coef.n == 1, got {coef.q}.")
     if len(Z) != coef.trunc:
         raise ValueError(
             f"Z must have {coef.trunc} homogeneous levels (first-on), got {len(Z)}."

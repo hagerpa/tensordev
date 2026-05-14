@@ -29,7 +29,7 @@ class StateSpaceSignature:
     state:
         Hidden recursion seed in **first-on format**: ``trunc`` levels where
         level ``r`` carries degree ``r+1`` and has trailing shape
-        ``(q, 1, R, m**(r+1))``. Type: :data:`DenseElemFirstOn`.
+        ``(n, 1, R, m**(r+1))``. Type: :data:`DenseElemFirstOn`.
         Defaults to ``None``, in which case a zero state is created.
     """
 

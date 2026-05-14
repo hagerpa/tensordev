@@ -71,7 +71,7 @@ def fssk_state(
         Carry hidden state across blocks.
     initial_state:
         Optional seed in first-on format: ``trunc`` levels where level ``r``
-        has trailing shape ``(q, 1, R, m**(r+1))``.
+        has trailing shape ``(n, 1, R, m**(r+1))``.
     output_starting_state:
         Prepend seed state to the output.
     increment_input:
@@ -149,8 +149,8 @@ def fssk_state_from_coef(
     Parameters
     ----------
     y:
-        Projected increments.  For ``q==1``, trailing shape ``(m,)`` or
-        ``(1, m)``; for ``q>1``, trailing shape ``(q, m)``.
+        Projected increments.  For ``n==1``, trailing shape ``(m,)`` or
+        ``(1, m)``; for ``n>1``, trailing shape ``(n, m)``.
         ``axis`` is the step axis.
     coef:
         FSSK coefficients.  Leading axes are broadcast / time axes.
@@ -162,7 +162,7 @@ def fssk_state_from_coef(
         Carry hidden state across blocks.
     initial_state:
         Optional seed in first-on format: ``trunc`` levels where level ``r``
-        has trailing shape ``(q, 1, R, m**(r+1))``.
+        has trailing shape ``(n, 1, R, m**(r+1))``.
     output_starting_state:
         Prepend seed state to the output.
     """
@@ -317,7 +317,7 @@ def fssk_vsig(
         Carry hidden state across blocks (default ``True``).
     initial_state:
         Optional seed in first-on format: ``trunc`` levels where level ``r``
-        has trailing shape ``(q, 1, R, m**(r+1))``.
+        has trailing shape ``(n, 1, R, m**(r+1))``.
     output_starting_state:
         Include the readout of the seed state (default ``False``).
     tau_dt:
@@ -367,7 +367,7 @@ def fssk_readout(
     state:
         Hidden FSSK state in **first-on format**: ``trunc`` levels where
         level ``r`` (tuple index) carries degree ``r+1`` and has trailing
-        shape ``(q, 1, R, m**(r+1))``.  Type: :data:`DenseElemFirstOn`.
+        shape ``(n, 1, R, m**(r+1))``.  Type: :data:`DenseElemFirstOn`.
     kernel:
         Finite-state-space Volterra kernel supplying ``Lambda`` and ``b``.
     tau_dt:
@@ -435,12 +435,12 @@ def _normalize_projected_y(y_time: Array, coef: FSSKCoefficients) -> Array:
         if y_time.ndim >= 3 and y_time.shape[-2:] == (1, coef.m):
             return y_time[..., 0, :]
         raise ValueError(
-            f"For q=1, y must have trailing shape (m,) or (1, m); "
+            f"For n=1, y must have trailing shape (m,) or (1, m); "
             f"expected m={coef.m}, got shape {y_time.shape}."
         )
     if y_time.ndim < 3 or y_time.shape[-2:] != (coef.q, coef.m):
         raise ValueError(
-            f"For q>1, y must have trailing shape ({coef.q}, {coef.m}), "
+            f"For n>1, y must have trailing shape ({coef.q}, {coef.m}), "
             f"got {y_time.shape}."
         )
     return y_time
