@@ -241,8 +241,9 @@ def test_vsig_fft_dyadic_refinement_matches_vsig(dyadic_order):
     _assert_fft_allclose(got, ref)
 
 
-def test_vsig_fft_raises_for_q_gt_one():
-    """vsig_fft raises NotImplementedError for n > 1 kernels."""
+def test_vsig_fft_q_gt_one_runs():
+    """vsig_fft with q = 2 completes without shape errors."""
+    # q=2 kernel: two 2×4 projection matrices on a 4-d path.
     A = jnp.zeros((2, 2, 4), dtype=jnp.float64)
     A = A.at[0, :, :2].set(jnp.eye(2))
     A = A.at[1, :, 2:].set(jnp.eye(2))
@@ -250,5 +251,8 @@ def test_vsig_fft_raises_for_q_gt_one():
     kernel = FractionalKernel(beta=beta, A=A)
     X = jnp.zeros((3, 4), dtype=jnp.float64)
 
-    with pytest.raises(NotImplementedError):
-        vsig_fft(X, kernel=kernel, dt=1.0, trunc=2)
+    result = vsig_fft(X, kernel=kernel, dt=1.0, trunc=2)
+    assert len(result) == 3           # levels 0, 1, 2
+    assert result[0].shape == (1,)    # scalar unit
+    assert result[1].shape == (2,)    # m = 2
+    assert result[2].shape == (4,)    # m**2 = 4

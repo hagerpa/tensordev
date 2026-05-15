@@ -387,15 +387,23 @@ class FSSK:
         b = self.b.astype(real_dtype)
 
         layout = build_multiindex_layout(self.q, trunc - 1)
-        E, psi, phi_full = _eval_phi_psi(
+        dt_flat = dt_arr.reshape(-1)
+        zeta_c, slope, gamma, r, u = prepare_coef(
             self.Lambda,
             b,
-            dt_arr,
+            dt_flat,
             layout.ell,
-            trunc=trunc,
             quad_order=self.quad_order,
             dtype=real_dtype,
         )
+        psi_flat = eval_psi(self.Lambda, dt_flat, zeta_c, slope, gamma, r, dtype=real_dtype)
+        E_flat, phi_flat = eval_phi(self.Lambda, dt_flat, zeta_c, slope, gamma, u, r, dtype=real_dtype)
+
+        batch_shape = dt_arr.shape
+        R = self.state_dim
+        E = E_flat.reshape(batch_shape + (R, R))
+        psi = psi_flat.reshape(batch_shape + psi_flat.shape[-2:]).astype(real_dtype)
+        phi_full = phi_flat.reshape(batch_shape + phi_flat.shape[-4:]).astype(real_dtype)
         mphi = num_multiindices_leq(self.q, trunc - 2)
         phi = phi_full[..., :mphi, :, :]
         return FSSKCoefficients(
@@ -410,37 +418,24 @@ class FSSK:
         )
 
 
-@partial(jax.jit, static_argnames=("trunc", "quad_order", "dtype"))
-def _eval_phi_psi(
-        Lambda: Lambda,
+@partial(jax.jit, static_argnames=("quad_order", "dtype"))
+def prepare_coef(
+        lam: Lambda,
         b: Array,
-        dt: Array,
+        dt_flat: Array,
         ell: Array,
         *,
-        trunc: int,
         quad_order: int,
         dtype: jnp.dtype,
-) -> tuple[Array, Array, Array]:
+) -> tuple[Array, Array, Array, Array, Array]:
+    """Compute quadrature nodes/weights and shared intermediates.
+
+    Returns ``(zeta_c, slope, gamma, r, u)`` all on the flat batch axis
+    ``B = dt_flat.shape[0]``.
     """
-    Evaluate normalized FSSK coefficients using the Laplace quadrature scheme.
-
-    Let ``batch_shape = dt.shape``. Then the returned arrays have shapes
-
-    - ``E``: ``batch_shape + (R, R)``,
-    - ``psi_hat``: ``batch_shape + (M, R)``,
-    - ``phi_hat``: ``batch_shape + (n, M, R, R)``.
-
-    Only the prefix of ``phi_hat`` indexed by ``|ell| <= trunc - 2`` is used by
-    the FSSK recursion.
-    """
-    q, R = int(b.shape[0]), int(b.shape[1])
+    R = int(b.shape[1])
     real_dtype = jnp.dtype(dtype)
     complex_dtype = _complex_dtype_for(real_dtype)
-
-    batch_shape = dt.shape
-    dt_flat = dt.reshape(-1)
-
-    E = Lambda.expm(dt_flat, dtype=real_dtype)
 
     m = quad_order
     j = jnp.arange(1, m + 1, dtype=real_dtype)
@@ -456,35 +451,87 @@ def _eval_phi_psi(
             jnp.asarray(0.2388j, dtype=complex_dtype) * theta.astype(complex_dtype)
             + jnp.asarray(0.25, dtype=complex_dtype)
     )
-    omega = jnp.exp(zeta.astype(complex_dtype)) * slope
     zeta_c = zeta.astype(complex_dtype)
-    tilde_omega = (jnp.exp(zeta_c) / zeta_c) * slope
 
     b_c = b.astype(complex_dtype)
     ones = jnp.ones((R, 1), dtype=complex_dtype)
 
     r = jax.vmap(
-        lambda z: Lambda.solve_shifted_transpose(z, dt_flat, ones, dtype=real_dtype)[..., 0],
+        lambda z: lam.solve_shifted_transpose(z, dt_flat, ones, dtype=real_dtype)[..., 0],
         in_axes=0,
         out_axes=0,
-    )(zeta)
+    )(zeta)  # (m, B, R)
     u = jax.vmap(
         lambda z: jnp.swapaxes(
-            Lambda.solve_shifted(z, dt_flat, b_c.T, dtype=real_dtype), -2, -1
+            lam.solve_shifted(z, dt_flat, b_c.T, dtype=real_dtype), -2, -1
         ),
         in_axes=0,
         out_axes=0,
-    )(zeta)
+    )(zeta)  # (m, B, n, R)
 
-    # dt_flat: (B,), r: (m, B, R), u: (m, B, n, R)
     beta = jnp.einsum("mbr,pr->mbp", r, b_c)
     gamma = jnp.prod(
         beta[None, :, :, :] ** ell.astype(complex_dtype)[:, None, None, :],
         axis=-1,
     )  # (M, m, B)
 
-    phi1_dt = Lambda.phi1(dt_flat, dtype=real_dtype)  # (B, R, R)
-    psi_empty = jnp.sum(phi1_dt, axis=-2)  # (B, R)
+    return zeta_c, slope, gamma, r, u
+
+
+@partial(jax.jit, static_argnames=("rho", "dtype"))
+def eval_psi(
+        lam: Lambda,
+        dt_flat: Array,
+        zeta_c: Array,
+        slope: Array,
+        gamma: Array,
+        r: Array,
+        *,
+        rho: int = 0,
+        dtype: jnp.dtype,
+) -> Array:
+    """Compute normalized rho-weighted psi coefficients.
+
+    Returns shape ``(B, M, R)``.
+    """
+    ez = jnp.exp(zeta_c)
+    inv_z = 1.0 / zeta_c
+
+    if rho == 0:
+        tilde_omega = ez * inv_z * slope
+        h_scale = jnp.ones_like(dt_flat)
+
+    elif rho == 1:
+        # reverse first moment: (1 - theta)
+        tilde_omega = ez * inv_z ** 2 * slope
+        h_scale = dt_flat
+
+    elif rho == 2:
+        # reverse second moment: (1 - theta)^2
+        tilde_omega = 2.0 * ez * inv_z ** 3 * slope
+        h_scale = dt_flat ** 2
+
+    else:
+        raise NotImplementedError(
+            f"FSSK eval_psi only supports rho=0,1,2; got rho={rho}."
+        )
+
+    if rho == 0:
+        phi1_dt = lam.phi1(dt_flat, dtype=jnp.dtype(dtype))  # (B, R, R)
+        psi_empty = jnp.sum(phi1_dt, axis=-2)  # (B, R)
+    else:
+        psi_empty = jnp.sum(
+            2.0
+            * jnp.real(
+                tilde_omega[:, None, None]
+                * gamma[0, :, :, None]
+                * r[:, :, :]
+            ),
+            axis=0,
+        )  # (B, R)
+
+    # Apply absolute local-time scaling to both empty and non-empty coefficients.
+    psi_empty = psi_empty * h_scale[:, None]
 
     psi_tail = jnp.sum(
         2.0
@@ -495,13 +542,33 @@ def _eval_phi_psi(
         ),
         axis=1,
     )  # (M - 1, B, R)
+
+    psi_tail = psi_tail * h_scale[None, :, None]
     psi_tail = jnp.transpose(psi_tail, (1, 0, 2))  # (B, M - 1, R)
 
-    psi = jnp.concatenate(
+    return jnp.concatenate(
         [psi_empty[:, None, :], psi_tail],
         axis=1,
     )  # (B, M, R)
 
+@partial(jax.jit, static_argnames=("dtype",))
+def eval_phi(
+        lam: Lambda,
+        dt_flat: Array,
+        zeta_c: Array,
+        slope: Array,
+        gamma: Array,
+        u: Array,
+        r: Array,
+        *,
+        dtype: jnp.dtype,
+) -> tuple[Array, Array]:
+    """Compute the propagator E and normalized phi coefficients.
+
+    Returns ``(E, phi)`` with shapes ``(B, R, R)`` and ``(B, n, M, R, R)``.
+    """
+    omega = jnp.exp(zeta_c) * slope
+    E = lam.expm(dt_flat, dtype=jnp.dtype(dtype))  # (B, R, R)
     outer = u[:, :, :, :, None] * r[:, :, None, None, :]  # (m, B, n, R, R)
     phi = jnp.sum(
         2.0
@@ -512,13 +579,7 @@ def _eval_phi_psi(
         ),
         axis=1,
     )  # (M, B, n, R, R)
-    phi = jnp.transpose(phi, (1, 2, 0, 3, 4))  # (B, n, M, R, R)
-
-    E = E.reshape(batch_shape + (R, R))
-    psi = psi.reshape(batch_shape + psi.shape[-2:])
-    phi = phi.reshape(batch_shape + phi.shape[-4:])
-
-    return E.astype(real_dtype), psi.astype(real_dtype), phi.astype(real_dtype)
+    return E, jnp.transpose(phi, (1, 2, 0, 3, 4))  # (B, n, M, R, R)
 
 
 def _complex_dtype_for(dtype: jnp.dtype) -> jnp.dtype:
@@ -528,4 +589,4 @@ def _complex_dtype_for(dtype: jnp.dtype) -> jnp.dtype:
     return jnp.dtype(jnp.complex128)
 
 
-__all__ = ["FSSK"]
+__all__ = ["FSSK", "prepare_coef", "eval_psi", "eval_phi"]

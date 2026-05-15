@@ -25,6 +25,8 @@ from jax.scipy.special import betainc, gammaln
 
 from tensordev.util.combinatorics import MultiIndexLayout, build_multiindex_layout
 from tensordev.volterra.coeffs import VolterraCoefficients
+from tensordev.sss.lambdas import Lambda
+from tensordev.sss.kernel import FSSK, prepare_coef, eval_psi
 
 
 Array = jax.Array
@@ -62,7 +64,7 @@ class ConvolutionKernel:
     # ------------------------------------------------------------------
 
     @classmethod
-    def fractional(cls, *, beta: Array, A: Array) -> "FractionalKernel":
+    def fractional(cls, *, beta: Array, A: Array) -> FractionalKernel:
         r"""Construct a multivariate fractional Volterra kernel.
 
         The scalar kernels are
@@ -91,7 +93,7 @@ class ConvolutionKernel:
         scale: Array = 1.0,
         rate: Array = 1.0,
         quad_order: int = 32,
-    ) -> "GammaKernel":
+    ) -> GammaKernel:
         r"""Construct a scalar Gamma Volterra kernel (:math:`n = 1`).
 
         The kernel is
@@ -117,6 +119,22 @@ class ConvolutionKernel:
             Number of Gauss-Legendre nodes used when building coefficients.
         """
         return GammaKernel(beta=beta, A=A, scale=scale, rate=rate, quad_order=quad_order)
+
+    @classmethod
+    def fssk(cls, fssk: FSSK) -> FSSKConvolutionKernel:
+        r"""Construct a finite-state-space Volterra kernel adapter.
+
+        Wraps an :class:`~tensordev.sss.kernel.FSSK` instance so that it
+        satisfies the :class:`ConvolutionKernel` interface.  The scalar
+        kernels are smooth exponential mixtures (:math:`\beta = 1`).
+
+        Parameters
+        ----------
+        fssk : FSSK
+            Finite-state-space kernel to wrap.
+        """
+        return FSSKConvolutionKernel.from_fssk(fssk)
+
 
     # ------------------------------------------------------------------
     # Properties
@@ -440,13 +458,6 @@ class GammaKernel(ConvolutionKernel):
             rho,
         )
 
-from functools import partial
-
-import jax
-import jax.numpy as jnp
-from jax.scipy.special import betainc, gammaln
-
-
 @jax.jit
 def _fractional_alpha(
     s: Array,
@@ -594,4 +605,179 @@ def _gamma_dot_kappa(
     return jnp.where(n == 1.0, dot_n1, dot_ngt1)
 
 
-__all__ = ["ConvolutionKernel", "FractionalKernel", "GammaKernel"]
+def _rho_to_static_int(rho: float | Array) -> int:
+    """Convert rho to a static integer for FSSK eval_psi.
+
+    For FSSK we set beta = 1, so the deduplicated higher-order basis only
+    produces rho in {0, 1, 2}.
+    """
+    rho_val = float(jax.device_get(jnp.asarray(rho)))
+    rho_int = int(round(rho_val))
+
+    if abs(rho_val - rho_int) > 1e-8 or rho_int not in (0, 1, 2):
+        raise NotImplementedError(
+            f"FSSKConvolutionKernel only supports rho in {{0, 1, 2}}, "
+            f"got rho={rho_val}."
+        )
+
+    return rho_int
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True, slots=True)
+class FSSKConvolutionKernel(ConvolutionKernel):
+    """Expose an FSSK kernel through the generic ConvolutionKernel interface.
+
+    This lets the generic Volterra iteration code call:
+
+        kernel.coef(..., rho=...)
+
+    while the coefficient values are computed using the FSSK psi coefficients.
+
+    Notes
+    -----
+    FSSK is smooth/exponential, so beta is fixed to ones(q).
+    """
+
+    lam: Lambda
+    b: Array
+    quad_order: int = field(default=32, metadata={"static": True})
+
+    @classmethod
+    def from_fssk(cls, fssk: FSSK) -> FSSKConvolutionKernel:
+        """Build a generic ConvolutionKernel adapter from an existing FSSK."""
+
+        A = jnp.asarray(fssk.A)
+        beta = jnp.ones((int(A.shape[0]),), dtype=A.dtype)
+        return cls(
+            A=A,
+            beta=beta,
+            lam=fssk.Lambda,
+            b=jnp.asarray(fssk.b),
+            quad_order=int(fssk.quad_order),
+        )
+
+    def __post_init__(self) -> None:
+        ConvolutionKernel.__post_init__(self)
+
+        b = jnp.asarray(self.b)
+        object.__setattr__(self, "b", b)
+
+        if self.beta.shape != (self.q,):
+            raise ValueError(
+                f"FSSKConvolutionKernel beta must have shape ({self.q},), "
+                f"got {self.beta.shape}."
+            )
+
+        if bool(jnp.any(self.beta != 1)):
+            raise ValueError("FSSKConvolutionKernel requires beta == 1 for all components.")
+
+        if b.ndim != 2:
+            raise ValueError(f"b must have shape (q, R), got {b.shape}.")
+
+        if b.shape[0] != self.q:
+            raise ValueError(
+                f"b.shape[0] must match q={self.q}, got b.shape={b.shape}."
+            )
+
+        if self.quad_order <= 0:
+            raise ValueError(f"quad_order must be positive, got {self.quad_order}.")
+
+    @property
+    def state_dim(self) -> int:
+        """FSSK state dimension R."""
+        return int(self.b.shape[1])
+
+    def alpha(
+            self,
+            layout: MultiIndexLayout,
+            *,
+            rho: float | Array = 0.0,
+            dtype: jnp.dtype,
+            s: Array,
+            t: Array,
+            tau: Array,
+    ) -> tuple[Array, Array]:
+        """Evaluate packed FSSK Volterra coefficients.
+
+        Returns
+        -------
+        vals:
+            Array of shape ``leading_shape + (q, M)``, where
+            ``M = layout.size``.
+        valid:
+            Boolean array of shape ``leading_shape``.
+
+        The coefficient is
+
+            vals[..., p, ell] =
+                psi_rho[..., ell, R] · exp(-Lambda * (tau - t)) b_p
+
+        in the normalized coefficient convention expected by VolterraCoefficients.
+        """
+        real_dtype = jnp.dtype(dtype or self.A.dtype)
+
+        s_arr, t_arr, tau_arr = jnp.broadcast_arrays(
+            jnp.asarray(s, dtype=real_dtype),
+            jnp.asarray(t, dtype=real_dtype),
+            jnp.asarray(tau, dtype=real_dtype),
+        )
+
+        h = t_arr - s_arr
+        lookahead = tau_arr - t_arr
+        valid = (h > 0) & (tau_arr >= t_arr)
+
+        # Avoid invalid values entering matrix exponentials / shifted solves.
+        h_safe = jnp.where(valid, h, 1.0)
+        lookahead_safe = jnp.where(valid, lookahead, 0.0)
+
+        leading_shape = h_safe.shape
+        h_flat = h_safe.reshape((-1,))
+        lookahead_flat = lookahead_safe.reshape((-1,))
+
+        rho_int = _rho_to_static_int(rho)
+
+        b = self.b.astype(real_dtype)
+
+        zeta_c, slope, gamma, r, _u = prepare_coef(
+            self.lam,
+            b,
+            h_flat,
+            layout.ell,
+            quad_order=int(self.quad_order),
+            dtype=real_dtype,
+        )
+
+        psi_flat = eval_psi(
+            self.lam,
+            h_flat,
+            zeta_c,
+            slope,
+            gamma,
+            r,
+            rho=rho_int,
+            dtype=real_dtype,
+        )  # (B, M, R)
+
+        E_flat = self.lam.expm(
+            lookahead_flat,
+            dtype=real_dtype,
+        )  # (B, R, R)
+
+        # readout_flat[b, p, r] = (E_b b_p)_r
+        readout_flat = jnp.einsum("brs,ps->bpr", E_flat, b)  # (B, q, R)
+
+        # vals_flat[b, p, ell] = sum_r psi[b, ell, r] * readout[b, p, r]
+        vals_flat = jnp.einsum("bmR,bpR->bpm", psi_flat, readout_flat)
+
+        M = int(layout.ell.shape[0])
+        vals = vals_flat.reshape(leading_shape + (self.q, M))
+        vals = jnp.where(valid[..., None, None], vals, 0.0)
+
+        return vals.astype(real_dtype), valid
+
+    def as_convolution_kernel(self) -> FSSKConvolutionKernel:
+        """For API symmetry; this object is already a ConvolutionKernel."""
+        return self
+
+__all__ = ["ConvolutionKernel", "FractionalKernel", "GammaKernel", "FSSKConvolutionKernel"]

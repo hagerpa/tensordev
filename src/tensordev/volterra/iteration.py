@@ -392,21 +392,36 @@ def _basis_rhos(
 ) -> tuple[Array, ...]:
     """Basis exponents for the fractional higher-order scheme of the given order.
 
-    order=0: ``{1}``                              → ``(0,)``
-    order=1: ``{1, s^beta, s}``                   → ``(0, beta, 1)``
-    order=2: ``{1, s^beta, s, s^(beta+1), s^2}``  → ``(0, beta, 1, beta+1, 2)``
+    Duplicate exponents (e.g. when ``beta == 1``) are removed so that the
+    interpolation matrix remains non-singular.  The returned tuple is sorted
+    in ascending order.
+
+    order=0: ``{0}``
+    order=1: ``{0} | {beta} | {1}``
+    order=2: ``{0} | {beta} | {1} | {beta+1} | {2}``
     """
     zero = jnp.asarray(0.0, dtype=dtype)
-    one = jnp.asarray(1.0, dtype=dtype)
     if order == 0:
         return (zero,)
-    if order == 1:
-        return (zero, beta, one)
+
+    b = float(jnp.asarray(beta, dtype=dtype))
+    candidates: list[float] = [0.0, b, 1.0]
     if order == 2:
-        return (zero, beta, one, beta + one, jnp.asarray(2.0, dtype=dtype))
-    raise NotImplementedError(
-        f"Basis-expansion scheme order={order} is not implemented yet."
-    )
+        candidates += [b + 1.0, 2.0]
+    elif order != 1:
+        raise NotImplementedError(
+            f"Basis-expansion scheme order={order} is not implemented yet."
+        )
+
+    seen: set[float] = set()
+    unique: list[float] = []
+    for v in candidates:
+        if v not in seen:
+            seen.add(v)
+            unique.append(v)
+    unique.sort()
+
+    return tuple(jnp.asarray(v, dtype=dtype) for v in unique)
 
 
 def _basis_rhos_multicomp(
@@ -419,26 +434,39 @@ def _basis_rhos_multicomp(
 
     Each ``beta_p`` in ``betas`` contributes its own fractional exponent(s) to
     the basis so that the interpolant spans all singularity types present in K.
-    For q=1 this reduces to :func:`_basis_rhos`.
+    Duplicate exponents (e.g. when ``beta_p == 1``) are removed so that the
+    interpolation matrix remains non-singular.  The returned tuple is sorted in
+    ascending order.
 
-    order=0: ``(0,)``                              — B = 1
-    order=1: ``(0, beta_1, ..., beta_q, 1)``       — B = q + 2
-    order=2: additionally adds ``(beta_p+1, 2)``   — B = 2q + 3
+    order=0: ``{0}``
+    order=1: ``{0} | {beta_p} | {1}``
+    order=2: ``{0} | {beta_p} | {1} | {beta_p + 1} | {2}``
     """
     betas_1d = jnp.atleast_1d(betas).astype(dtype)
     q = int(betas_1d.shape[0])
     zero = jnp.asarray(0.0, dtype=dtype)
-    one = jnp.asarray(1.0, dtype=dtype)
     if order == 0:
         return (zero,)
-    beta_rhos = tuple(betas_1d[p] for p in range(q))
-    if order == 1:
-        return (zero,) + beta_rhos + (one,)
+
+    # Collect candidates as Python floats so exact deduplication via a set works.
+    beta_vals = [float(betas_1d[p]) for p in range(q)]
+    candidates: list[float] = [0.0] + beta_vals + [1.0]
     if order == 2:
-        return (zero,) + beta_rhos + (one,) + tuple(b + one for b in beta_rhos) + (jnp.asarray(2.0, dtype=dtype),)
-    raise NotImplementedError(
-        f"Basis-expansion scheme order={order} is not implemented yet."
-    )
+        candidates += [b + 1.0 for b in beta_vals] + [2.0]
+    elif order != 1:
+        raise NotImplementedError(
+            f"Basis-expansion scheme order={order} is not implemented yet."
+        )
+
+    seen: set[float] = set()
+    unique: list[float] = []
+    for v in candidates:
+        if v not in seen:
+            seen.add(v)
+            unique.append(v)
+    unique.sort()
+
+    return tuple(jnp.asarray(v, dtype=dtype) for v in unique)
 
 
 def _chebyshev_lobatto_thetas(
