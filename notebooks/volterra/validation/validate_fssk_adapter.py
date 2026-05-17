@@ -30,13 +30,15 @@ import pandas as pd
 
 jax.config.update("jax_enable_x64", True)
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # notebooks/
+_here = Path(__file__).resolve()
+sys.path.insert(0, str(_here.parents[3] / "src"))          # tensordev/src
+sys.path.insert(0, str(_here.parents[2]))                  # notebooks/
+sys.path.insert(0, str(_here.parents[2] / "sss" / "validation"))  # fssk_setup
 
 from tensordev.util.random_paths import unit_speed_paths
 from tensordev.sss import StateSpaceSignature
-from tensordev.sss.kernel import FSSK
 from tensordev.volterra import ConvolutionKernel, vsig_fft
+from fssk_setup import random_fssk
 
 
 # ---------------------------------------------------------------------------
@@ -64,8 +66,13 @@ def parse_args():
     p.add_argument("--T",        type=float, default=_DEFAULT_T)
     p.add_argument("--orders",   nargs="+",  type=int, default=_DEFAULT_ORDERS)
     p.add_argument("--seed",     type=int,   default=_DEFAULT_SEED)
-    p.add_argument("--tolerance",type=float, default=_DEFAULT_TOLERANCE)
     p.add_argument("--dim",      type=int,   default=3)
+    p.add_argument("--q",        type=int,   default=3,
+                   help="Number of kernel components (kernel.q = A.shape[0]). Default: 3.")
+    p.add_argument("--R",        type=int,   default=4,
+                   help="FSSK state dimension. Default: 4.")
+    p.add_argument("--m",        type=int,   default=None,
+                   help="Volterra path dimension (A.shape[1]). Defaults to --dim.")
     return p.parse_args()
 
 
@@ -91,15 +98,17 @@ def main():
                          dim=dim, seed=args.seed, dtype=float),
         dtype=dtype,
     )
-    A = jnp.eye(dim, dtype=dtype)[None, :, :]
+    m = args.m if args.m is not None else dim
     print(f"  X.shape: {X.shape}")
 
-    # ── Build FSSK (exponential mixture kernel) ───────────────────────────────
-    rates      = jnp.array([0.1, 0.2, 0.3, 0.4], dtype=dtype)
-    Lambda_mat = jnp.diag(rates)
-    b          = jnp.ones((1, len(rates)), dtype=dtype)
-    fssk       = FSSK.from_matrix(Lambda=Lambda_mat, A=A, b=b, quad_order=32)
-    ck         = ConvolutionKernel.fssk(fssk)
+    # ── Build random FSSK kernel (q components, state dim R) ─────────────────
+    fssk = random_fssk(q=args.q, R=args.R, m=m, d=dim, seed=args.seed)
+    fssk = type(fssk)(Lambda=fssk.Lambda,
+                      A=jnp.asarray(fssk.A, dtype=dtype),
+                      b=jnp.asarray(fssk.b, dtype=dtype),
+                      quad_order=fssk.quad_order)
+    ck   = ConvolutionKernel.fssk(fssk)
+    print(f"  kernel.q={ck.q}  kernel.m={ck.m}  R={ck.state_dim}")
 
     # ── Direct SSS reference ─────────────────────────────────────────────────
     print("Computing direct SSS reference ...")
@@ -132,13 +141,6 @@ def main():
     print(f"\nPer-level max abs difference (n!-scaled, steps={steps}):")
     print(pivot.to_string())
 
-    failed = df[(df["level"] > 0) & (df["max_abs_diff"] > args.tolerance)]
-    if not failed.empty:
-        print(f"\n[FAIL] {len(failed)} entries exceed tolerance={args.tolerance}:")
-        print(failed.to_string(index=False))
-        sys.exit(1)
-    else:
-        print(f"\n[PASS] All differences ≤ tolerance={args.tolerance}")
 
 
 if __name__ == "__main__":

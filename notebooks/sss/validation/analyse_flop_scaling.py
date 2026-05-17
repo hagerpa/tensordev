@@ -174,14 +174,29 @@ def plot_flops_vs_work(
             label=fr"$q={q}$",
         )
 
+    # Unit-slope fit per q: intercept from top-40 by expected_work, excluded from legend.
+    import matplotlib.colors as mcolors
+    def _brighten(c, f=0.45):
+        r, g, b = mcolors.to_rgb(c)
+        return (r + (1 - r) * f, g + (1 - g) * f, b + (1 - b) * f)
+
+    x_all = df["expected_work"].values.astype(float)
+    y_all = df["xla_flops"].values.astype(float)
+    finite = np.isfinite(x_all) & np.isfinite(y_all) & (x_all > 0) & (y_all > 0)
+    x_line = np.array([x_all[finite].min(), x_all[finite].max()])
+    for q, color in zip(qs, _COLORS):
+        mask = (df["q"].values == q) & finite
+        xq, yq = x_all[mask], y_all[mask]
+        if len(xq) < 2:
+            continue
+        top = np.argsort(xq)[-40:]
+        log_c = np.mean(np.log(yq[top]) - np.log(xq[top]))
+        ax.plot(x_line, np.exp(log_c) * x_line,
+                color=_brighten(color), linestyle="--", linewidth=0.9, label="_nolegend_")
+
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel(
-        r"Predicted work $W_q$"
-        #"\n"
-        #r"$\bigl(W_q{=}(J{-}1)R^2 m^N\ \text{for}\ n{=}1;"
-        #r"\ \ (J{-}1)R^2 N m^N\ \text{for}\ n{>}1\bigr)$",
-    )
+    ax.set_xlabel(r"Predicted work $W_q$")
     ax.set_ylabel(r"XLA FLOPs")
     ax.set_title(r"FSSK $\mathrm{VSig}$ -- FLOP Count")
     ax.minorticks_on()

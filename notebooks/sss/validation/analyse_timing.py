@@ -115,6 +115,11 @@ def plot_wall_vs_work(
     sub = df.dropna(subset=["cpu_hot_mean_s"])
     qs = sorted(sub["q"].unique())
 
+    import matplotlib.colors as mcolors
+    def _brighten(c, f=0.45):
+        r, g, b = mcolors.to_rgb(c)
+        return (r + (1 - r) * f, g + (1 - g) * f, b + (1 - b) * f)
+
     fig, ax = new_fig("half")
     for i, q in enumerate(qs):
         g = sub[sub["q"] == q]
@@ -125,6 +130,23 @@ def plot_wall_vs_work(
             s=SCATTER_SIZE, edgecolors="none",
             label=fr"$q={q}$",
         )
+
+    # Unit-slope fit per q: intercept from top-40 by W_q, excluded from legend.
+    x_all = sub["W_q"].values.astype(float)
+    y_all = sub["wall_hot_mean_s"].values.astype(float)
+    finite = np.isfinite(x_all) & np.isfinite(y_all) & (x_all > 0) & (y_all > 0)
+    x_line = np.array([x_all[finite].min(), x_all[finite].max()])
+    for i, q in enumerate(qs):
+        mask = (sub["q"].values == q) & finite
+        xq, yq = x_all[mask], y_all[mask]
+        if len(xq) < 2:
+            continue
+        top = np.argsort(xq)[-40:]
+        log_c = np.mean(np.log(yq[top]) - np.log(xq[top]))
+        ax.plot(x_line, np.exp(log_c) * x_line,
+                color=_brighten(COLORS[i % len(COLORS)]),
+                linestyle="--", linewidth=0.9, label="_nolegend_")
+
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel(r"Predicted work $W_q$")
