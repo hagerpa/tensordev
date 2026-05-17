@@ -18,24 +18,14 @@ The package is developed and tested primarily with the JAX backend.
 
 ## Installation
 
-Development version from GitHub:
+```bash
+pip install tensordev
+```
+
+For the latest development version:
 
 ```bash
 pip install git+https://github.com/hagerpa/tensordev.git
-```
-
-Editable development install:
-
-```bash
-git clone https://github.com/hagerpa/tensordev.git
-cd tensordev
-pip install -e ".[test]"
-```
-
-After the first successful PyPI release, the stable installation command will be:
-
-```bash
-pip install tensordev
 ```
 
 ## License
@@ -387,6 +377,7 @@ seq_core = get_default_seq_core()
 - [`iisignature`](https://github.com/bottler/iisignature): a gold-standard reference for efficient signature and logsignature computation.
 - [`signatory`](https://github.com/patrick-kidger/signatory): inspired the fused Horner-style evaluation used for efficient tensor exponential / signature development routines.
 - [`signax`](https://github.com/anh-tong/signax): provided the initial motivation for building a JAX-native tensor algebra and signature package.
+- [`pySigLib`](https://github.com/daniil-shmelev/pySigLib): a high-performance CPU/GPU library for signatures and signature kernels, whose CUDA and JAX support provides an important contemporary reference point for accelerator-aware signature computation.
 - [`sigkernel`](https://github.com/crispitagorico/sigkernel): inspired parts of the signature-kernel API and the second-order finite-difference stencil used for the standard signature kernel.
 - [`high-order-sigkernel`](https://github.com/maudl3116/high-order-sigkernel): inspired the predictor-corrector schemes for higher-order signature-kernel PDE systems, which are adapted and further developed in this package.
 
