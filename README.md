@@ -234,7 +234,9 @@ np.testing.assert_allclose(
 
 ### `tensordev.volterra` — Volterra signature
 
-Volterra signatures for fractional, Gamma, and piecewise-constant kernel families, computed via the quadratic triangular recursion with JAX-vectorised evaluation of the inner loop.
+Volterra signatures for fractional, gamma, and piecewise-constant kernel
+families, computed via the quadratic triangular recursion with JAX-vectorized
+evaluation of the inner loop or, on uniform grids, by FFT acceleration.
 
 ```python
 import jax.numpy as jnp
@@ -262,11 +264,11 @@ Available kernel constructors:
 
 | Constructor | Formula | Parameters |
 |---|---|---|
-| `VolterraKernel.fractional` | $k_p(t,s) = \Gamma(\beta_p)^{-1}(t-s)^{\beta_p-1}$ | `beta`, `A` |
-| `VolterraKernel.gamma` | $k(t,s) = \mathrm{scale}\cdot e^{-\mathrm{rate}(t-s)}\cdot\Gamma(\beta)^{-1}(t-s)^{\beta-1}$ | `beta`, `rate`, `scale`, `A` |
-| `VolterraKernel.piecewise_constant` | $k(i,j) = B_{p,i,j}$ | `B`, `A` |
+| `ConvolutionKernel.fractional` | $k_p(t,s) = \Gamma(\beta_p)^{-1}(t-s)^{\beta_p-1}$ | `beta`, `A` |
+| `ConvolutionKernel.gamma` | $k(t,s) = \mathrm{scale}\cdot e^{-\mathrm{rate}(t-s)}\cdot\Gamma(\beta)^{-1}(t-s)^{\beta-1}$ | `beta`, `rate`, `scale`, `A` |
+| `ConvolutionKernel.piecewise_constant` | $k(i,j) = B_{p,i,j}$ | `B`, `A` |
 
-Setting `beta=1` with `VolterraKernel.fractional` recovers the classical iterated-integral signature.
+Setting `beta=1` with `ConvolutionKernel.fractional` recovers the classical iterated-integral signature.
 
 ### `tensordev.kernel` — signature kernels
 

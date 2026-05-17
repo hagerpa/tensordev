@@ -12,14 +12,15 @@ from .free import free_development
 def path_signature(
         x: _Array,
         *,
-        increment_input: bool = False,
-        accumulate: bool = True,
         trunc: int,
+        increment_input: bool = False,
+        starting_point: Optional[DenseElem] = None,
         axis: Optional[int] = None,
         block_size: Optional[int] = None,
-        accumulate_in_tree: bool = False,
-        starting_point: Optional[DenseElem] = None,
         output_starting_point: bool = False,
+        # backend
+        accumulate: bool = True,
+        accumulate_in_tree: bool = False,
         parallel: bool = False,
         core: Any = None,
         seq_core: SequentialCore = None
@@ -35,30 +36,30 @@ def path_signature(
     x : Array
         Path with shape ``batch + (S+1, d)`` when ``increment_input=False``,
         or ``batch + (S, d)`` when ``increment_input=True``.
-    core :
-        Tensor algebra backend.
-    seq_core : SequentialCore
-        Sequential operations backend.
     trunc : int
         Maximum output degree (inclusive).
+    increment_input : bool, default False
+        If True, ``x`` is already in increment form; skip differencing.
+    starting_point : DenseElem, optional
+        Left seed ``g``; the output is ``g ⊗ Sig(x)``.  Defaults to the identity.
     axis : int, optional
         Step axis of ``x``.  Defaults to ``seq_core.default_time_axis``.
     block_size : int, optional
         Steps per emitted block.  ``None`` → one block covering all steps.
-    accumulate : bool, default True
-        Carry the running product across blocks.
-    starting_point : DenseElem, optional
-        Left seed ``g``; the output is ``g ⊗ Sig(x)``.
     output_starting_point : bool, default False
         If True, prepend the seed to the output.
+    accumulate : bool, default True
+        Carry the running product across blocks.
+    accumulate_in_tree : bool, default False
+        Use an associative tree scan for across-block accumulation.
     parallel : bool, default False
         If True, pre-compute all per-step exponentials and combine with an
         associative tree scan (higher parallelism, higher memory).
-        If False, stream via sequential ``tensor_fmexp`` (lower memory).
-    accumulate_in_tree : bool, default False
-        Use an associative tree scan for across-block accumulation.
-    increment_input : bool, default False
-        If True, ``x`` is already in increment form; skip differencing.
+        If False, stream via sequential ``tensor_fmexp`` (lower memory, sequential depth).
+    core :
+        Tensor algebra backend.
+    seq_core : SequentialCore
+        Sequential operations backend.
 
     Returns
     -------

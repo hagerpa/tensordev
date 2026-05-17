@@ -123,7 +123,8 @@ def test_volterra_vsig_output_starting_point_returns_padded_history_trajectory()
     A = jnp.ones((1, 1, 1), dtype=jnp.float64)
     kernel = FractionalKernel(beta=jnp.array([1.0]), A=A)
 
-    got = vsig(X, kernel=kernel, dt=1.0, trunc=trunc, output_starting_point=True)
+    # block_size=1 + output_starting_point=True → [unit, V_1, V_2, V_3]
+    got = vsig(X, kernel=kernel, dt=1.0, trunc=trunc, block_size=1, output_starting_point=True)
     dX = jnp.diff(X, axis=0)
     terminal, expected_path = _manual_volterra(dX, kernel, trunc=trunc)
 
@@ -199,14 +200,14 @@ def test_vsig_fft_gamma_uniform_grid_matches_vsig(trunc, beta, rate):
 
 
 def test_vsig_fft_output_starting_point_matches_vsig():
-    """Full trajectory (output_starting_point=True) matches vsig level-by-level."""
+    """Full trajectory (block_size=1, output_starting_point=True) matches vsig level-by-level."""
     X = jnp.array([[0.0, 0.0], [0.2, -0.1], [0.4, 0.3], [0.1, 0.5]], dtype=jnp.float64)
     A = jnp.eye(2, dtype=jnp.float64)[None, :, :]
     kernel = FractionalKernel(beta=jnp.array([0.8]), A=A)
     trunc = 3
 
-    ref = vsig(X, kernel=kernel, dt=1.0, trunc=trunc, output_starting_point=True)
-    got = vsig_fft(X, kernel=kernel, dt=1.0, trunc=trunc, output_starting_point=True)
+    ref = vsig(X, kernel=kernel, dt=1.0, trunc=trunc, block_size=1, output_starting_point=True)
+    got = vsig_fft(X, kernel=kernel, dt=1.0, trunc=trunc, block_size=1, output_starting_point=True)
     _assert_fft_allclose(got, ref)
 
 

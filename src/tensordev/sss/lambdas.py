@@ -524,6 +524,22 @@ class Lambda(ABC):
         """Return ``lhs @ phi_2(-dt * Lambda^T)``."""
         ...
 
+    def precompute_expm(self, dt: Array | float, *, dtype: Optional[jnp.dtype] = None) -> "Lambda":
+        """Return a copy with ``exp(-dt * Lambda)`` cached per step. Default: returns self."""
+        return self
+
+    def precompute_phi1(self, dt: Array | float, *, dtype: Optional[jnp.dtype] = None) -> "Lambda":
+        """Return a copy with ``phi_1(-dt * Lambda)`` cached per step. Default: returns self."""
+        return self
+
+    def precompute_phi2(self, dt: Array | float, *, dtype: Optional[jnp.dtype] = None) -> "Lambda":
+        """Return a copy with ``phi_2(-dt * Lambda)`` cached per step. Default: returns self."""
+        return self
+
+    def __getitem__(self, ix) -> "Lambda":
+        """Slice precomputed step-local blocks to step ``ix``. Default: returns self."""
+        return self
+
 
 # ---------------------------------------------------------------------------
 # DenseLambda
@@ -554,6 +570,9 @@ class DenseLambda(Lambda):
     _V: Array = field(init=False, repr=False)
     _V_inv: Array = field(init=False, repr=False)
     _use_eigen: bool = field(init=False, repr=False)
+    _expm_mat: Optional[Array] = field(init=False, repr=False, default=None)
+    _phi1_mat: Optional[Array] = field(init=False, repr=False, default=None)
+    _phi2_mat: Optional[Array] = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
         matrix = jnp.asarray(self.matrix)
@@ -578,18 +597,39 @@ class DenseLambda(Lambda):
     #    alongside it so that JIT does not need to recompute them. ----------
 
     def tree_flatten(self):
-        return (self.matrix, self._eigvals, self._V, self._V_inv), (self._use_eigen,)
+        has_expm = self._expm_mat is not None
+        has_phi1 = self._phi1_mat is not None
+        has_phi2 = self._phi2_mat is not None
+        leaves = [self.matrix, self._eigvals, self._V, self._V_inv]
+        if has_expm:
+            leaves.append(self._expm_mat)
+        if has_phi1:
+            leaves.append(self._phi1_mat)
+        if has_phi2:
+            leaves.append(self._phi2_mat)
+        return tuple(leaves), (self._use_eigen, has_expm, has_phi1, has_phi2)
 
     @classmethod
     def tree_unflatten(cls, aux, children):
-        matrix, eigvals, V, V_inv = children
-        (use_eigen,) = aux
+        use_eigen, has_expm, has_phi1, has_phi2 = aux
+        matrix, eigvals, V, V_inv = children[:4]
+        rest = list(children[4:])
+        expm_mat = phi1_mat = phi2_mat = None
+        if has_expm:
+            expm_mat = rest.pop(0)
+        if has_phi1:
+            phi1_mat = rest.pop(0)
+        if has_phi2:
+            phi2_mat = rest.pop(0)
         obj = object.__new__(cls)
         object.__setattr__(obj, "matrix", matrix)
         object.__setattr__(obj, "_eigvals", eigvals)
         object.__setattr__(obj, "_V", V)
         object.__setattr__(obj, "_V_inv", V_inv)
         object.__setattr__(obj, "_use_eigen", use_eigen)
+        object.__setattr__(obj, "_expm_mat", expm_mat)
+        object.__setattr__(obj, "_phi1_mat", phi1_mat)
+        object.__setattr__(obj, "_phi2_mat", phi2_mat)
         return obj
 
     @property
@@ -761,6 +801,47 @@ class DenseLambda(Lambda):
             scalar_solve=solve, batched_solve=solve,
         )
 
+    # -- precomputation helpers --------------------------------------------
+
+    def _with_precomputed(self, **kwargs) -> "DenseLambda":
+        """Return a copy with selected precomputed matrices replaced."""
+        obj = object.__new__(DenseLambda)
+        object.__setattr__(obj, "matrix", self.matrix)
+        object.__setattr__(obj, "_eigvals", self._eigvals)
+        object.__setattr__(obj, "_V", self._V)
+        object.__setattr__(obj, "_V_inv", self._V_inv)
+        object.__setattr__(obj, "_use_eigen", self._use_eigen)
+        object.__setattr__(obj, "_expm_mat", kwargs.get("_expm_mat", self._expm_mat))
+        object.__setattr__(obj, "_phi1_mat", kwargs.get("_phi1_mat", self._phi1_mat))
+        object.__setattr__(obj, "_phi2_mat", kwargs.get("_phi2_mat", self._phi2_mat))
+        return obj
+
+    def precompute_expm(self, dt, *, dtype=None) -> "DenseLambda":
+        d = self._default_dtype(dtype)
+        dt_arr, was_scalar = _normalize_dt_api(dt, dtype=self.matrix.dtype)
+        mat = self._dense_op(dt_arr, dtype=d, kind="expm")
+        return self._with_precomputed(_expm_mat=mat[0] if was_scalar else mat)
+
+    def precompute_phi1(self, dt, *, dtype=None) -> "DenseLambda":
+        d = self._default_dtype(dtype)
+        dt_arr, was_scalar = _normalize_dt_api(dt, dtype=self.matrix.dtype)
+        mat = self._dense_op(dt_arr, dtype=d, kind="phi1")
+        return self._with_precomputed(_phi1_mat=mat[0] if was_scalar else mat)
+
+    def precompute_phi2(self, dt, *, dtype=None) -> "DenseLambda":
+        d = self._default_dtype(dtype)
+        dt_arr, was_scalar = _normalize_dt_api(dt, dtype=self.matrix.dtype)
+        mat = self._dense_op(dt_arr, dtype=d, kind="phi2")
+        return self._with_precomputed(_phi2_mat=mat[0] if was_scalar else mat)
+
+    def __getitem__(self, ix) -> "DenseLambda":
+        def _s(m): return m if (m is None or m.ndim == 2) else m[ix]
+        return self._with_precomputed(
+            _expm_mat=_s(self._expm_mat),
+            _phi1_mat=_s(self._phi1_mat),
+            _phi2_mat=_s(self._phi2_mat),
+        )
+
     # -- public API ---------------------------------------------------------
 
     def expm(self, dt: Array | float, *, dtype: Optional[jnp.dtype] = None) -> Array:
@@ -793,22 +874,40 @@ class DenseLambda(Lambda):
         return _right_multiply(lhs, self._mat(lhs.dtype, transpose=True))
 
     def expm_multiply_left(self, dt, rhs, *, dtype=None) -> Array:
-        return self._action(dt, rhs, dtype=self._default_dtype(dtype), kind="expm", side="left")
+        d = self._default_dtype(dtype)
+        if self._expm_mat is not None:
+            return jnp.einsum("ab,...bc->...ac", self._expm_mat.astype(d), jnp.asarray(rhs, dtype=d))
+        return self._action(dt, rhs, dtype=d, kind="expm", side="left")
 
     def expm_multiply_right(self, dt, lhs, *, dtype=None) -> Array:
-        return self._action(dt, lhs, dtype=self._default_dtype(dtype), kind="expm", side="right")
+        d = self._default_dtype(dtype)
+        if self._expm_mat is not None:
+            return jnp.einsum("...ab,cb->...ac", jnp.asarray(lhs, dtype=d), self._expm_mat.astype(d))
+        return self._action(dt, lhs, dtype=d, kind="expm", side="right")
 
     def phi1_multiply_left(self, dt, rhs, *, dtype=None) -> Array:
-        return self._action(dt, rhs, dtype=self._default_dtype(dtype), kind="phi1", side="left")
+        d = self._default_dtype(dtype)
+        if self._phi1_mat is not None:
+            return jnp.einsum("ab,...bc->...ac", self._phi1_mat.astype(d), jnp.asarray(rhs, dtype=d))
+        return self._action(dt, rhs, dtype=d, kind="phi1", side="left")
 
     def phi1_multiply_right(self, dt, lhs, *, dtype=None) -> Array:
-        return self._action(dt, lhs, dtype=self._default_dtype(dtype), kind="phi1", side="right")
+        d = self._default_dtype(dtype)
+        if self._phi1_mat is not None:
+            return jnp.einsum("...ab,cb->...ac", jnp.asarray(lhs, dtype=d), self._phi1_mat.astype(d))
+        return self._action(dt, lhs, dtype=d, kind="phi1", side="right")
 
     def phi2_multiply_left(self, dt, rhs, *, dtype=None) -> Array:
-        return self._action(dt, rhs, dtype=self._default_dtype(dtype), kind="phi2", side="left")
+        d = self._default_dtype(dtype)
+        if self._phi2_mat is not None:
+            return jnp.einsum("ab,...bc->...ac", self._phi2_mat.astype(d), jnp.asarray(rhs, dtype=d))
+        return self._action(dt, rhs, dtype=d, kind="phi2", side="left")
 
     def phi2_multiply_right(self, dt, lhs, *, dtype=None) -> Array:
-        return self._action(dt, lhs, dtype=self._default_dtype(dtype), kind="phi2", side="right")
+        d = self._default_dtype(dtype)
+        if self._phi2_mat is not None:
+            return jnp.einsum("...ab,cb->...ac", jnp.asarray(lhs, dtype=d), self._phi2_mat.astype(d))
+        return self._action(dt, lhs, dtype=d, kind="phi2", side="right")
 
 
 # ---------------------------------------------------------------------------
@@ -939,8 +1038,8 @@ def _phi2_chain_coeffs(rates: Array, nmax: int, dt: Array, dtype: jnp.dtype) -> 
     small = jnp.abs(x) < _PHI2_SMALL_THRESHOLD
 
     # Pre-compute Taylor powers for fallback
-    js = jnp.arange(_PHI2_TAYLOR_TERMS, dtype=dtype)
-    neg_x_powers = (-x)[:, :, None] ** js[None, None, :]  # (m, b, T)
+    js = jnp.arange(_PHI2_TAYLOR_TERMS)  # integer dtype for indexing into fac
+    neg_x_powers = (-x)[:, :, None] ** js[None, None, :].astype(dtype)  # (m, b, T)
 
     def _taylor_d(k: Array) -> Array:
         r"""Compute d_k via truncated Taylor series for small |x|.
@@ -1302,6 +1401,9 @@ class JordanLambda(Lambda):
     osc_decays: Array = field(default_factory=lambda: jnp.zeros(0))
     osc_freqs: Array = field(default_factory=lambda: jnp.zeros(0))
     osc_sizes: tuple[int, ...] = field(default_factory=tuple, metadata={"static": True})
+    _expm_blocks: Optional[tuple] = field(init=False, repr=False, default=None)
+    _phi1_blocks: Optional[tuple] = field(init=False, repr=False, default=None)
+    _phi2_blocks: Optional[tuple] = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
         real_rates = jnp.asarray(self.real_rates, dtype=jnp.float64).ravel()
@@ -1330,22 +1432,43 @@ class JordanLambda(Lambda):
     # -- pytree: rates are leaves, sizes are static -----------------------
 
     def tree_flatten(self):
-        leaves = (self.real_rates, self.osc_decays, self.osc_freqs)
-        aux = (self.real_sizes, self.osc_sizes)
-        return leaves, aux
+        has_expm = self._expm_blocks is not None
+        has_phi1 = self._phi1_blocks is not None
+        has_phi2 = self._phi2_blocks is not None
+        leaves = [self.real_rates, self.osc_decays, self.osc_freqs]
+        if has_expm:
+            leaves.extend(self._expm_blocks)
+        if has_phi1:
+            leaves.extend(self._phi1_blocks)
+        if has_phi2:
+            leaves.extend(self._phi2_blocks)
+        aux = (self.real_sizes, self.osc_sizes, has_expm, has_phi1, has_phi2)
+        return tuple(leaves), aux
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
-        real_rates, osc_decays, osc_freqs = children
-        real_sizes, osc_sizes = aux_data
-        # Bypass __post_init__ validation (sizes already validated at
-        # construction time; rates may be traced during JIT).
+        real_sizes, osc_sizes, has_expm, has_phi1, has_phi2 = aux_data
+        n_blocks = len(real_sizes) + len(osc_sizes)
+        real_rates, osc_decays, osc_freqs = children[0], children[1], children[2]
+        rest = list(children[3:])
+        expm_blocks = phi1_blocks = phi2_blocks = None
+        if has_expm:
+            expm_blocks = tuple(rest[:n_blocks])
+            rest = rest[n_blocks:]
+        if has_phi1:
+            phi1_blocks = tuple(rest[:n_blocks])
+            rest = rest[n_blocks:]
+        if has_phi2:
+            phi2_blocks = tuple(rest[:n_blocks])
         obj = object.__new__(cls)
         object.__setattr__(obj, "real_rates", real_rates)
         object.__setattr__(obj, "real_sizes", real_sizes)
         object.__setattr__(obj, "osc_decays", osc_decays)
         object.__setattr__(obj, "osc_freqs", osc_freqs)
         object.__setattr__(obj, "osc_sizes", osc_sizes)
+        object.__setattr__(obj, "_expm_blocks", expm_blocks)
+        object.__setattr__(obj, "_phi1_blocks", phi1_blocks)
+        object.__setattr__(obj, "_phi2_blocks", phi2_blocks)
         return obj
 
     @property
@@ -1481,28 +1604,167 @@ class JordanLambda(Lambda):
             -1, -2,
         )
 
+    # -- precomputation helpers -------------------------------------------
+
+    def _with_precomputed(self, **kwargs) -> "JordanLambda":
+        """Return a copy with selected precomputed block tuples replaced."""
+        obj = object.__new__(JordanLambda)
+        object.__setattr__(obj, "real_rates", self.real_rates)
+        object.__setattr__(obj, "real_sizes", self.real_sizes)
+        object.__setattr__(obj, "osc_decays", self.osc_decays)
+        object.__setattr__(obj, "osc_freqs", self.osc_freqs)
+        object.__setattr__(obj, "osc_sizes", self.osc_sizes)
+        object.__setattr__(obj, "_expm_blocks", kwargs.get("_expm_blocks", self._expm_blocks))
+        object.__setattr__(obj, "_phi1_blocks", kwargs.get("_phi1_blocks", self._phi1_blocks))
+        object.__setattr__(obj, "_phi2_blocks", kwargs.get("_phi2_blocks", self._phi2_blocks))
+        return obj
+
+    def _precompute_blocks(self, dt, *, dtype, real_coeffs, osc_coeffs) -> tuple:
+        """Build per-block matrices (2D for scalar dt, 3D for array dt)."""
+        dt_arr, was_scalar = _normalize_dt_api(dt, dtype=jnp.float64)
+        dt_real = dt_arr.astype(jnp.real(jnp.asarray(0, dtype=dtype)).dtype)
+        blocks = []
+        for i, size in enumerate(self.real_sizes):
+            coeff = real_coeffs(self.real_rates[i : i + 1].astype(dtype), size, dt_real, dtype)
+            mat = _real_chain_matrix_from_coeff(coeff, size)  # (n_steps, size, size)
+            blocks.append(mat[0] if was_scalar else mat)
+        for i, size in enumerate(self.osc_sizes):
+            coeff = osc_coeffs(
+                self.osc_decays[i : i + 1].astype(dt_real.dtype),
+                self.osc_freqs[i : i + 1].astype(dt_real.dtype),
+                size, dt_real, dtype,
+            )
+            mat = _osc_chain_matrix_from_coeff(coeff, size)  # (n_steps, 2*size, 2*size)
+            blocks.append(mat[0] if was_scalar else mat)
+        return tuple(blocks)
+
+    def precompute_expm(self, dt, *, dtype=None) -> "JordanLambda":
+        d = jnp.dtype(dtype or jnp.float64)
+        return self._with_precomputed(
+            _expm_blocks=self._precompute_blocks(dt, dtype=d,
+                real_coeffs=_real_expm_coeffs, osc_coeffs=_osc_expm_coeffs))
+
+    def precompute_phi1(self, dt, *, dtype=None) -> "JordanLambda":
+        d = jnp.dtype(dtype or jnp.float64)
+        return self._with_precomputed(
+            _phi1_blocks=self._precompute_blocks(dt, dtype=d,
+                real_coeffs=_phi1_chain_coeffs, osc_coeffs=_osc_phi1_coeffs))
+
+    def precompute_phi2(self, dt, *, dtype=None) -> "JordanLambda":
+        d = jnp.dtype(dtype or jnp.float64)
+        return self._with_precomputed(
+            _phi2_blocks=self._precompute_blocks(dt, dtype=d,
+                real_coeffs=_phi2_chain_coeffs, osc_coeffs=_osc_phi2_coeffs))
+
+    def __getitem__(self, ix) -> "JordanLambda":
+        def _s(blocks):
+            if blocks is None:
+                return None
+            return tuple(b if b.ndim == 2 else b[ix] for b in blocks)
+        return self._with_precomputed(
+            _expm_blocks=_s(self._expm_blocks),
+            _phi1_blocks=_s(self._phi1_blocks),
+            _phi2_blocks=_s(self._phi2_blocks),
+        )
+
+    def _block_entries(self) -> list[tuple[int, int, int]]:
+        """Return (block_idx, start, width) for every block in R order."""
+        entries = []
+        start = 0
+        for i, size in enumerate(self.real_sizes):
+            entries.append((i, start, size))
+            start += size
+        n_real = len(self.real_sizes)
+        for j, size in enumerate(self.osc_sizes):
+            width = 2 * size
+            entries.append((n_real + j, start, width))
+            start += width
+        return entries
+
+    def _apply_blocks_left(self, blocks, rhs, *, dtype) -> Array:
+        """Apply block-diagonal operator from the left: ``block_i @ rhs_i``.
+
+        Same-width blocks are batched into a single einsum to reduce XLA ops.
+        """
+        entries = self._block_entries()
+        if not entries:
+            return jnp.zeros_like(rhs)
+        by_width: dict[int, list[tuple[int, int]]] = {}
+        for orig_idx, s, w in entries:
+            by_width.setdefault(w, []).append((orig_idx, s))
+        result_map: dict[int, Array] = {}
+        for w, grp in by_width.items():
+            orig_idxs = [g[0] for g in grp]
+            grp_starts = [g[1] for g in grp]
+            block_stack = jnp.stack([blocks[oi].astype(dtype) for oi in orig_idxs])   # (n, w, w)
+            rhs_stack = jnp.stack([rhs[..., s:s+w, :] for s in grp_starts], axis=-3)  # (..., n, w, cols)
+            res = jnp.einsum("nab,...nbc->...nac", block_stack, rhs_stack)             # (..., n, w, cols)
+            for i, oi in enumerate(orig_idxs):
+                result_map[oi] = res[..., i, :, :]
+        return jnp.concatenate([result_map[i] for i in range(len(entries))], axis=-2)
+
+    def _apply_blocks_right(self, blocks, lhs, *, dtype) -> Array:
+        """Apply block-diagonal operator from the right: ``lhs_i @ block_i^T``.
+
+        Same-width blocks are batched into a single einsum to reduce XLA ops.
+        """
+        entries = self._block_entries()
+        if not entries:
+            return jnp.zeros_like(lhs)
+        by_width: dict[int, list[tuple[int, int]]] = {}
+        for orig_idx, s, w in entries:
+            by_width.setdefault(w, []).append((orig_idx, s))
+        result_map: dict[int, Array] = {}
+        for w, grp in by_width.items():
+            orig_idxs = [g[0] for g in grp]
+            grp_starts = [g[1] for g in grp]
+            block_stack = jnp.stack([blocks[oi].astype(dtype) for oi in orig_idxs])   # (n, w, w)
+            lhs_stack = jnp.stack([lhs[..., s:s+w] for s in grp_starts], axis=-2)     # (..., k, n, w)
+            res = jnp.einsum("nab,...knb->...kna", block_stack, lhs_stack)             # (..., k, n, w)
+            for i, oi in enumerate(orig_idxs):
+                result_map[oi] = res[..., i, :]
+        return jnp.concatenate([result_map[i] for i in range(len(entries))], axis=-1)
+
     def expm_multiply_left(self, dt, rhs, *, dtype=None) -> Array:
-        return self._action(dt, rhs, dtype=jnp.dtype(dtype or jnp.float64), side="left",
+        d = jnp.dtype(dtype or jnp.float64)
+        if self._expm_blocks is not None:
+            return self._apply_blocks_left(self._expm_blocks, jnp.asarray(rhs, dtype=d), dtype=d)
+        return self._action(dt, rhs, dtype=d, side="left",
                             real_coeffs=_real_expm_coeffs, osc_coeffs=_osc_expm_coeffs)
 
     def expm_multiply_right(self, dt, lhs, *, dtype=None) -> Array:
-        return self._action(dt, lhs, dtype=jnp.dtype(dtype or jnp.float64), side="right",
+        d = jnp.dtype(dtype or jnp.float64)
+        if self._expm_blocks is not None:
+            return self._apply_blocks_right(self._expm_blocks, jnp.asarray(lhs, dtype=d), dtype=d)
+        return self._action(dt, lhs, dtype=d, side="right",
                             real_coeffs=_real_expm_coeffs, osc_coeffs=_osc_expm_coeffs)
 
     def phi1_multiply_left(self, dt, rhs, *, dtype=None) -> Array:
-        return self._action(dt, rhs, dtype=jnp.dtype(dtype or jnp.float64), side="left",
+        d = jnp.dtype(dtype or jnp.float64)
+        if self._phi1_blocks is not None:
+            return self._apply_blocks_left(self._phi1_blocks, jnp.asarray(rhs, dtype=d), dtype=d)
+        return self._action(dt, rhs, dtype=d, side="left",
                             real_coeffs=_phi1_chain_coeffs, osc_coeffs=_osc_phi1_coeffs)
 
     def phi1_multiply_right(self, dt, lhs, *, dtype=None) -> Array:
-        return self._action(dt, lhs, dtype=jnp.dtype(dtype or jnp.float64), side="right",
+        d = jnp.dtype(dtype or jnp.float64)
+        if self._phi1_blocks is not None:
+            return self._apply_blocks_right(self._phi1_blocks, jnp.asarray(lhs, dtype=d), dtype=d)
+        return self._action(dt, lhs, dtype=d, side="right",
                             real_coeffs=_phi1_chain_coeffs, osc_coeffs=_osc_phi1_coeffs)
 
     def phi2_multiply_left(self, dt, rhs, *, dtype=None) -> Array:
-        return self._action(dt, rhs, dtype=jnp.dtype(dtype or jnp.float64), side="left",
+        d = jnp.dtype(dtype or jnp.float64)
+        if self._phi2_blocks is not None:
+            return self._apply_blocks_left(self._phi2_blocks, jnp.asarray(rhs, dtype=d), dtype=d)
+        return self._action(dt, rhs, dtype=d, side="left",
                             real_coeffs=_phi2_chain_coeffs, osc_coeffs=_osc_phi2_coeffs)
 
     def phi2_multiply_right(self, dt, lhs, *, dtype=None) -> Array:
-        return self._action(dt, lhs, dtype=jnp.dtype(dtype or jnp.float64), side="right",
+        d = jnp.dtype(dtype or jnp.float64)
+        if self._phi2_blocks is not None:
+            return self._apply_blocks_right(self._phi2_blocks, jnp.asarray(lhs, dtype=d), dtype=d)
+        return self._action(dt, lhs, dtype=d, side="right",
                             real_coeffs=_phi2_chain_coeffs, osc_coeffs=_osc_phi2_coeffs)
 
     def b_from_prony(

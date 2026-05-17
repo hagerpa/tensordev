@@ -91,11 +91,11 @@ def _empty_row() -> dict:
 # Timing helpers
 # ---------------------------------------------------------------------------
 
-def time_exact_components(*, X, dt, Lambda, A, b, N, n_repeats) -> dict:
+def time_exact_components(*, X, dt, fssk, N, n_repeats) -> dict:
     """Time StateSpaceSignature construction and vsig calls."""
     sss, rec_construct = time_call(
-        StateSpaceSignature.from_matrix,
-        Lambda=Lambda, A=A, b=b, trunc=N,
+        StateSpaceSignature,
+        kernel=fssk, trunc=N,
     )
 
     def call():
@@ -140,12 +140,12 @@ def _make_row_fn(regime_name: str, n_repeats: int, seed0: int, total_runs: int) 
             dt=dt, dt_fine=dt / 8, n_paths=n_paths, dim=3,
             seed=seed0 + 10_000 + run_id,
         )
-        Lambda, A, b = random_fssk(
+        fssk = random_fssk(
             q=q, R=R, m=m, d=3, seed=seed0 + run_id,
             eig_min=0.1, eig_max=1.5, normalise_b=False,
         )
 
-        timings    = time_exact_components(X=X, dt=dt, Lambda=Lambda, A=A, b=b, N=N, n_repeats=n_repeats)
+        timings    = time_exact_components(X=X, dt=dt, fssk=fssk, N=N, n_repeats=n_repeats)
         intervals  = J - 1
         q1_proxy   = intervals * (R ** 2) * (m ** N)
         qgt1_proxy = q1_proxy * N

@@ -72,11 +72,11 @@ def lambda0_validation_case(
     seed=0,
 ):
     """Run the Lambda=0 validation for one (n, R, m, d) configuration."""
-    _, A_np, b_np = random_fssk(q=q, R=R, m=m, d=d, seed=seed)
+    _fssk = random_fssk(q=q, R=R, m=m, d=d, seed=seed)
 
     Lambda = jnp.zeros((R, R), dtype=jnp.float64)
-    A = jnp.asarray(A_np, dtype=jnp.float64)
-    b = jnp.asarray(b_np, dtype=jnp.float64)
+    A = jnp.asarray(_fssk.A, dtype=jnp.float64)
+    b = jnp.asarray(_fssk.b, dtype=jnp.float64)
 
     X = jnp.asarray(
         unit_speed_paths(

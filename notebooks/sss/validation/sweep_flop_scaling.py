@@ -134,12 +134,12 @@ def main():
             flush=True,
         )
 
-        # Generate FSSK parameters (concrete arrays for Lambda, A, b).
-        Lambda, A, b = random_fssk(q=q, R=R, m=m, d=d, seed=seed0 + idx, eig_min=0.1, eig_max=1.5, normalise_b=False)
+        # Generate FSSK kernel (Jordan form via FSSK.from_jordan).
+        fssk = random_fssk(q=q, R=R, m=m, d=d, seed=seed0 + idx, eig_min=0.1, eig_max=1.5, normalise_b=False)
 
         # Construct the StateSpaceSignature object.
         # This step does NOT run expensive JAX ops; it only stores parameters.
-        sss = StateSpaceSignature.from_matrix(Lambda=Lambda, A=A, b=b, trunc=N)
+        sss = StateSpaceSignature(kernel=fssk, trunc=N)
 
         # ------------------------------------------------------------------
         # Main profiled object: FSSK recursion with scalar coefficients

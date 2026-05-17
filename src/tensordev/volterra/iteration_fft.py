@@ -14,7 +14,6 @@ from tensordev.core.universal import DenseElem
 from tensordev.util.combinatorics import build_multiindex_layout, multiindex_batched_navigation
 from tensordev.volterra.kernel import ConvolutionKernel
 from tensordev.volterra.iteration import (
-    _refine_dt,
     _normalize_times,
     _make_unit,
     BasisExpansionSpec,
@@ -133,7 +132,7 @@ def precompute_lag_tables(
 
     dtype_ = jnp.dtype(dtype)
     h_arr = jnp.asarray(h, dtype=dtype_)
-    rhos = _basis_rhos_multicomp(order, betas=kernel.beta.astype(dtype_), dtype=dtype_)
+    rhos = _basis_rhos_multicomp(order, betas=kernel.beta, dtype=dtype_)
     thetas = _chebyshev_lobatto_thetas(n=len(rhos), dtype=dtype_)
 
     theta_tables = tuple(
@@ -168,113 +167,85 @@ def precompute_lag_tables(
     )
 
 
-def vsig_fft(
-        X: Array,
+def fft_iteration(
+        dX: Array,
         *,
         kernel: ConvolutionKernel,
         trunc: int,
         dt: Array | float = 1.0,
         axis: int = -2,
-        output_starting_point: bool = False,
-        increment_input: bool = False,
-        dyadic_order: int = 0,
+        return_trajectory: bool = False,
         order: int = 0,
         lag_tables: PrecomputedLagTables | None = None,
 ) -> DenseElem:
     r"""Volterra signature via FFT convolution on a uniform grid.
 
+    Expects ``dX`` already in increment form and on the final time grid.
+    All preprocessing is the responsibility of the caller — typically the
+    high-level :func:`~tensordev.volterra.signature.vsig`.
+
     Requires a **uniform** time grid; for non-uniform grids use
-    :func:`vsig` instead.  Supports both scalar (``kernel.q == 1``) and
-    multi-component (``kernel.q > 1``) convolution kernels.
+    :func:`quadratic_iteration` instead.  Supports both scalar
+    (``kernel.q == 1``) and multi-component (``kernel.q > 1``) kernels.
 
     Parameters
     ----------
-    X:
-        Path nodes or increments.  The trailing axis is the path dimension
-        ``kernel.path_dim``; ``axis`` is the step/node axis.  Set
-        ``increment_input=True`` to skip :func:`jnp.diff`.
+    dX:
+        Increments.  Shape ``(*batch, S, d)`` with step axis at ``axis``
+        and trailing path dimension ``d = kernel.path_dim``.
     kernel:
         Volterra kernel.
     trunc:
         Tensor truncation level (positive integer).
     dt:
-        Uniform step size (scalar) or a 1-D array of per-step sizes.  The
-        FFT scheme derives a single step ``h = times[1] - times[0]`` and
-        treats the grid as uniform; passing a non-uniform array gives
-        incorrect results without a runtime error.
+        Uniform step size scalar (default ``1.0``).  Passing a 1-D array
+        silently uses only ``times[1] - times[0]`` as the step size.
     axis:
-        Step/node axis of ``X``.
-    output_starting_point:
-        If ``False`` (default), return the terminal signature.  If ``True``,
-        return the full trajectory ``[1, V_0, ..., V_{S-1}]`` with the
-        trajectory axis at ``axis``.
-    increment_input:
-        Treat ``X`` as increments rather than path nodes.
-    dyadic_order:
-        Non-negative integer.  Each increment is split into
-        ``2**dyadic_order`` equal sub-increments.  ``0`` (default) leaves
-        the path unchanged.
+        Step axis of ``dX`` (default ``-2``).
+    return_trajectory:
+        If ``True``, return ``[V_1, ..., V_S]`` with the step axis at
+        ``axis``.  If ``False`` (default), return the terminal ``V_S``.
     order:
-        ``0``:
-            Order-0 scheme (constant basis ``{1}``).
-
-        ``1``:
-            Basis-expansion scheme with fractional basis ``{1, s^beta, s}``.
-
-        ``2``:
-            Basis-expansion scheme with fractional basis
-            ``{1, s^beta, s, s^(beta+1), s^2}``.
-
+        ``0`` (default) constant basis; ``1`` fractional basis
+        ``{1, s^beta, s}``; ``2`` extended basis
+        ``{1, s^beta, s, s^(beta+1), s^2}``.
     lag_tables:
         Optional precomputed lag FFT tables from :func:`precompute_lag_tables`.
-        When supplied the kernel-dependent weight computation is skipped.
-        The tables must match the effective ``S`` (after dyadic refinement),
-        ``trunc``, and ``order``; a :exc:`ValueError` is raised otherwise.
+        Must match ``S``, ``trunc``, and ``order``.
 
     Returns
     -------
     DenseElem
-        Terminal signature by default.  With ``output_starting_point=True``,
-        each level carries an additional trajectory axis at ``axis``.
+        Terminal signature, or full trajectory when ``return_trajectory=True``.
 
     Raises
     ------
     ValueError
-        For invalid truncation, dyadic order, axis, or scheme order.
+        For invalid truncation, axis, or scheme order.
     """
     if trunc <= 0:
         raise ValueError(f"trunc must be positive, got {trunc}.")
-    if dyadic_order < 0:
-        raise ValueError(f"dyadic_order must be non-negative, got {dyadic_order}.")
     if order not in (0, 1, 2):
         raise ValueError(f"order must currently be 0, 1, or 2, got {order}.")
 
-    X = jnp.asarray(X)
-    if X.ndim < 2:
-        raise ValueError("X must have at least a step axis and a trailing path dimension.")
+    dX = jnp.asarray(dX)
+    if dX.ndim < 2:
+        raise ValueError("dX must have at least a step axis and a trailing path dimension.")
 
-    axis_norm = axis % X.ndim
-    if axis_norm == X.ndim - 1:
+    axis_norm = axis % dX.ndim
+    if axis_norm == dX.ndim - 1:
         raise ValueError("axis must identify the step axis, not the trailing path dimension.")
-    if X.shape[-1] != kernel.path_dim:
+    if dX.shape[-1] != kernel.path_dim:
         raise ValueError(
-            f"X trailing dimension must be {kernel.path_dim}, got {X.shape[-1]}."
+            f"dX trailing dimension must be {kernel.path_dim}, got {dX.shape[-1]}."
         )
 
-    dtype = X.dtype
-
-    dX = X if increment_input else jnp.diff(X, axis=axis_norm)
+    dtype = dX.dtype
     dX = dX.astype(dtype)
 
     S = dX.shape[axis_norm]
     if S == 0:
-        raise ValueError("vsig_fft requires at least one increment.")
-
-    if dyadic_order > 0:
-        factor = 1 << int(dyadic_order)
-        dX = jnp.repeat(dX / factor, factor, axis=axis_norm)
-        S = dX.shape[axis_norm]
-        dt = _refine_dt(dt, factor=factor, dtype=dtype)
+        raise ValueError("fft_iteration requires at least one increment.")
 
     projected = jnp.einsum("qmd,...d->...qm", kernel.A.astype(dtype), dX)
     # y has shape (S, *batch_shape, q, m) — q-axis always present.
@@ -338,10 +309,14 @@ def vsig_fft(
 
     out_levels = _run_basis_fft(ctx=ctx, kernel=kernel, order=order, lag_tables=lag_tables)
 
-    if output_starting_point:
+    if return_trajectory:
+        # Drop the leading unit (V_0) so the trajectory is [V_1, ..., V_S],
+        # matching the S-entry convention of quadratic_iteration.
+        traj = tuple(level[1:] for level in out_levels)
         if axis_norm == 0:
-            return tuple(out_levels)
-        return tuple(jnp.moveaxis(level, 0, axis_norm) for level in out_levels)
+            return traj
+        return tuple(jnp.moveaxis(level, 0, axis_norm) for level in traj)
+
     return tuple(level[-1] for level in out_levels)
 
 
@@ -500,7 +475,7 @@ def _basis_spec(
     Chebyshev-Lobatto nodes are used for all orders; for order=1 (n=3) they
     coincide with ``{0, 1/2, 1}``.
     """
-    rhos = _basis_rhos_multicomp(order, betas=kernel.beta.astype(ctx.dtype), dtype=ctx.dtype)
+    rhos = _basis_rhos_multicomp(order, betas=kernel.beta, dtype=ctx.dtype)
     thetas = _chebyshev_lobatto_thetas(n=len(rhos), dtype=ctx.dtype)
     interpolation = _basis_interpolation_matrix(
         h=ctx.h,
@@ -1070,4 +1045,4 @@ def _causal_conv_fft_batched(
     return out_flat[:, :out_len].reshape((B, out_len) + trailing)
 
 
-__all__ = ["vsig_fft", "precompute_lag_tables", "PrecomputedLagTables"]
+__all__ = ["fft_iteration", "precompute_lag_tables", "PrecomputedLagTables"]

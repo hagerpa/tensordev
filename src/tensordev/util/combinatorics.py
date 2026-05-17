@@ -188,7 +188,8 @@ def build_multiindex_layout(q: int, trunc: int) -> MultiIndexLayout:
     size = len(tuples)
     ell_np = jnp.asarray(tuples, dtype=jnp.int32)
     degree = jnp.sum(ell_np, axis=1, dtype=jnp.int32)
-    offsets = jnp.asarray(degree_blocks, dtype=jnp.int32)
+    # Use plain numpy so int(offsets[n]) works inside a JAX jit trace.
+    offsets = np.array(degree_blocks, dtype=np.int32)
 
     index = _layout_index_cache(q, trunc)
 

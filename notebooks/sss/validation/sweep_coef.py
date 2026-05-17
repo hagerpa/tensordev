@@ -153,14 +153,13 @@ def main():
             flush=True,
         )
 
-        Lambda, A, b = random_fssk(
+        fssk = random_fssk(
             q=q, R=R, m=_FIXED_M, d=_FIXED_D,
             seed=seed0 + idx,
             eig_min=0.1, eig_max=1.5,
             normalise_b=False,
-            as_jordan=as_jordan,
         )
-        sss = StateSpaceSignature.from_matrix(Lambda=Lambda, A=A, b=b, trunc=N)
+        sss = StateSpaceSignature(kernel=fssk, trunc=N)
 
         def coef_fn(dt_arg):
             return sss.kernel.coef(dt_arg, trunc=N, dtype=jnp.float64)

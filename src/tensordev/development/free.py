@@ -12,17 +12,18 @@ from tensordev._backend import get_default_core, get_default_seq_core
 def free_development(
         X: DenseElemFirstOn,
         *,
-        increment_input: bool = False,
-        seq_core: SequentialCore = None,
         trunc: int,
+        increment_input: bool = False,
+        starting_point: Optional[DenseElem] = None,
         axis: Optional[int] = None,
         block_size: Optional[int] = None,
-        accumulate: bool = True,
-        starting_point: Optional[DenseElem] = None,
         output_starting_point: bool = False,
-        parallel: bool = False,
+        # backend
+        accumulate: bool = True,
         accumulate_in_tree: bool = False,
-        core: Any = None
+        parallel: bool = False,
+        core: Any = None,
+        seq_core: SequentialCore = None
 ) -> DenseElem:
     """
     Truncated free development of a tensor-valued path.
@@ -37,33 +38,33 @@ def free_development(
         Tensor-valued path levels starting at degree 1.  Level k has shape
         ``batch + (S+1, d**k)`` when ``increment_input=False``, or
         ``batch + (S, d**k)`` when ``increment_input=True``.
-    core :
-        Tensor algebra backend.  Must provide ``tensor_fmexp``,
-        ``tensor_product``, ``tensor_exponential``, and ``xp``.
-    seq_core : SequentialCore
-        Sequential operations backend.
     trunc : int
         Maximum output degree (inclusive).
+    increment_input : bool, default False
+        If True, ``X`` is already in increment form; skip differencing.
+    starting_point : DenseElem, optional
+        Left seed ``g``; the output is ``g ⊗ S``.  Defaults to the identity.
     axis : int, optional
         Step axis of ``X``.  Defaults to ``seq_core.default_time_axis``.
     block_size : int, optional
         Steps per emitted block.  ``None`` → one block covering all steps.
-    accumulate : bool, default True
-        Carry the running product across blocks.
-    starting_point : DenseElem, optional
-        Left seed ``g``; the output is ``g ⊗ S``.  Defaults to the identity.
     output_starting_point : bool, default False
         If True, prepend the seed to the output.
+    accumulate : bool, default True
+        Carry the running product across blocks.
+    accumulate_in_tree : bool, default False
+        Use an associative tree scan for across-block accumulation.
     parallel : bool, default False
         If True, pre-compute all per-step exponentials via
         ``tensor_fmexp(neutral, step)`` and combine them with
         ``tensor_product`` using an associative tree scan (higher parallelism,
         higher memory).  If False, stream via sequential ``tensor_fmexp``
         (lower memory, sequential depth).
-    accumulate_in_tree : bool, default False
-        Use an associative tree scan for across-block accumulation.
-    increment_input : bool, default False
-        If True, ``X`` is already in increment form; skip differencing.
+    core :
+        Tensor algebra backend.  Must provide ``tensor_fmexp``,
+        ``tensor_product``, ``tensor_exponential``, and ``xp``.
+    seq_core : SequentialCore
+        Sequential operations backend.
 
     Returns
     -------

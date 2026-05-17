@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 
 from tensordev.core.jax import Jax
@@ -18,100 +19,74 @@ Array = jax.Array
 _CORE = Jax()
 
 
-def vsig(
-        X: Array,
+def quadratic_iteration(
+        dX: Array,
         *,
         kernel: ConvolutionKernel,
         trunc: int,
         dt: Array | float = 1.0,
         axis: int = -2,
-        output_starting_point: bool = False,
-        increment_input: bool = False,
-        dyadic_order: int = 0,
+        return_trajectory: bool = False,
         order: int = 0,
 ) -> DenseElem:
     r"""
-    Compute a truncated Volterra signature from path nodes or increments.
+    Quadratic Volterra-Chen recursion on pre-processed increments.
 
-    This is the general quadratic Volterra-Chen recursion under the coefficient
-    symmetry hypothesis implemented by :class:`ConvolutionKernel`.  Unlike the SSS
-    recursion there is no fixed-size hidden Markov state: internally we carry a
-    padded history buffer ``[1, V_0, ..., V_{j-1}, 0, ...]`` so that the outer
-    recursion is a :func:`jax.lax.scan` and each inner source-interval sum is a
-    batched local ``eval_vte`` call.
+    Expects ``dX`` to already be in increment form (no differencing) and on
+    the final time grid (dyadic refinement applied externally if needed).
+    All preprocessing is the responsibility of the caller — typically the
+    high-level :func:`~tensordev.volterra.signature.vsig`.
 
     Parameters
     ----------
-    X:
-        Path nodes or increments.  The trailing axis is the path dimension
-        ``kernel.path_dim``; ``axis`` is the step/node axis.  Set
-        ``increment_input=True`` to skip :func:`jnp.diff`.
+    dX:
+        Increments.  Shape ``(*batch, S, d)`` with step axis at ``axis``
+        and trailing path dimension ``d = kernel.path_dim``.
     kernel:
         Volterra kernel supplying projections and coefficient builders.
     trunc:
         Tensor truncation level (positive integer).
     dt:
-        Step size(s).  A scalar gives a uniform grid; a 1-D array of length
-        ``S`` gives a non-uniform grid via cumulative sums (default ``1.0``).
+        Step size(s).  Scalar → uniform grid; 1-D array of length ``S``
+        → non-uniform grid (default ``1.0``).
     axis:
-        Step/node axis of ``X``.
-    output_starting_point:
-        If ``False`` (default), return the terminal Volterra signature.  If
-        ``True``, return the whole trajectory with the tensor unit prepended,
-        i.e. ``[1, V_0, ..., V_{S-1}]`` with the trajectory axis at ``axis``.
-    increment_input:
-        Treat ``X`` as increments rather than path nodes.
-    dyadic_order:
-        Non-negative integer.  Each original increment is split into
-        ``2**dyadic_order`` equal sub-increments (each multiplied by
-        ``1 / 2**dyadic_order``) and ``dt`` is refined accordingly.
-        ``dyadic_order=0`` (default) leaves the path unchanged.
+        Step axis of ``dX`` (default ``-2``).
+    return_trajectory:
+        If ``True``, return ``[V_1, ..., V_S]`` with the step axis at
+        ``axis``.  If ``False`` (default), return the terminal ``V_S``.
     order:
-        Quadrature order for the higher-order basis-expansion scheme.
-        ``0`` (default) left point approximation.  ``1`` uses the
-        basis ``{1, s^beta, s}``; ``2`` uses ``{1, s^beta, s, s^(beta+1), s^2}``.
-        Works on non-uniform grids; coefficients are computed inside the
-        scan to keep memory O(S) rather than O(S²).
+        Quadrature order for the basis-expansion scheme.  ``0`` (default)
+        left-point; ``1`` uses ``{1, s^beta, s}``; ``2`` uses
+        ``{1, s^beta, s, s^(beta+1), s^2}``.
 
     Returns
     -------
     DenseElem
-        Terminal signature by default.  With ``output_starting_point=True``,
-        each level carries an additional trajectory axis at ``axis``.
+        Terminal signature, or full trajectory when ``return_trajectory=True``.
     """
     if trunc <= 0:
         raise ValueError(f"trunc must be positive, got {trunc}.")
-    if dyadic_order < 0:
-        raise ValueError(f"dyadic_order must be non-negative, got {dyadic_order}.")
     if order not in (0, 1, 2):
         raise ValueError(f"order must be 0, 1, or 2, got {order}.")
 
-    X = jnp.asarray(X)
-    if X.ndim < 2:
-        raise ValueError("X must have at least a step axis and a trailing path dimension.")
+    dX = jnp.asarray(dX)
+    if dX.ndim < 2:
+        raise ValueError("dX must have at least a step axis and a trailing path dimension.")
 
-    axis_norm = axis % X.ndim
-    if axis_norm == X.ndim - 1:
+    axis_norm = axis % dX.ndim
+    if axis_norm == dX.ndim - 1:
         raise ValueError("axis must identify the step axis, not the trailing path dimension.")
-    if X.shape[-1] != kernel.path_dim:
+    if dX.shape[-1] != kernel.path_dim:
         raise ValueError(
-            f"X trailing dimension must be {kernel.path_dim}, got {X.shape[-1]}."
+            f"dX trailing dimension must be {kernel.path_dim}, got {dX.shape[-1]}."
         )
 
-    dtype = X.dtype
-    dX = (X if increment_input else jnp.diff(X, axis=axis_norm)).astype(dtype)
+    dtype = dX.dtype
     S = dX.shape[axis_norm]
     if S == 0:
-        raise ValueError("volterra_vsig requires at least one increment.")
+        raise ValueError("quadratic_iteration requires at least one increment.")
 
-    # Dyadic refinement: split each increment into 2**dyadic_order equal sub-increments.
-    if dyadic_order > 0:
-        factor = 1 << int(dyadic_order)
-        dX = jnp.repeat(dX / factor, factor, axis=axis_norm)
-        S = dX.shape[axis_norm]
-        dt = _refine_dt(dt, factor=factor, dtype=dtype)
-
-    projected = jnp.einsum("qmd,...d->...qm", kernel.A.astype(dtype), dX)
+    projected = jnp.einsum("qmd,...d->...qm", kernel.A.astype(dtype), dX.astype(dtype))
     y = projected[..., 0, :] if kernel.q == 1 else projected
 
     y_time = jnp.moveaxis(y, axis_norm, 0)
@@ -125,7 +100,7 @@ def vsig(
     # Unified interval-basis scan for all orders and all q.
     # For q > 1 the basis includes all beta_p values; for q=1 it reduces to
     # the scalar basis used by the FFT branch.
-    rhos = _basis_rhos_multicomp(order, betas=kernel.beta.astype(dtype), dtype=dtype)
+    rhos = _basis_rhos_multicomp(order, betas=kernel.beta, dtype=dtype)
     thetas = _chebyshev_lobatto_thetas(n=len(rhos), dtype=dtype)
     B = len(rhos)
     components0 = _make_basis_seed(
@@ -196,16 +171,11 @@ def vsig(
 
     _, traj = lax.scan(step_basis, components0, source)
 
-    if output_starting_point:
-        traj_with_unit = tuple(
-            jnp.concatenate([unit[n][None], traj[n]], axis=0)
-            for n in range(trunc + 1)
-        )
+    if return_trajectory:
         if axis_norm != 0:
-            traj_with_unit = tuple(
-                jnp.moveaxis(level, 0, axis_norm) for level in traj_with_unit
-            )
-        return traj_with_unit
+            traj = tuple(jnp.moveaxis(level, 0, axis_norm) for level in traj)
+        return traj
+
 
     return tuple(level[-1] for level in traj)
 
@@ -442,14 +412,16 @@ def _basis_rhos_multicomp(
     order=1: ``{0} | {beta_p} | {1}``
     order=2: ``{0} | {beta_p} | {1} | {beta_p + 1} | {2}``
     """
-    betas_1d = jnp.atleast_1d(betas).astype(dtype)
-    q = int(betas_1d.shape[0])
+    # Use numpy to extract concrete float values — jnp indexing inside a jit
+    # trace produces abstract tracers, which cannot be converted to Python float.
+    betas_np = np.asarray(betas).reshape(-1).astype(float)
+    q = int(betas_np.shape[0])
     zero = jnp.asarray(0.0, dtype=dtype)
     if order == 0:
         return (zero,)
 
     # Collect candidates as Python floats so exact deduplication via a set works.
-    beta_vals = [float(betas_1d[p]) for p in range(q)]
+    beta_vals = [float(betas_np[p]) for p in range(q)]
     candidates: list[float] = [0.0] + beta_vals + [1.0]
     if order == 2:
         candidates += [b + 1.0 for b in beta_vals] + [2.0]
@@ -553,4 +525,4 @@ def _basis_interpolation_matrix_batched(
     return jnp.moveaxis(jnp.stack(rows, axis=0), -1, 0)
 
 
-__all__ = ["vsig", "BasisExpansionSpec"]
+__all__ = ["quadratic_iteration", "BasisExpansionSpec"]

@@ -169,8 +169,8 @@ def main():
         print(f"\n── {label} ──────────────────────────────")
 
         # Build kernel
-        Lambda_np, A_np, b_np = random_fssk(q=q, R=R, m=m, d=d, seed=seed, eig_min=0.0, eig_max=1.0)
-        sss = StateSpaceSignature.from_matrix(Lambda=Lambda_np, A=A_np, b=b_np, trunc=N)
+        fssk = random_fssk(q=q, R=R, m=m, d=d, seed=seed, eig_min=0.0, eig_max=1.0)
+        sss = StateSpaceSignature(kernel=fssk, trunc=N)
 
         # Exact signature (computed once per setup)
         S_exact = sss.vsig(X, dt=dt, axis=-2)

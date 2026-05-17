@@ -26,7 +26,7 @@ class VolterraCoefficients:
     This object stores the coefficient arrays consumed by the symmetric
     shuffle/Horner evaluation routines.  The public package name deliberately
     does not include ``symmetric``; the implementation assumes the coefficient
-    symmetry hypothesis from Part II, i.e. the coefficient of a word ``w p``
+    symmetry hypothesis from the paper, i.e. the coefficient of a word ``w p``
     depends on the prefix word ``w`` only through its multi-index ``ell``.
 
     For a triple ``(s,t,tau)`` and a prefix multi-index ``ell`` with

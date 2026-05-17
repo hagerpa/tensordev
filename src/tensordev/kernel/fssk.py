@@ -204,12 +204,8 @@ class EmptyTransportParams:
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class PrecomputedTransportParams:
-    expm_x: Array
-    phi1_x: Array
-    phi2_x: Array
-    expm_y_t: Array
-    phi1_y_t: Array
-    phi2_y_t: Array
+    lambda_x: object  # Lambda with precomputed expm/phi1/phi2 blocks
+    lambda_y: object  # Lambda with precomputed expm/phi1/phi2 blocks
 
 
 def fssk_sigkernel(
@@ -371,41 +367,21 @@ def _build_transport_params(lambda_op, dt_x, dt_y, *, dt_x_uniform, dt_y_uniform
     if not precompute_propagators:
         return EmptyTransportParams()
 
-    def build_ops(dt, uniform):
-        if uniform:
-            e = lambda_op.expm(dt[0], dtype=dtype)
-            p1 = lambda_op.phi1(dt[0], dtype=dtype)
-            p2 = lambda_op.phi2(dt[0], dtype=dtype)
-            n = dt.shape[0]
-            return (jnp.broadcast_to(e, (n,) + e.shape),
-                    jnp.broadcast_to(p1, (n,) + p1.shape),
-                    jnp.broadcast_to(p2, (n,) + p2.shape))
-        e = lambda_op.expm(dt, dtype=dtype)
-        return e, lambda_op.phi1(dt, dtype=dtype), lambda_op.phi2(dt, dtype=dtype)
+    def make_precomputed(dt, uniform):
+        dt_arg = dt[0] if uniform else dt
+        return (lambda_op
+                .precompute_expm(dt_arg, dtype=dtype)
+                .precompute_phi1(dt_arg, dtype=dtype)
+                .precompute_phi2(dt_arg, dtype=dtype))
 
-    expm_x, phi1_x, phi2_x = build_ops(dt_x, dt_x_uniform)
-    expm_y, phi1_y, phi2_y = build_ops(dt_y, dt_y_uniform)
-    T = lambda a: jnp.swapaxes(a, -1, -2)
     return PrecomputedTransportParams(
-        expm_x=expm_x, phi1_x=phi1_x, phi2_x=phi2_x,
-        expm_y_t=T(expm_y), phi1_y_t=T(phi1_y), phi2_y_t=T(phi2_y),
+        lambda_x=make_precomputed(dt_x, dt_x_uniform),
+        lambda_y=make_precomputed(dt_y, dt_y_uniform),
     )
 
 
 def _scale_like(h: Array, x: Array) -> Array:
     return h.reshape(h.shape + (1,) * (x.ndim - h.ndim))
-
-
-def _left_apply(op: Array, X: Array) -> Array:
-    if op.ndim == 2:
-        return jnp.einsum("ab,...bc->...ac", op, X)
-    return jnp.einsum("wab,w...bc->w...ac", op, X)
-
-
-def _right_apply(X: Array, op: Array) -> Array:
-    if op.ndim == 2:
-        return jnp.einsum("...ab,bc->...ac", X, op)
-    return jnp.einsum("w...ab,wbc->w...ac", X, op)
 
 
 def _exact_step_action(lambda_op, h, prev, src, *, side, dtype):
@@ -415,27 +391,16 @@ def _exact_step_action(lambda_op, h, prev, src, *, side, dtype):
     return lambda_op.expm_multiply_right(h, prev, dtype=dtype) + lambda_op.phi1_multiply_right(h, src, dtype=dtype)
 
 
-def _exact_step_precomputed(op, phi1, prev, src, *, side):
-    """Precomputed matrix transport step (left or right)."""
-    if side == "left":
-        return _left_apply(op, prev) + _left_apply(phi1, src)
-    return _right_apply(prev, op) + _right_apply(src, phi1)
-
-
 def _transport_step_etd1(lambda_op, h, prev, src, *,
                          side, transport_params, precompute_propagators, step_index, dtype):
     """ETD1 (exact + phi1) transport, action or precomputed."""
     if not precompute_propagators:
         return _exact_step_action(lambda_op, h, prev, src, side=side, dtype=dtype)
-    ops = _get_precomputed_ops(transport_params, side, step_index)
-    return _exact_step_precomputed(ops[0], ops[1], prev, src, side=side)
-
-
-def _get_precomputed_ops(tp, side, idx):
-    """Return (expm, phi1, phi2) for the given side and step index."""
     if side == "left":
-        return tp.expm_x[idx], tp.phi1_x[idx], tp.phi2_x[idx]
-    return tp.expm_y_t[idx], tp.phi1_y_t[idx], tp.phi2_y_t[idx]
+        lam = transport_params.lambda_x[step_index]
+        return lam.expm_multiply_left(h, prev, dtype=dtype) + lam.phi1_multiply_left(h, src, dtype=dtype)
+    lam = transport_params.lambda_y[step_index]
+    return lam.expm_multiply_right(h, prev, dtype=dtype) + lam.phi1_multiply_right(h, src, dtype=dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -472,14 +437,14 @@ def _heun_cell_step(lambda_op, cell, transport_params, *,
     A_prev, B_curr = cell.A_n, cell.B_w
 
     if precompute_propagators:
-        E_s, P_s, Q_s = _get_precomputed_ops(transport_params, "left", ix)
-        E_t, P_t, Q_t = _get_precomputed_ops(transport_params, "right", iy)
-        _eL = lambda X: _left_apply(E_s, X)
-        _p1L = lambda X: _left_apply(P_s, X)
-        _p2L = lambda X: _left_apply(Q_s, X)
-        _eR = lambda X: _right_apply(X, E_t)
-        _p1R = lambda X: _right_apply(X, P_t)
-        _p2R = lambda X: _right_apply(X, Q_t)
+        lx = transport_params.lambda_x[ix]
+        ly = transport_params.lambda_y[iy]
+        _eL = lambda X: lx.expm_multiply_left(ds, X, dtype=dtype)
+        _p1L = lambda X: lx.phi1_multiply_left(ds, X, dtype=dtype)
+        _p2L = lambda X: lx.phi2_multiply_left(ds, X, dtype=dtype)
+        _eR = lambda X: ly.expm_multiply_right(dt, X, dtype=dtype)
+        _p1R = lambda X: ly.phi1_multiply_right(dt, X, dtype=dtype)
+        _p2R = lambda X: ly.phi2_multiply_right(dt, X, dtype=dtype)
     else:
         _eL = lambda X: lambda_op.expm_multiply_left(ds, X, dtype=dtype)
         _p1L = lambda X: lambda_op.phi1_multiply_left(ds, X, dtype=dtype)

@@ -74,7 +74,7 @@ if _USE_LATEX:
 try:
     from matplotlib_inline.backend_inline import set_matplotlib_formats
     set_matplotlib_formats("retina")
-except ImportError:
+except Exception:
     pass
 
 mpl.rcParams.update({

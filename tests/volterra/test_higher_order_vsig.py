@@ -118,7 +118,7 @@ def test_higher_order_vsig_matches_fft_gamma(order, trunc):
 
 @pytest.mark.parametrize("order", [1, 2])
 def test_higher_order_vsig_trajectory_matches_fft(order):
-    """output_starting_point=True trajectory matches vsig_fft level-by-level."""
+    """block_size=1, output_starting_point=True trajectory matches vsig_fft level-by-level."""
     X = jnp.array(
         [[0.0, 0.0], [0.2, -0.1], [0.4, 0.3], [0.1, 0.5]],
         dtype=jnp.float64,
@@ -128,9 +128,9 @@ def test_higher_order_vsig_trajectory_matches_fft(order):
     trunc = 3
 
     ref = vsig_fft(X, kernel=kernel, dt=1.0, trunc=trunc, order=order,
-                   output_starting_point=True)
+                   block_size=1, output_starting_point=True)
     got = vsig(X, kernel=kernel, dt=1.0, trunc=trunc, order=order,
-               output_starting_point=True)
+               block_size=1, output_starting_point=True)
     _assert_allclose(got, ref, atol=1e-8, label=f"trajectory order={order}")
 
 
@@ -151,7 +151,7 @@ def test_higher_order_vsig_terminal_consistent_with_trajectory(order):
 
     terminal = vsig(X, kernel=kernel, dt=1.0, trunc=trunc, order=order)
     traj = vsig(X, kernel=kernel, dt=1.0, trunc=trunc, order=order,
-                output_starting_point=True)
+                block_size=1, output_starting_point=True)
 
     _assert_allclose(terminal, tuple(level[-1] for level in traj),
                      atol=1e-12, label=f"terminal vs traj[-1] order={order}")

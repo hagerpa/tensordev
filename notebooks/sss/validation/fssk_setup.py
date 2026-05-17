@@ -1,17 +1,20 @@
 """
 fssk_setup.py — FSSK parameter generation and benchmark regimes.
 
-  random_fssk(...)  — generate random (Lambda, A, b) kernel parameters
+  random_fssk(...)  — generate a random FSSK kernel via FSSK.from_jordan
   REGIMES           — dict of SMALL / MEDIUM / LARGE RegimeConfig instances
 """
 
 import sys
 from pathlib import Path
 
+import jax.numpy as jnp
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))  # tensordev/src
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # notebooks/
 
+from tensordev.sss.kernel import FSSK
 from _validation_util.regime_config import RegimeConfig
 
 
@@ -28,57 +31,57 @@ def random_fssk(
     seed: int = 0,
     eig_min: float = 0.0,
     eig_max: float = 1.0,
-    jordan_alpha: float = 0.25,
-    spectral_radius: float | None = None,
     normalise_b: bool = True,
-    as_jordan: bool = False,
     dtype=np.float64,
-):
-    """Return random (Lambda, A, b) parameters for an FSSK kernel.
+    # Legacy parameters kept for call-site compatibility but no longer used.
+    jordan_alpha: float = 0.25,   # noqa: ignored — JordanLambda always uses 1
+    spectral_radius: float | None = None,  # noqa: ignored
+    as_jordan: bool = False,      # noqa: ignored — output is always Jordan form
+) -> FSSK:
+    """Return a random FSSK kernel built from real 2×2 Jordan blocks.
 
-    Lambda : (R, R)  by default a random matrix similar to a near-Jordan
-             form: eigenvalues drawn uniformly from [eig_min, eig_max] with
-             a super-diagonal of *jordan_alpha*, then conjugated by a random
-             orthogonal Q so Lambda = Q J Q^T.  When *as_jordan* is True the
-             Q step is skipped and Lambda is the near-diagonal J itself.
+    The state matrix Lambda is assembled as a block-diagonal of real Jordan
+    blocks of size 2 (plus one size-1 block when R is odd).  Each block has a
+    randomly drawn eigenvalue ``lam_i ~ Uniform(eig_min, eig_max)`` and the
+    standard Jordan off-diagonal of 1 (as used by :class:`JordanLambda`).
 
-    A      : (q, m, d)  semi-orthogonal projection matrices.
-
-    b      : (q, R)  random coefficients.  If *normalise_b* is True
-             (default), b is rescaled so that ‖Λ‖_2 / ‖b‖_F = 1.
+    The kernel is constructed via :meth:`FSSK.from_jordan` so that the
+    returned object carries a structured :class:`JordanLambda` operator.
 
     Parameters
     ----------
-    spectral_radius : float or None
-        If given, rescale Lambda to this spectral radius before normalising b.
+    q : int
+        Number of FSSK components.
+    R : int
+        Total state-space dimension.  Decomposed into ``R // 2`` blocks of
+        size 2 plus one block of size 1 when R is odd.
+    m : int
+        Latent path dimension (A has shape ``(q, m, d)``).
+    d : int
+        Input path dimension.
+    seed : int
+        NumPy RNG seed.  Default 0.
+    eig_min, eig_max : float
+        Uniform range for the block eigenvalues.  Default [0.0, 1.0].
     normalise_b : bool
-        Normalise b as described above.  Default True.
-    as_jordan : bool
-        If True, return Lambda in the near-diagonal Jordan basis (no Q
-        conjugation).  Useful for benchmarks where a structured Lambda is
-        preferred.  Default False.
+        If True (default), rescale ``b`` to unit Frobenius norm (``‖b‖_F = 1``),
+        independent of the eigenvalue scale.  This ensures the kernel has
+        meaningful discriminative power regardless of how small the eigenvalues are.
     dtype : numpy dtype
-        Output dtype for all three arrays.  Default float64.
+        Output dtype.  Default float64.
     """
     rng = np.random.default_rng(seed)
 
-    eigs = rng.uniform(eig_min, eig_max, size=R)
-    J = np.diag(eigs)
-    for i in range(R - 1):
-        J[i, i + 1] = jordan_alpha
+    # Build R//2 Jordan blocks of size 2, plus one size-1 block if R is odd.
+    n_pairs   = R // 2
+    n_singles = R % 2
+    n_blocks  = n_pairs + n_singles
 
-    if as_jordan:
-        Lambda = J
-    else:
-        G = rng.normal(size=(R, R))
-        Q, _ = np.linalg.qr(G)
-        Lambda = Q @ J @ Q.T
+    lam        = rng.uniform(eig_min, eig_max, size=n_blocks)
+    real_rates = lam
+    real_sizes = (2,) * n_pairs + (1,) * n_singles
 
-    if spectral_radius is not None:
-        sr = np.max(np.abs(np.linalg.eigvals(Lambda)))
-        if sr > 0:
-            Lambda *= spectral_radius / sr
-
+    # Semi-orthogonal projection matrices A of shape (q, m, d).
     A = np.empty((q, m, d), dtype=dtype)
     for p in range(q):
         if m <= d:
@@ -93,14 +96,20 @@ def random_fssk(
     b = rng.normal(size=(q, R))
 
     if normalise_b:
-        L = np.linalg.norm(Lambda, ord=2)
+        # Normalise b to unit Frobenius norm, independent of eigenvalue scale.
         bnorm = np.linalg.norm(b, ord="fro")
         if bnorm > 0:
-            b *= L / bnorm
+            b /= bnorm
     else:
+        # Column-wise L1 normalisation (each R-column has L1-norm 1 across q).
         b /= np.sum(np.abs(b), axis=0, keepdims=True)
 
-    return Lambda.astype(dtype), A.astype(dtype), b.astype(dtype)
+    return FSSK.from_jordan(
+        A=jnp.asarray(A, dtype=dtype),
+        b=jnp.asarray(b, dtype=dtype),
+        real_rates=jnp.asarray(real_rates, dtype=jnp.float64),
+        real_sizes=real_sizes,
+    )
 
 
 # ===========================================================================
