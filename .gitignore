@@ -39,3 +39,6 @@ tdvenv/
 tmp/
 temp/
 *.log
+
+# Recycle bin
+recycle_bin/
