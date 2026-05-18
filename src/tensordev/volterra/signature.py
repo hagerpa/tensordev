@@ -1,6 +1,7 @@
 """Volterra signature — high-level entry point and VolterraSignature wrapper."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
@@ -10,7 +11,7 @@ import numpy as np
 
 from tensordev.core.universal import DenseElem
 from tensordev.volterra.kernel import ConvolutionKernel, FractionalKernel, GammaKernel
-from tensordev.volterra.iteration import quadratic_iteration as _vsig_quadratic
+from tensordev.volterra.iteration_quad import quadratic_iteration as _vsig_quadratic
 from tensordev.volterra.iteration_fft import fft_iteration as _vsig_fft, PrecomputedLagTables
 from tensordev.volterra.iteration_pc import pc_iteration as _vsig_pc
 
@@ -83,8 +84,11 @@ def vsig(
         Which iteration scheme to use.
 
         ``"auto"``
-            Use ``"fft"`` when ``dt`` is a scalar (uniform grid), otherwise
-            fall back to ``"quadratic"``.
+            Use ``"fft"`` when ``dt`` is a scalar (uniform grid) **and**
+            the expected FFT op-count is lower than the quadratic op-count
+            (comparing ``S·log₂J_eff·N^q`` vs ``S²`` or ``S²·N``, with
+            ``q = kernel.q``);
+            otherwise falls back to ``"quadratic"``.
         ``"fft"``
             FFT-based convolution — uniform grids only.
         ``"quadratic"``
@@ -121,7 +125,15 @@ def vsig(
     # scheme selection
     _use_adams = scheme == "adams"
     if scheme == "auto":
-        _use_fft = np.ndim(dt) == 0
+        if np.ndim(dt) == 0:
+            _x_shape = np.shape(X)
+            _s_eff = (_x_shape[axis % len(_x_shape)] - (0 if increment_input else 1)) * (1 << dyadic_order)
+            _j_eff = 1 << math.ceil(math.log2(max(2 * _s_eff - 1, 2))) if _s_eff > 1 else 1
+            _fft_cost = _s_eff * math.log2(_j_eff) * (trunc ** kernel.q)
+            _quad_cost = _s_eff ** 2 if kernel.q <= 1 else _s_eff ** 2 * trunc
+            _use_fft = _s_eff > 1 and _fft_cost < _quad_cost
+        else:
+            _use_fft = False
     elif scheme == "fft":
         _use_fft = True
     else:

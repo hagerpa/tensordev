@@ -2,9 +2,39 @@
 
 from math import comb
 
-from .core import Einsum, Jax, Universal
+from .core import Jax, JaxShuffleCore, JaxSequentialCore
 from .development import FreeDevelopment, free_development, Signature, path_signature
 from ._backend import get_default_core, get_default_seq_core, shuffle_core
+
+# --- volterra ---
+from .volterra import (
+    vsig,
+    VolterraSignature,
+    FractionalKernel,
+    GammaKernel,
+    FSSKConvolutionKernel,
+)
+
+# --- sss ---
+from .sss import (
+    fssk_vsig,
+    fssk_state,
+    StateSpaceSignature,
+    FSSK,
+)
+
+# --- kernel ---
+from .kernel import (
+    FreeKernel,
+    free_kernel,
+    SigKernel,
+    HigherOrderKernel,
+    higher_order_kernel,
+    FSSKSigKernel,
+    fssk_sigkernel,
+    LinearKernel,
+    RBFKernel,
+)
 
 
 def shuffle_core_expected_memory(d: int, trunc: int) -> float:
@@ -25,13 +55,36 @@ def shuffle_core_expected_memory(d: int, trunc: int) -> float:
     return total_entries * 32 / 1024 ** 2
 
 __all__ = [
-    "Einsum",
+    # core
     "Jax",
-    "Universal",
+    "JaxShuffleCore",
+    "JaxSequentialCore"
+    # development
     "FreeDevelopment",
     "free_development",
     "Signature",
     "path_signature",
+    # volterra
+    "vsig",
+    "VolterraSignature",
+    "FractionalKernel",
+    "GammaKernel",
+    "FSSKConvolutionKernel",
+    # sss
+    "fssk_vsig",
+    "fssk_state",
+    "StateSpaceSignature",
+    "FSSK",
+    # kernel
+    "FreeKernel",
+    "free_kernel",
+    "SigKernel",
+    "HigherOrderKernel",
+    "higher_order_kernel",
+    "FSSKSigKernel",
+    "fssk_sigkernel",
+    "LinearKernel",
+    "RBFKernel",
 ]
 
 _core = get_default_core()

@@ -41,7 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # notebooks/
 
 from tensordev.volterra.kernel import FractionalKernel
-from tensordev.volterra.iteration import quadratic_iteration
+from tensordev.volterra.iteration_quad import quadratic_iteration
 from tensordev.volterra.iteration_fft import fft_iteration, precompute_lag_tables
 from _validation_util.xla_utils import compile_and_profile
 from vsig_setup import REGIMES, D, M, BETA, ORDER, DYADIC

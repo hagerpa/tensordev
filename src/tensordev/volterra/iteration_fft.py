@@ -13,7 +13,7 @@ from tensordev.core.jax import Jax
 from tensordev.core.universal import DenseElem
 from tensordev.util.combinatorics import build_multiindex_layout, multiindex_batched_navigation
 from tensordev.volterra.kernel import ConvolutionKernel
-from tensordev.volterra.iteration import (
+from tensordev.volterra.iteration_quad import (
     _normalize_times,
     _make_unit,
     BasisExpansionSpec,
