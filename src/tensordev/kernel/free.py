@@ -29,7 +29,7 @@ Array = jnp.ndarray
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class FreeCellData:
-    """Backend-independent neighbourhood data for one free-kernel cell update.
+    """Backend-independent neighborhood data for one free-kernel cell update.
 
     Bundles the three-corner stencil (nw, n, w) together with the driving
     increments so that the cell step function receives a single structured
