@@ -258,3 +258,177 @@ def test_jordan_lambda_b_from_prony_builds_expected_shape():
 def test_jordan_lambda_validates_block_parameters(kwargs, pattern):
     with pytest.raises(ValueError, match=pattern):
         JordanLambda(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# phi2 dense helper
+# ---------------------------------------------------------------------------
+
+
+def _phi2_dense(matrix, dt):
+    """Compute phi_2(-dt * M) via the augmented exponential."""
+    matrix = jnp.asarray(matrix)
+    dt = jnp.asarray(dt, dtype=matrix.dtype)
+    r = matrix.shape[0]
+    eye = jnp.eye(r, dtype=matrix.dtype)
+    zero = jnp.zeros_like(matrix)
+
+    def one(h):
+        aug = jnp.block([[-h * matrix, eye, zero], [zero, zero, eye], [zero, zero, zero]])
+        return jsp_linalg.expm(aug)[:r, 2 * r:]
+
+    return one(dt) if dt.ndim == 0 else jax.vmap(one)(dt)
+
+
+# ---------------------------------------------------------------------------
+# Parametrized phi1 / phi2 correctness tests for JordanLambda (real blocks)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("rate", [0.1, 0.5, 1.5])
+@pytest.mark.parametrize("size", [1, 2, 3, 4])
+@pytest.mark.parametrize("dt_val", [0.01, 0.04, 0.1, 0.3, 1.0, 2.0])
+def test_jordan_lambda_phi1_real_pade_vs_dense(dt_val, size, rate):
+    """phi1 for real Jordan blocks matches DenseLambda for all |dt*rate| including small."""
+    lam = JordanLambda(
+        real_rates=jnp.asarray([rate]),
+        real_sizes=jnp.asarray([size]),
+    )
+    dense = DenseLambda(lam.matrix())
+    dt = jnp.asarray([dt_val])
+    got = lam.phi1(dt)
+    expected = _phi1_dense(lam.matrix(), dt)
+    _assert_allclose(got, expected, atol=1e-8, rtol=1e-8)
+
+
+@pytest.mark.parametrize("rate", [0.1, 0.5, 1.5])
+@pytest.mark.parametrize("size", [1, 2, 3, 4])
+@pytest.mark.parametrize("dt_val", [0.01, 0.04, 0.1, 0.3, 1.0, 2.0])
+def test_jordan_lambda_phi2_real_pade_vs_dense(dt_val, size, rate):
+    """phi2 for real Jordan blocks matches DenseLambda for all |dt*rate| including small."""
+    lam = JordanLambda(
+        real_rates=jnp.asarray([rate]),
+        real_sizes=jnp.asarray([size]),
+    )
+    dense = DenseLambda(lam.matrix())
+    dt = jnp.asarray([dt_val])
+    got = lam.phi2(dt)
+    expected = _phi2_dense(lam.matrix(), dt)
+    _assert_allclose(got, expected, atol=1e-8, rtol=1e-8)
+
+
+# ---------------------------------------------------------------------------
+# Small |dt*rate| regime — the exact bug domain (previously untested)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("rate", [0.1, 0.5])
+@pytest.mark.parametrize("size", [2, 3, 4])
+@pytest.mark.parametrize("dt_val", [0.001, 0.01, 0.04])
+def test_jordan_lambda_phi1_small_dt_rate_vs_dense(dt_val, size, rate):
+    """phi1 in small |dt*rate| regime (was buggy) now matches DenseLambda."""
+    lam = JordanLambda(
+        real_rates=jnp.asarray([rate]),
+        real_sizes=jnp.asarray([size]),
+    )
+    dt = jnp.asarray([dt_val])
+    got = lam.phi1(dt)
+    expected = _phi1_dense(lam.matrix(), dt)
+    _assert_allclose(got, expected, atol=1e-8, rtol=1e-8)
+
+
+@pytest.mark.parametrize("rate", [0.1, 0.5])
+@pytest.mark.parametrize("size", [2, 3, 4])
+@pytest.mark.parametrize("dt_val", [0.001, 0.01, 0.04])
+def test_jordan_lambda_phi2_small_dt_rate_vs_dense(dt_val, size, rate):
+    """phi2 in small |dt*rate| regime matches DenseLambda."""
+    lam = JordanLambda(
+        real_rates=jnp.asarray([rate]),
+        real_sizes=jnp.asarray([size]),
+    )
+    dt = jnp.asarray([dt_val])
+    got = lam.phi2(dt)
+    expected = _phi2_dense(lam.matrix(), dt)
+    _assert_allclose(got, expected, atol=1e-8, rtol=1e-8)
+
+
+# ---------------------------------------------------------------------------
+# Large Jordan block sizes (3, 4, 5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("size", [3, 4, 5])
+@pytest.mark.parametrize("dt_val", [0.1, 1.0])
+def test_jordan_lambda_phi1_large_block_sizes(dt_val, size):
+    """phi1 is correct for large Jordan block sizes."""
+    lam = JordanLambda(
+        real_rates=jnp.asarray([0.5]),
+        real_sizes=jnp.asarray([size]),
+    )
+    dt = jnp.asarray([dt_val])
+    got = lam.phi1(dt)
+    expected = _phi1_dense(lam.matrix(), dt)
+    _assert_allclose(got, expected, atol=1e-8, rtol=1e-8)
+
+
+@pytest.mark.parametrize("size", [3, 4, 5])
+@pytest.mark.parametrize("dt_val", [0.1, 1.0])
+def test_jordan_lambda_phi2_large_block_sizes(dt_val, size):
+    """phi2 is correct for large Jordan block sizes."""
+    lam = JordanLambda(
+        real_rates=jnp.asarray([0.5]),
+        real_sizes=jnp.asarray([size]),
+    )
+    dt = jnp.asarray([dt_val])
+    got = lam.phi2(dt)
+    expected = _phi2_dense(lam.matrix(), dt)
+    _assert_allclose(got, expected, atol=1e-8, rtol=1e-8)
+
+
+# ---------------------------------------------------------------------------
+# Oscillatory phi1 / phi2
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("osc_size", [1, 2, 3])
+@pytest.mark.parametrize("dt_val", [0.01, 0.1, 1.0])
+def test_jordan_lambda_phi1_oscillatory_vs_dense(dt_val, osc_size):
+    """phi1 for oscillatory blocks matches DenseLambda."""
+    lam = JordanLambda(
+        osc_decays=jnp.asarray([0.3]),
+        osc_freqs=jnp.asarray([1.1]),
+        osc_sizes=jnp.asarray([osc_size]),
+    )
+    dt = jnp.asarray([dt_val])
+    got = lam.phi1(dt)
+    expected = _phi1_dense(lam.matrix(), dt)
+    _assert_allclose(got, expected, atol=1e-8, rtol=1e-8)
+
+
+@pytest.mark.parametrize("osc_size", [1, 2, 3])
+@pytest.mark.parametrize("dt_val", [0.01, 0.1, 1.0])
+def test_jordan_lambda_phi2_oscillatory_vs_dense(dt_val, osc_size):
+    """phi2 for oscillatory blocks matches DenseLambda."""
+    lam = JordanLambda(
+        osc_decays=jnp.asarray([0.3]),
+        osc_freqs=jnp.asarray([1.1]),
+        osc_sizes=jnp.asarray([osc_size]),
+    )
+    dt = jnp.asarray([dt_val])
+    got = lam.phi2(dt)
+    expected = _phi2_dense(lam.matrix(), dt)
+    _assert_allclose(got, expected, atol=1e-8, rtol=1e-8)
+
+
+# ---------------------------------------------------------------------------
+# phi2 was never tested for the mixed real+osc sample — add it
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dt", [0.2, jnp.asarray([0.1, 0.3, 0.7])])
+def test_jordan_lambda_phi2_matches_dense_materialization(dt):
+    """phi2 for the standard mixed JordanLambda matches DenseLambda."""
+    lam = _sample_jordan_lambda()
+    got = lam.phi2(dt)
+    expected = _phi2_dense(lam.matrix(), dt)
+    _assert_allclose(got, expected, atol=1e-8, rtol=1e-8)

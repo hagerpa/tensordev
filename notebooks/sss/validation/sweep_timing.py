@@ -142,7 +142,9 @@ def _make_row_fn(regime_name: str, n_repeats: int, seed0: int, total_runs: int) 
         )
         fssk = random_fssk(
             q=q, R=R, m=m, d=3, seed=seed0 + run_id,
-            eig_min=0.1, eig_max=1.5, normalise_b=False,
+            eig_min=0.1, eig_max=1.5,
+            freq_min=0.1, freq_max=2.0,
+            normalise_b=False,
         )
 
         timings    = time_exact_components(X=X, dt=dt, fssk=fssk, N=N, n_repeats=n_repeats)

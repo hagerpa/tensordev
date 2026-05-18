@@ -89,6 +89,19 @@ def parse_args():
     p.add_argument("--setups", type=str, default=None,
                    help='JSON list, e.g. \'[{"n":1,"R":2,"seed":42},...]\'. '
                         'Optional "label" key per entry.')
+    # Jordan block parameters for random_fssk
+    p.add_argument("--eig-min",        type=float, default=0.1,
+                   help="Min real part (decay) of eigenvalues. Default: 0.1.")
+    p.add_argument("--eig-max",        type=float, default=1.0,
+                   help="Max real part (decay) of eigenvalues. Default: 1.0.")
+    p.add_argument("--freq-min",       type=float, default=0.1,
+                   help="Min imaginary part (frequency) of oscillatory eigenvalues. Default: 0.1.")
+    p.add_argument("--freq-max",       type=float, default=2.0,
+                   help="Max imaginary part (frequency) of oscillatory eigenvalues. Default: 2.0.")
+    p.add_argument("--min-block-size", type=int,   default=1,
+                   help="Minimum Jordan chain order. Default: 1.")
+    p.add_argument("--max-block-size", type=int,   default=4,
+                   help="Maximum Jordan chain order. Default: 4.")
     p.add_argument("--output-dir", type=Path,
                    default=Path(__file__).parent / "validation_outputs")
     return p.parse_args()
@@ -135,7 +148,11 @@ def main():
         print(f"\n── {label} ──────────────────────────────")
 
         fssk = random_fssk(
-            q=q, R=R, m=m, d=d, seed=seed, eig_min=0.0, eig_max=1.0
+            q=q, R=R, m=m, d=d, seed=seed,
+            eig_min=args.eig_min, eig_max=args.eig_max,
+            freq_min=args.freq_min, freq_max=args.freq_max,
+            min_block_size=args.min_block_size,
+            max_block_size=args.max_block_size,
         )
         sss = StateSpaceSignature(kernel=fssk, trunc=N)
 

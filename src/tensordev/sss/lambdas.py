@@ -242,17 +242,15 @@ def _dense_expm_batched(matrix: Array, dt: Array) -> Array:
 
 
 # ---------------------------------------------------------------------------
-# Direct Padé + scaling-and-squaring for phi_1  (replaces augmented expm)
+# Direct Padé + scaling-and-squaring for phi_1 and phi_2
 # ---------------------------------------------------------------------------
 
-# [6/6] Padé coefficients for φ₁(z) = (e^z − 1)/z = Σ z^k/(k+1)!
-# Computed at import time so the JIT function sees constant arrays.
-def _compute_phi1_pade_coeffs() -> tuple[np.ndarray, np.ndarray]:
-    """Return (numerator, denominator) coefficient vectors for the [6/6] Padé of φ₁."""
+# [6/6] Padé coefficients for φ_k(z) = Σ z^j/(j+k)!, computed at import time.
+def _compute_phi_pade_coeffs(order: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return (n, d) [6/6] Padé coefficients for φ_order whose Taylor series is Σ z^k/(k+order)!"""
     from math import factorial as _fac
     p = 6
-    c = np.array([1.0 / _fac(k + 1) for k in range(2 * p + 1)], dtype=np.float64)
-    # Denominator d_1,…,d_p  (d_0 = 1)
+    c = np.array([1.0 / _fac(k + order) for k in range(2 * p + 1)], dtype=np.float64)
     _A = np.zeros((p, p))
     _rhs = np.zeros(p)
     for _i in range(p):
@@ -262,59 +260,45 @@ def _compute_phi1_pade_coeffs() -> tuple[np.ndarray, np.ndarray]:
             _A[_i, _j - 1] = c[_k - _j]
     _d = np.linalg.solve(_A, _rhs)
     d = np.concatenate([[1.0], _d])
-    # Numerator n_0,…,n_p
     n = np.zeros(p + 1)
     for _k in range(p + 1):
         for _j in range(min(_k, p) + 1):
             n[_k] += c[_k - _j] * d[_j]
     return n, d
 
-_PHI1_PADE_N, _PHI1_PADE_D = _compute_phi1_pade_coeffs()
-_PHI1_PADE_THETA = 1.0  # 1-norm threshold for [6/6] Padé (full float64 accuracy)
+_PHI1_PADE_N, _PHI1_PADE_D = _compute_phi_pade_coeffs(1)
+_PHI2_PADE_N, _PHI2_PADE_D = _compute_phi_pade_coeffs(2)
+_PADE_THETA = 1.0  # shared 1-norm scaling threshold for [6/6] Padé (full float64 accuracy)
+
+
+def _pade_eval(B: Array, B2: Array, B4: Array, B6: Array,
+               n: Array, d: Array, eye: Array) -> Array:
+    """Evaluate a [6/6] Padé rational via even/odd splitting. Single matrix, no scaling."""
+    N_val = (n[0] * eye + n[2] * B2 + n[4] * B4 + n[6] * B6) + B @ (n[1] * eye + n[3] * B2 + n[5] * B4)
+    D_val = (d[0] * eye + d[2] * B2 + d[4] * B4 + d[6] * B6) + B @ (d[1] * eye + d[3] * B2 + d[5] * B4)
+    return jnp.linalg.solve(D_val, N_val)
 
 
 @jax.jit
 def _phi1_pade_ss(A: Array) -> Array:
-    r"""Compute :math:`\varphi_1(A) = (e^A - I) A^{-1}` via [6/6] Padé + scaling-and-squaring.
-
-    Operates on a single ``(R, R)`` matrix.  Cost: ≈ 5 matrix multiplies
-    for the Padé evaluation + 2 per squaring step, on an ``R × R`` matrix
-    (instead of a ``2R × 2R`` augmented ``expm``).
-    """
+    r"""Compute :math:`\varphi_1(A)` via [6/6] Padé + scaling-and-squaring on ``R × R``."""
     r = A.shape[0]
     dtype = A.dtype
     eye = jnp.eye(r, dtype=dtype)
 
-    # --- Scaling ---
     norm1 = jnp.linalg.norm(A.reshape(r, r), ord=1)
-    s = jnp.maximum(0, jnp.ceil(jnp.log2(jnp.maximum(norm1, 1e-30) / _PHI1_PADE_THETA))).astype(int)
+    s = jnp.maximum(0, jnp.ceil(jnp.log2(jnp.maximum(norm1, 1e-30) / _PADE_THETA))).astype(int)
     B = A * (0.5 ** s)
+    B2 = B @ B; B4 = B2 @ B2; B6 = B4 @ B2
 
-    # --- [6/6] Padé via even/odd splitting (4 matmuls + 1 solve) ---
-    n = jnp.asarray(_PHI1_PADE_N, dtype=dtype)
-    d = jnp.asarray(_PHI1_PADE_D, dtype=dtype)
+    phi1_B = _pade_eval(B, B2, B4, B6,
+                        jnp.asarray(_PHI1_PADE_N, dtype=dtype),
+                        jnp.asarray(_PHI1_PADE_D, dtype=dtype), eye)
 
-    B2 = B @ B
-    B4 = B2 @ B2
-    B6 = B4 @ B2
-
-    N_even = n[0] * eye + n[2] * B2 + n[4] * B4 + n[6] * B6
-    N_odd  = n[1] * eye + n[3] * B2 + n[5] * B4
-    N_val  = N_even + B @ N_odd
-
-    D_even = d[0] * eye + d[2] * B2 + d[4] * B4 + d[6] * B6
-    D_odd  = d[1] * eye + d[3] * B2 + d[5] * B4
-    D_val  = D_even + B @ D_odd
-
-    phi1_B = jnp.linalg.solve(D_val, N_val)
-
-    # --- Squaring: φ₁(2C) = ½ φ₁(C) (2I + C φ₁(C))  ---
     def _square(i, carry):
         C, phi1 = carry
-        P = C @ phi1
-        phi1 = 0.5 * (phi1 @ (2.0 * eye + P))
-        C = 2.0 * C
-        return C, phi1
+        phi1 = 0.5 * (phi1 @ (2.0 * eye + C @ phi1))
+        return 2.0 * C, phi1
 
     _, phi1_A = jax.lax.fori_loop(0, s, _square, (B, phi1_B))
     return phi1_A
@@ -322,99 +306,39 @@ def _phi1_pade_ss(A: Array) -> Array:
 
 @jax.jit
 def _dense_phi1_batched(matrix: Array, dt: Array) -> Array:
-    r"""Return batched ``\varphi_1(-dt\,M)`` via direct [6/6] Padé approximant.
-
-    Uses scaling-and-squaring on the ``R × R`` matrix directly instead of
-    the ``2R × 2R`` augmented exponential, halving the effective matrix size.
-    """
-    scaled = -dt[:, None, None] * matrix[None, :, :]
-    return jax.vmap(_phi1_pade_ss)(scaled)
-
-
-# ---------------------------------------------------------------------------
-# Direct Padé + scaling-and-squaring for phi_2
-# ---------------------------------------------------------------------------
-
-# [6/6] Padé coefficients for φ₂(z) = (e^z − z − 1)/z² = Σ z^k/(k+2)!
-def _compute_phi2_pade_coeffs() -> tuple[np.ndarray, np.ndarray]:
-    """Return (numerator, denominator) coefficient vectors for the [6/6] Padé of φ₂."""
-    from math import factorial as _fac
-    p = 6
-    c = np.array([1.0 / _fac(k + 2) for k in range(2 * p + 1)], dtype=np.float64)
-    # Denominator d_1,…,d_p  (d_0 = 1)
-    _A = np.zeros((p, p))
-    _rhs = np.zeros(p)
-    for _i in range(p):
-        _k = p + 1 + _i
-        _rhs[_i] = -c[_k]
-        for _j in range(1, p + 1):
-            _A[_i, _j - 1] = c[_k - _j]
-    _d = np.linalg.solve(_A, _rhs)
-    d = np.concatenate([[1.0], _d])
-    # Numerator n_0,…,n_p
-    n = np.zeros(p + 1)
-    for _k in range(p + 1):
-        for _j in range(min(_k, p) + 1):
-            n[_k] += c[_k - _j] * d[_j]
-    return n, d
-
-_PHI2_PADE_N, _PHI2_PADE_D = _compute_phi2_pade_coeffs()
-_PHI2_PADE_THETA = 1.0
+    r"""Return batched ``\varphi_1(-dt\,M)`` via [6/6] Padé on the ``R × R`` matrix."""
+    return jax.vmap(_phi1_pade_ss)(-dt[:, None, None] * matrix[None, :, :])
 
 
 @jax.jit
 def _phi2_pade_ss(A: Array) -> Array:
-    r"""Compute :math:`\varphi_2(A) = (e^A - A - I) A^{-2}` via [6/6] Padé + scaling-and-squaring.
+    r"""Compute :math:`\varphi_2(A)` via [6/6] Padé + scaling-and-squaring on ``R × R``.
 
-    Jointly tracks ``\varphi_1`` during squaring because the recurrence
-    ``\varphi_2(2C) = \tfrac12 \varphi_2(C) + \tfrac14 [\varphi_1(C)]^2``
-    requires both functions.
+    Jointly tracks ``\varphi_1`` during squaring:
+    ``\varphi_2(2C) = \tfrac12 \varphi_2(C) + \tfrac14 [\varphi_1(C)]^2``.
     """
     r = A.shape[0]
     dtype = A.dtype
     eye = jnp.eye(r, dtype=dtype)
 
-    # --- Scaling ---
     norm1 = jnp.linalg.norm(A.reshape(r, r), ord=1)
-    s = jnp.maximum(0, jnp.ceil(jnp.log2(jnp.maximum(norm1, 1e-30) / _PHI2_PADE_THETA))).astype(int)
+    s = jnp.maximum(0, jnp.ceil(jnp.log2(jnp.maximum(norm1, 1e-30) / _PADE_THETA))).astype(int)
     B = A * (0.5 ** s)
+    B2 = B @ B; B4 = B2 @ B2; B6 = B4 @ B2
 
-    B2 = B @ B
-    B4 = B2 @ B2
-    B6 = B4 @ B2
+    # Both Padé evaluations share B², B⁴, B⁶
+    phi1_B = _pade_eval(B, B2, B4, B6,
+                        jnp.asarray(_PHI1_PADE_N, dtype=dtype),
+                        jnp.asarray(_PHI1_PADE_D, dtype=dtype), eye)
+    phi2_B = _pade_eval(B, B2, B4, B6,
+                        jnp.asarray(_PHI2_PADE_N, dtype=dtype),
+                        jnp.asarray(_PHI2_PADE_D, dtype=dtype), eye)
 
-    # --- phi1(B) via [6/6] Padé ---
-    n1 = jnp.asarray(_PHI1_PADE_N, dtype=dtype)
-    d1 = jnp.asarray(_PHI1_PADE_D, dtype=dtype)
-    N1_even = n1[0] * eye + n1[2] * B2 + n1[4] * B4 + n1[6] * B6
-    N1_odd  = n1[1] * eye + n1[3] * B2 + n1[5] * B4
-    N1_val  = N1_even + B @ N1_odd
-    D1_even = d1[0] * eye + d1[2] * B2 + d1[4] * B4 + d1[6] * B6
-    D1_odd  = d1[1] * eye + d1[3] * B2 + d1[5] * B4
-    D1_val  = D1_even + B @ D1_odd
-    phi1_B = jnp.linalg.solve(D1_val, N1_val)
-
-    # --- phi2(B) via [6/6] Padé ---
-    n2 = jnp.asarray(_PHI2_PADE_N, dtype=dtype)
-    d2 = jnp.asarray(_PHI2_PADE_D, dtype=dtype)
-    N2_even = n2[0] * eye + n2[2] * B2 + n2[4] * B4 + n2[6] * B6
-    N2_odd  = n2[1] * eye + n2[3] * B2 + n2[5] * B4
-    N2_val  = N2_even + B @ N2_odd
-    D2_even = d2[0] * eye + d2[2] * B2 + d2[4] * B4 + d2[6] * B6
-    D2_odd  = d2[1] * eye + d2[3] * B2 + d2[5] * B4
-    D2_val  = D2_even + B @ D2_odd
-    phi2_B = jnp.linalg.solve(D2_val, N2_val)
-
-    # --- Squaring: φ₁(2C) = ½ φ₁(C)(2I + C φ₁(C))
-    #               φ₂(2C) = ½ φ₂(C) + ¼ [φ₁(C)]²  ---
     def _square(i, carry):
         C, phi1, phi2 = carry
-        phi1_sq = phi1 @ phi1
-        P = C @ phi1
-        phi1_new = 0.5 * (phi1 @ (2.0 * eye + P))
-        phi2_new = 0.5 * phi2 + 0.25 * phi1_sq
-        C_new = 2.0 * C
-        return C_new, phi1_new, phi2_new
+        phi1_new = 0.5 * (phi1 @ (2.0 * eye + C @ phi1))
+        phi2_new = 0.5 * phi2 + 0.25 * (phi1 @ phi1)
+        return 2.0 * C, phi1_new, phi2_new
 
     _, _, phi2_A = jax.lax.fori_loop(0, s, _square, (B, phi1_B, phi2_B))
     return phi2_A
@@ -422,9 +346,8 @@ def _phi2_pade_ss(A: Array) -> Array:
 
 @jax.jit
 def _dense_phi2_batched(matrix: Array, dt: Array) -> Array:
-    r"""Return batched ``\varphi_2(-dt\,M)`` via direct [6/6] Padé approximant."""
-    scaled = -dt[:, None, None] * matrix[None, :, :]
-    return jax.vmap(_phi2_pade_ss)(scaled)
+    r"""Return batched ``\varphi_2(-dt\,M)`` via [6/6] Padé on the ``R × R`` matrix."""
+    return jax.vmap(_phi2_pade_ss)(-dt[:, None, None] * matrix[None, :, :])
 
 
 # ---------------------------------------------------------------------------
@@ -942,155 +865,75 @@ def _phi2_scalar_neg(x: Array) -> Array:
     return jnp.where(x == 0, half, out)
 
 
-def _real_expm_coeffs(rates: Array, nmax: int, dt: Array, dtype: jnp.dtype) -> Array:
-    """Return ``e^{-rate dt} dt^k / k!``."""
+def _real_expm_coeffs(rate: Array, nmax: int, dt: Array, dtype: jnp.dtype) -> Array:
+    """Return ``e^{-rate dt} dt^k / k!`` for one block. Returns (m, nmax)."""
     k = jnp.arange(nmax, dtype=dtype)
     fac = _factorials(nmax, dtype)
     return (
-        jnp.exp(-dt[:, None] * rates[None, :])[:, :, None]
-        * (dt[:, None, None] ** k[None, None, :])
-        / fac[None, None, :]
+        jnp.exp(-dt * rate.astype(dtype))[:, None]
+        * (dt[:, None].astype(dtype) ** k[None, :])
+        / fac[None, :]
     )
 
 
-# Number of Taylor terms used when |rate * dt| is small in phi1 recurrence.
-_PHI1_TAYLOR_TERMS = 20
-_PHI1_SMALL_THRESHOLD = 0.05
+def _real_jordan_A(rate: Array, nmax: int, dt: Array, rdtype: jnp.dtype) -> Array:
+    """Build A = -dt*(rate*I - N) for one block. Returns (m, nmax, nmax)."""
+    lam = rate.astype(rdtype) * jnp.eye(nmax, dtype=rdtype) - jnp.eye(nmax, k=1, dtype=rdtype)
+    return -dt[:, None, None].astype(rdtype) * lam[None]
 
 
-def _phi1_chain_coeffs(rates: Array, nmax: int, dt: Array, dtype: jnp.dtype) -> Array:
-    """Return chain coefficients of ``phi_1(-dt(J_rate))`` for real or complex rates.
+def _osc_jordan_A(decay: Array, freq: Array, nmax: int, dt: Array, rdtype: jnp.dtype) -> Array:
+    """Build A = -dt*J_osc for one block. Returns (m, 2*nmax, 2*nmax)."""
+    lam = _osc_lambda_block_matrix(decay.astype(rdtype), freq.astype(rdtype), nmax, rdtype)
+    return -dt[:, None, None].astype(rdtype) * lam[None]
 
-    Uses a Taylor-series fallback when ``|rate * dt|`` is small to avoid
-    catastrophic cancellation in the ``(prev - edge) / rate`` recurrence.
-    """
+
+def _phi_chain_coeffs(
+    rate: Array, nmax: int, dt: Array, dtype: jnp.dtype, pade_fn: Callable,
+) -> Array:
+    """Chain coefficients of phi(-dt*J_rate) via Padé for one block. Returns (m, nmax)."""
     if nmax == 0:
-        return jnp.zeros((dt.shape[0], rates.shape[0], 0), dtype=dtype)
-
-    real_dtype = jnp.real(jnp.asarray(0, dtype=dtype)).dtype
-    dt = dt.astype(real_dtype)
-    rates = rates.astype(dtype)
-    x = dt[:, None] * rates[None, :]
-    exp_term = jnp.exp(-x)
-    c0 = _phi1_scalar_neg(x)
-    if nmax == 1:
-        return c0[:, :, None]
-
-    fac = _factorials(nmax + _PHI1_TAYLOR_TERMS + 2, dtype)
-    zero_mask = rates[None, :] == 0
-    small = jnp.abs(x) < _PHI1_SMALL_THRESHOLD
-
-    # Pre-compute Taylor powers for fallback: (-x)^j for j in [0, T)
-    js = jnp.arange(_PHI1_TAYLOR_TERMS, dtype=dtype)
-    neg_x_powers = (-x)[:, :, None] ** js[None, None, :]  # (m, b, T)
-
-    def _taylor_c(k: Array) -> Array:
-        """Compute c_k via truncated Taylor series for small |x|."""
-        # c_k = dt^k * sum_j (-x)^j / (k+j+1)!
-        js = jnp.arange(_PHI1_TAYLOR_TERMS)
-        fac_denom = fac[k + js + 1]  # (T,)
-        return (dt[:, None] ** k) * jnp.sum(neg_x_powers / fac_denom[None, None, :], axis=-1)
-
-    def body(prev: Array, k: Array) -> tuple[Array, Array]:
-        edge = exp_term * (dt[:, None] ** (k - 1)) / fac[k]
-        nxt_recur = jnp.where(
-            zero_mask,
-            (dt[:, None] ** k) / fac[k + 1],
-            (prev - edge) / rates[None, :],
-        )
-        nxt_taylor = _taylor_c(k)
-        nxt = jnp.where(small, nxt_taylor, nxt_recur)
-        return nxt, nxt
-
-    _, tail = jax.lax.scan(body, c0, jnp.arange(1, nmax))
-    return jnp.concatenate([c0[:, :, None], jnp.moveaxis(tail, 0, -1)], axis=-1)
+        return jnp.zeros((dt.shape[0], 0), dtype=dtype)
+    rdtype = jnp.real(jnp.asarray(0, dtype=dtype)).dtype
+    A = _real_jordan_A(rate.astype(rdtype), nmax, dt.astype(rdtype), rdtype)  # (m, nmax, nmax)
+    phi = jax.vmap(pade_fn)(A)  # (m, nmax, nmax)
+    return phi.astype(dtype)[:, 0, :]  # first row = Toeplitz chain coefficients
 
 
-# Number of Taylor terms used when |rate * dt| is small in phi2 recurrence.
-_PHI2_TAYLOR_TERMS = 20
-_PHI2_SMALL_THRESHOLD = 0.05
+def _phi1_chain_coeffs(rate: Array, nmax: int, dt: Array, dtype: jnp.dtype) -> Array:
+    """Chain coefficients of phi_1(-dt*J_rate) via Padé for one block. Returns (m, nmax)."""
+    return _phi_chain_coeffs(rate, nmax, dt, dtype, _phi1_pade_ss)
 
 
-def _phi2_chain_coeffs(rates: Array, nmax: int, dt: Array, dtype: jnp.dtype) -> Array:
-    r"""Return chain coefficients of ``\varphi_2(-dt\,J_{\mathrm{rate}})`` for real or complex rates.
-
-    Uses the recurrence ``d_k = (dt\,d_{k-1} - c_k^{(1)}) / x`` where
-    ``c_k^{(1)}`` are the ``\varphi_1`` chain coefficients and ``x = dt \cdot \mathrm{rate}``.
-    Falls back to a Taylor series when ``|x|`` is small.
-    """
-    if nmax == 0:
-        return jnp.zeros((dt.shape[0], rates.shape[0], 0), dtype=dtype)
-
-    real_dtype = jnp.real(jnp.asarray(0, dtype=dtype)).dtype
-    dt = dt.astype(real_dtype)
-    rates = rates.astype(dtype)
-    x = dt[:, None] * rates[None, :]  # (m, b)
-
-    # phi1 chain coefficients (needed for the recurrence)
-    phi1_c = _phi1_chain_coeffs(rates, nmax, dt, dtype)  # (m, b, nmax)
-
-    d0 = _phi2_scalar_neg(x)  # (m, b)
-    if nmax == 1:
-        return d0[:, :, None]
-
-    fac = _factorials(nmax + _PHI2_TAYLOR_TERMS + 4, dtype)
-    zero_mask = rates[None, :] == 0
-    small = jnp.abs(x) < _PHI2_SMALL_THRESHOLD
-
-    # Pre-compute Taylor powers for fallback
-    js = jnp.arange(_PHI2_TAYLOR_TERMS)  # integer dtype for indexing into fac
-    neg_x_powers = (-x)[:, :, None] ** js[None, None, :].astype(dtype)  # (m, b, T)
-
-    def _taylor_d(k: Array) -> Array:
-        r"""Compute d_k via truncated Taylor series for small |x|.
-
-        d_k = dt^k \sum_j (-x)^j / (k!\,j!\,(k+j+1)(k+j+2))
-        """
-        denom = fac[k] * fac[js] * (k + js + 1) * (k + js + 2)
-        return (dt[:, None] ** k) * jnp.sum(neg_x_powers / denom[None, None, :], axis=-1)
-
-    # phi1 coefficients for k=1..nmax-1, reshaped for scan: (nmax-1, m, b)
-    phi1_tail = jnp.moveaxis(phi1_c[:, :, 1:], -1, 0)
-
-    def body(prev: Array, inputs: tuple[Array, Array]) -> tuple[Array, Array]:
-        k, ck = inputs
-        # Recurrence: d_k = (dt * d_{k-1} - c_k^{(1)}) / x
-        nxt_recur = jnp.where(
-            zero_mask,
-            (dt[:, None] ** k) / fac[k + 2],
-            (dt[:, None] * prev - ck) / x,
-        )
-        nxt_taylor = _taylor_d(k)
-        nxt = jnp.where(small, nxt_taylor, nxt_recur)
-        return nxt, nxt
-
-    _, tail = jax.lax.scan(body, d0, (jnp.arange(1, nmax), phi1_tail))
-    return jnp.concatenate([d0[:, :, None], jnp.moveaxis(tail, 0, -1)], axis=-1)
+def _phi2_chain_coeffs(rate: Array, nmax: int, dt: Array, dtype: jnp.dtype) -> Array:
+    """Chain coefficients of phi_2(-dt*J_rate) via Padé for one block. Returns (m, nmax)."""
+    return _phi_chain_coeffs(rate, nmax, dt, dtype, _phi2_pade_ss)
 
 
-def _shifted_coeffs(rates: Array, nmax: int, zeta: Array, dt: Array, dtype: jnp.dtype) -> Array:
-    """Return ``dt^k / (zeta + dt rate)^{k+1}`` via cumulative product.
+def _shifted_coeffs(rate: Array, nmax: int, zeta: Array, dt: Array, dtype: jnp.dtype) -> Array:
+    """Return ``dt^k / (zeta + dt*rate)^{k+1}`` via cumulative product for one block.
 
     Uses a stable cumulative-ratio formulation instead of explicit powers.
+    Returns (m, nmax).
     """
     if nmax == 0:
-        return jnp.zeros((dt.shape[0], rates.shape[0], 0), dtype=dtype)
+        return jnp.zeros((dt.shape[0], 0), dtype=dtype)
 
-    rates = rates.astype(dtype)
-    a = zeta[:, None] + dt[:, None].astype(dtype) * rates[None, :]  # (m, b)
-    inv_a = 1.0 / a  # (m, b)
-    ratio = dt[:, None].astype(dtype) * inv_a  # dt / a, shape (m, b)
+    rate = rate.astype(dtype)
+    a = zeta + dt.astype(dtype) * rate  # (m,)
+    inv_a = 1.0 / a  # (m,)
+    ratio = dt.astype(dtype) * inv_a  # (m,)
 
-    c0 = inv_a  # (m, b)
+    c0 = inv_a  # (m,)
     if nmax == 1:
-        return c0[:, :, None]
+        return c0[:, None]
 
     def scan_body(carry: Array, _: Array) -> tuple[Array, Array]:
         nxt = carry * ratio
         return nxt, nxt
 
     _, tail = jax.lax.scan(scan_body, c0, None, length=nmax - 1)
-    return jnp.concatenate([c0[:, :, None], jnp.moveaxis(tail, 0, -1)], axis=-1)
+    return jnp.concatenate([c0[:, None], jnp.moveaxis(tail, 0, -1)], axis=-1)
 
 
 # ---------------------------------------------------------------------------
@@ -1119,42 +962,47 @@ def _osc_rates(decays: Array, freqs: Array, dtype: jnp.dtype, *, transpose: bool
     return decays.astype(real_dtype) + (1j * sign) * freqs.astype(real_dtype)
 
 
-def _osc_expm_coeffs(decays: Array, freqs: Array, nmax: int, dt: Array, dtype: jnp.dtype) -> Array:
+def _osc_expm_coeffs(decay: Array, freq: Array, nmax: int, dt: Array, dtype: jnp.dtype) -> Array:
     if nmax == 0:
-        return jnp.zeros((dt.shape[0], decays.shape[0], 0, 2, 2), dtype=dtype)
+        return jnp.zeros((dt.shape[0], 0, 2, 2), dtype=dtype)
     cdtype = _complex_dtype_for(dtype)
     return _complex_to_real2x2(
-        _real_expm_coeffs(_osc_rates(decays, freqs, cdtype), nmax, dt, cdtype)
+        _real_expm_coeffs(_osc_rates(decay, freq, cdtype), nmax, dt, cdtype)
     )
 
 
-def _osc_phi1_coeffs(decays: Array, freqs: Array, nmax: int, dt: Array, dtype: jnp.dtype) -> Array:
+def _osc_phi_coeffs(
+    decay: Array, freq: Array, nmax: int, dt: Array, dtype: jnp.dtype, pade_fn: Callable,
+) -> Array:
+    """Oscillatory phi chain coefficients via Padé for one block. Returns (m, nmax, 2, 2)."""
     if nmax == 0:
-        return jnp.zeros((dt.shape[0], decays.shape[0], 0, 2, 2), dtype=dtype)
-    cdtype = _complex_dtype_for(dtype)
-    return _complex_to_real2x2(
-        _phi1_chain_coeffs(_osc_rates(decays, freqs, cdtype), nmax, dt, cdtype)
-    )
+        return jnp.zeros((dt.shape[0], 0, 2, 2), dtype=dtype)
+    rdtype = jnp.real(jnp.asarray(0, dtype=dtype)).dtype
+    w = 2 * nmax
+    A = _osc_jordan_A(decay.astype(rdtype), freq.astype(rdtype), nmax, dt.astype(rdtype), rdtype)  # (m, w, w)
+    phi_mat = jax.vmap(pade_fn)(A)  # (m, w, w)
+    return phi_mat[:, :2, :].reshape(dt.shape[0], 2, nmax, 2).transpose(0, 2, 1, 3).astype(dtype)
 
 
-def _osc_phi2_coeffs(decays: Array, freqs: Array, nmax: int, dt: Array, dtype: jnp.dtype) -> Array:
-    if nmax == 0:
-        return jnp.zeros((dt.shape[0], decays.shape[0], 0, 2, 2), dtype=dtype)
-    cdtype = _complex_dtype_for(dtype)
-    return _complex_to_real2x2(
-        _phi2_chain_coeffs(_osc_rates(decays, freqs, cdtype), nmax, dt, cdtype)
-    )
+def _osc_phi1_coeffs(decay: Array, freq: Array, nmax: int, dt: Array, dtype: jnp.dtype) -> Array:
+    """Oscillatory phi_1 chain coefficients via Padé for one block. Returns (m, nmax, 2, 2)."""
+    return _osc_phi_coeffs(decay, freq, nmax, dt, dtype, _phi1_pade_ss)
+
+
+def _osc_phi2_coeffs(decay: Array, freq: Array, nmax: int, dt: Array, dtype: jnp.dtype) -> Array:
+    """Oscillatory phi_2 chain coefficients via Padé for one block. Returns (m, nmax, 2, 2)."""
+    return _osc_phi_coeffs(decay, freq, nmax, dt, dtype, _phi2_pade_ss)
 
 
 def _osc_shifted_coeffs(
-    decays: Array, freqs: Array, nmax: int, zeta: Array, dt: Array, dtype: jnp.dtype,
+    decay: Array, freq: Array, nmax: int, zeta: Array, dt: Array, dtype: jnp.dtype,
     *, transpose: bool,
 ) -> Array:
     if nmax == 0:
-        return jnp.zeros((dt.shape[0], decays.shape[0], 0, 2, 2), dtype=dtype)
+        return jnp.zeros((dt.shape[0], 0, 2, 2), dtype=dtype)
     cdtype = _complex_dtype_for(dtype)
     return _complex_to_real2x2(
-        _shifted_coeffs(_osc_rates(decays, freqs, cdtype, transpose=transpose),
+        _shifted_coeffs(_osc_rates(decay, freq, cdtype, transpose=transpose),
                         nmax, zeta.astype(cdtype), dt, cdtype)
     )
 
@@ -1184,20 +1032,20 @@ def _apply_chain(coeff: Array, rhs: Array, *, lower: bool) -> Array:
     """Apply ``sum_k c_k N^k`` (or ``(N^T)^k``) to scalar or matrix chains.
 
     Automatically dispatches based on coefficient ndim:
-    - scalar chains: coeff shape ``(t, b, n)``, rhs ``(t, b, n, c)``
-    - matrix chains: coeff shape ``(t, b, n, u, v)``, rhs ``(t, b, n, v, c)``
+    - scalar chains: coeff shape ``(t, n)``, rhs ``(t, n, c)``
+    - matrix chains: coeff shape ``(t, n, u, v)``, rhs ``(t, n, v, c)``
     """
-    nmax = rhs.shape[2]
+    nmax = rhs.shape[1]
     idx, mask = _chain_offset_indices(nmax, lower=lower)
     idx_j, mask_j = jnp.asarray(idx), jnp.asarray(mask)
-    if coeff.ndim == 3:
+    if coeff.ndim == 2:
         # Scalar chain
-        weights = jnp.take(coeff, idx_j, axis=2) * mask_j[None, None, :, :]
-        return jnp.einsum("tbij,tbjc->tbic", weights, rhs)
+        weights = jnp.take(coeff, idx_j, axis=1) * mask_j[None, :, :]
+        return jnp.einsum("tij,tjc->tic", weights, rhs)
     else:
         # Matrix (2x2 block) chain
-        weights = jnp.take(coeff, idx_j, axis=2) * mask_j[None, None, :, :, None, None]
-        return jnp.einsum("tbijuv,tbjvc->tbiuc", weights, rhs)
+        weights = jnp.take(coeff, idx_j, axis=1) * mask_j[None, :, :, None, None]
+        return jnp.einsum("tijuv,tjvc->tiuc", weights, rhs)
 
 
 # ---------------------------------------------------------------------------
@@ -1270,16 +1118,16 @@ def _jordan_apply_batched(
     for i, size in enumerate(real_sizes):
         block = rhs[:, start : start + size, :]
         start += size
-        coeff = real_coeffs(real_rates[i : i + 1], size, dt_real, rhs.dtype)
-        y = _apply_chain(coeff, block[:, None, :, :], lower=lower)[:, 0, :, :]
+        coeff = real_coeffs(real_rates[i], size, dt_real, rhs.dtype)
+        y = _apply_chain(coeff, block, lower=lower)
         parts.append(y)
 
     for i, size in enumerate(osc_sizes):
         width = 2 * size
         block = rhs[:, start : start + width, :].reshape(batch, size, 2, cols)
         start += width
-        coeff = osc_coeffs(osc_decays[i : i + 1], osc_freqs[i : i + 1], size, dt_real, rhs.dtype)
-        y = _apply_chain(coeff, block[:, None, :, :, :], lower=lower)[:, 0, :, :, :]
+        coeff = osc_coeffs(osc_decays[i], osc_freqs[i], size, dt_real, rhs.dtype)
+        y = _apply_chain(coeff, block, lower=lower)
         parts.append(y.reshape(batch, width, cols))
 
     return jnp.concatenate(parts, axis=1) if parts else jnp.zeros_like(rhs)
@@ -1308,8 +1156,8 @@ def _jordan_solve_batched(
     for i, size in enumerate(real_sizes):
         block = rhs[:, start : start + size, :]
         start += size
-        coeff = _shifted_coeffs(real_rates[i : i + 1], size, zeta, dt_real, rhs.dtype)
-        y = _apply_chain(coeff, block[:, None, :, :], lower=transpose)[:, 0, :, :]
+        coeff = _shifted_coeffs(real_rates[i], size, zeta, dt_real, rhs.dtype)
+        y = _apply_chain(coeff, block, lower=transpose)
         parts.append(y)
 
     for i, size in enumerate(osc_sizes):
@@ -1365,14 +1213,14 @@ def _real_chain_matrix_from_coeff(coeff: Array, size: int) -> Array:
     """Materialize a batched upper-triangular scalar Jordan chain matrix."""
     idx, mask = _chain_offset_indices(size, lower=False)
     idx_j, mask_j = jnp.asarray(idx), jnp.asarray(mask)
-    return jnp.take(coeff[:, 0, :], idx_j, axis=1) * mask_j[None, :, :]
+    return jnp.take(coeff, idx_j, axis=1) * mask_j[None, :, :]
 
 
 def _osc_chain_matrix_from_coeff(coeff: Array, size: int) -> Array:
     """Materialize a batched upper-triangular real 2x2 block-Jordan matrix."""
     idx, mask = _chain_offset_indices(size, lower=False)
     idx_j, mask_j = jnp.asarray(idx), jnp.asarray(mask)
-    blocks = jnp.take(coeff[:, 0, :, :, :], idx_j, axis=1) * mask_j[None, :, :, None, None]
+    blocks = jnp.take(coeff, idx_j, axis=1) * mask_j[None, :, :, None, None]
     return jnp.transpose(blocks, (0, 1, 3, 2, 4)).reshape(coeff.shape[0], 2 * size, 2 * size)
 
 
@@ -1543,13 +1391,13 @@ class JordanLambda(Lambda):
         blocks: list[Array] = []
 
         for i, size in enumerate(self.real_sizes):
-            coeff = real_coeffs(self.real_rates[i : i + 1].astype(dtype), size, dt_real, dtype)
+            coeff = real_coeffs(self.real_rates[i].astype(dtype), size, dt_real, dtype)
             blocks.append(_real_chain_matrix_from_coeff(coeff, size))
 
         for i, size in enumerate(self.osc_sizes):
             coeff = osc_coeffs(
-                self.osc_decays[i : i + 1].astype(dt_real.dtype),
-                self.osc_freqs[i : i + 1].astype(dt_real.dtype),
+                self.osc_decays[i].astype(dt_real.dtype),
+                self.osc_freqs[i].astype(dt_real.dtype),
                 size, dt_real, dtype,
             )
             blocks.append(_osc_chain_matrix_from_coeff(coeff, size))
@@ -1625,13 +1473,13 @@ class JordanLambda(Lambda):
         dt_real = dt_arr.astype(jnp.real(jnp.asarray(0, dtype=dtype)).dtype)
         blocks = []
         for i, size in enumerate(self.real_sizes):
-            coeff = real_coeffs(self.real_rates[i : i + 1].astype(dtype), size, dt_real, dtype)
+            coeff = real_coeffs(self.real_rates[i].astype(dtype), size, dt_real, dtype)
             mat = _real_chain_matrix_from_coeff(coeff, size)  # (n_steps, size, size)
             blocks.append(mat[0] if was_scalar else mat)
         for i, size in enumerate(self.osc_sizes):
             coeff = osc_coeffs(
-                self.osc_decays[i : i + 1].astype(dt_real.dtype),
-                self.osc_freqs[i : i + 1].astype(dt_real.dtype),
+                self.osc_decays[i].astype(dt_real.dtype),
+                self.osc_freqs[i].astype(dt_real.dtype),
                 size, dt_real, dtype,
             )
             mat = _osc_chain_matrix_from_coeff(coeff, size)  # (n_steps, 2*size, 2*size)

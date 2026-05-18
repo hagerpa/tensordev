@@ -245,7 +245,7 @@ def main():
                       color=COLORS[0], alpha=0.4, markersize=3)
 
         ax.loglog(x_line, C * x_line,
-                  linestyle="-", color="black", linewidth=1.0, alpha=0.85,
+                  linestyle="--", color="lightsteelblue", linewidth=1.0, alpha=0.85,
                   label=r"$\hat{C}\cdot J^2 R^2$")
 
     ax.set_xlabel(r"$J^2 R^2$")

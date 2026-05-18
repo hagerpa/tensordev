@@ -185,12 +185,18 @@ def parse_args():
                    help="Number of FSSK components q. Default: 1.")
     p.add_argument("--m",             type=int,   default=3,
                    help="Latent-path dimension m (A has shape q×m×d). Default: 3.")
-    p.add_argument("--eig-min",       type=float, default=0.0,
-                   help="Minimum eigenvalue of Lambda. Default: 0.0.")
+    p.add_argument("--eig-min",       type=float, default=0.1,
+                   help="Min real part (decay) of eigenvalues. Default: 0.1.")
     p.add_argument("--eig-max",       type=float, default=1.0,
-                   help="Maximum eigenvalue of Lambda. Default: 1.0.")
-    p.add_argument("--jordan-alpha",  type=float, default=0.25,
-                   help="Super-diagonal Jordan coupling. Default: 0.25.")
+                   help="Max real part (decay) of eigenvalues. Default: 1.0.")
+    p.add_argument("--freq-min",      type=float, default=0.1,
+                   help="Min imaginary part (frequency) of oscillatory eigenvalues. Default: 0.1.")
+    p.add_argument("--freq-max",      type=float, default=2.0,
+                   help="Max imaginary part (frequency) of oscillatory eigenvalues. Default: 2.0.")
+    p.add_argument("--min-block-size", type=int,  default=1,
+                   help="Minimum Jordan chain order. Default: 1.")
+    p.add_argument("--max-block-size", type=int,  default=4,
+                   help="Maximum Jordan chain order. Default: 4.")
     # Seeds
     p.add_argument("--seed-x",        type=int,   default=20260514,
                    help="RNG seed for X paths.")
@@ -238,7 +244,7 @@ def main():
     _log(f"FSSK kernel convergence sweep  —  regime {effective.name}  ({regime.desc})")
     _log(f"  n_paths={n_paths}  J={J}  d={d}  dt={dt:.6f}")
     _log(f"  max_trunc={max_trunc}  max_dyadic={max_dyadic}  (reference: vsig_trunc N={max_trunc})")
-    _log(f"  R={R}  q={q}  m={m}  eig=[{args.eig_min}, {args.eig_max}]  seed_kernel={args.seed_kernel}")
+    _log(f"  R={R}  q={q}  m={m}  eig=[{args.eig_min}, {args.eig_max}]  freq=[{args.freq_min}, {args.freq_max}]  seed_kernel={args.seed_kernel}")
     _log(f"  seed_x={args.seed_x}  seed_y={args.seed_y}")
     _log(f"  output_dir={args.output_dir}")
     _log("═" * 70)
@@ -255,6 +261,10 @@ def main():
         seed=args.seed_kernel,
         eig_min=args.eig_min,
         eig_max=args.eig_max,
+        freq_min=args.freq_min,
+        freq_max=args.freq_max,
+        min_block_size=args.min_block_size,
+        max_block_size=args.max_block_size,
     )
     _log(f"Kernel: R={R}  q={q}  m={m}  seed={args.seed_kernel}  "
          f"A.shape={kernel.A.shape}  b.shape={kernel.b.shape}")
@@ -366,7 +376,10 @@ def main():
             m                 = m,
             eig_min           = args.eig_min,
             eig_max           = args.eig_max,
-            jordan_alpha      = args.jordan_alpha,
+            freq_min          = args.freq_min,
+            freq_max          = args.freq_max,
+            min_block_size    = args.min_block_size,
+            max_block_size    = args.max_block_size,
             dt                = dt,
             seed_kernel       = args.seed_kernel,
             seed_x            = args.seed_x,

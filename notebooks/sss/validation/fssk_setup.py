@@ -2,6 +2,8 @@
 fssk_setup.py — FSSK parameter generation and benchmark regimes.
 
   random_fssk(...)  — generate a random FSSK kernel via FSSK.from_jordan
+                      with configurable Jordan block sizes and optional
+                      dense materialisation (as_dense=True).
   REGIMES           — dict of SMALL / MEDIUM / LARGE RegimeConfig instances
 """
 
@@ -29,59 +31,110 @@ def random_fssk(
     m: int,
     d: int,
     seed: int = 0,
-    eig_min: float = 0.0,
+    eig_min: float = 0.1,
     eig_max: float = 1.0,
+    freq_min: float = 0.1,
+    freq_max: float = 2.0,
+    min_block_size: int = 1,
+    max_block_size: int = 4,
     normalise_b: bool = True,
+    as_dense: bool = False,
     dtype=np.float64,
-    # Legacy parameters kept for call-site compatibility but no longer used.
-    jordan_alpha: float = 0.25,   # noqa: ignored — JordanLambda always uses 1
-    spectral_radius: float | None = None,  # noqa: ignored
-    as_jordan: bool = False,      # noqa: ignored — output is always Jordan form
 ) -> FSSK:
-    """Return a random FSSK kernel built from real 2×2 Jordan blocks.
+    """Return a random FSSK kernel mixing real and oscillatory Jordan blocks.
 
-    The state matrix Lambda is assembled as a block-diagonal of real Jordan
-    blocks of size 2 (plus one size-1 block when R is odd).  Each block has a
-    randomly drawn eigenvalue ``lam_i ~ Uniform(eig_min, eig_max)`` and the
-    standard Jordan off-diagonal of 1 (as used by :class:`JordanLambda`).
+    The state matrix Lambda is assembled by greedy packing of Jordan blocks into
+    ``R`` state dimensions.  At each step a block type is chosen at random:
 
-    The kernel is constructed via :meth:`FSSK.from_jordan` so that the
-    returned object carries a structured :class:`JordanLambda` operator.
+    - **Real block** (chain-order ``s``, uses ``s`` dims): purely real eigenvalue
+      ``λ ~ U(eig_min, eig_max)``.
+    - **Oscillatory block** (chain-order ``s``, uses ``2s`` dims): complex conjugate
+      pair ``λ ± iω`` with ``λ ~ U(eig_min, eig_max)`` and
+      ``ω ~ U(freq_min, freq_max)``.
+
+    If both types can fit, each is chosen with probability ½.  If only real fits
+    (i.e. ``remaining < 2 * min_block_size``), a real block is always used.
+    Any leftover dims after packing become a single real padding block.
+
+    The kernel is constructed via :meth:`FSSK.from_jordan`.  When
+    ``as_dense=True`` the Jordan structure is materialised as a dense matrix
+    and the kernel is returned with a :class:`DenseLambda` operator.
 
     Parameters
     ----------
     q : int
         Number of FSSK components.
     R : int
-        Total state-space dimension.  Decomposed into ``R // 2`` blocks of
-        size 2 plus one block of size 1 when R is odd.
+        Total state-space dimension.
     m : int
-        Latent path dimension (A has shape ``(q, m, d)``).
+        Latent path dimension (``A`` has shape ``(q, m, d)``).
     d : int
         Input path dimension.
     seed : int
         NumPy RNG seed.  Default 0.
     eig_min, eig_max : float
-        Uniform range for the block eigenvalues.  Default [0.0, 1.0].
+        Uniform range for the real part (decay) of each eigenvalue.
+        Default [0.1, 1.0].
+    freq_min, freq_max : float
+        Uniform range for the imaginary part (frequency) of oscillatory
+        eigenvalues.  Must satisfy ``0 < freq_min <= freq_max``.
+        Default [0.1, 2.0].
+    min_block_size, max_block_size : int
+        Minimum and maximum Jordan chain order.  Default 1 / 4.
     normalise_b : bool
-        If True (default), rescale ``b`` to unit Frobenius norm (``‖b‖_F = 1``),
-        independent of the eigenvalue scale.  This ensures the kernel has
-        meaningful discriminative power regardless of how small the eigenvalues are.
+        If True (default), rescale ``b`` to unit Frobenius norm.
+    as_dense : bool
+        If True, materialise the Jordan structure into a dense matrix and
+        return an FSSK with a :class:`DenseLambda` operator.  Default False.
     dtype : numpy dtype
         Output dtype.  Default float64.
     """
+    if min_block_size < 1:
+        raise ValueError("min_block_size must be >= 1.")
+    if max_block_size < min_block_size:
+        raise ValueError("max_block_size must be >= min_block_size.")
+    if freq_min <= 0:
+        raise ValueError("freq_min must be strictly positive.")
+
     rng = np.random.default_rng(seed)
 
-    # Build R//2 Jordan blocks of size 2, plus one size-1 block if R is odd.
-    n_pairs   = R // 2
-    n_singles = R % 2
-    n_blocks  = n_pairs + n_singles
+    # ---- pack Jordan blocks into R ------------------------------------------
+    # For each block slot randomly choose real (s dims) or oscillatory (2s dims).
+    # Fall back to real when the remaining budget can't fit an oscillatory block.
+    real_block_sizes: list[int] = []
+    osc_block_sizes:  list[int] = []
+    remaining = R
 
-    lam        = rng.uniform(eig_min, eig_max, size=n_blocks)
-    real_rates = lam
-    real_sizes = (2,) * n_pairs + (1,) * n_singles
+    while remaining >= min_block_size:
+        can_osc = remaining >= 2 * min_block_size
 
-    # Semi-orthogonal projection matrices A of shape (q, m, d).
+        if can_osc and bool(rng.integers(0, 2)):
+            # Oscillatory block
+            max_s = min(max_block_size, remaining // 2)
+            s = int(rng.integers(min_block_size, max_s + 1))
+            osc_block_sizes.append(s)
+            remaining -= 2 * s
+        else:
+            # Real block
+            max_s = min(max_block_size, remaining)
+            s = int(rng.integers(min_block_size, max_s + 1))
+            real_block_sizes.append(s)
+            remaining -= s
+
+    # Any leftover dims (< min_block_size) become one real padding block.
+    if remaining > 0:
+        real_block_sizes.append(remaining)
+
+    real_sizes = tuple(real_block_sizes)
+    osc_sizes  = tuple(osc_block_sizes)
+    n_real     = len(real_block_sizes)
+    n_osc      = len(osc_block_sizes)
+
+    real_rates = rng.uniform(eig_min, eig_max, size=n_real)
+    osc_decays = rng.uniform(eig_min, eig_max, size=n_osc)
+    osc_freqs  = rng.uniform(freq_min, freq_max, size=n_osc)
+
+    # ---- semi-orthogonal projection matrices A of shape (q, m, d) ----------
     A = np.empty((q, m, d), dtype=dtype)
     for p in range(q):
         if m <= d:
@@ -96,7 +149,6 @@ def random_fssk(
     b = rng.normal(size=(q, R))
 
     if normalise_b:
-        # Normalise b to unit Frobenius norm, independent of eigenvalue scale.
         bnorm = np.linalg.norm(b, ord="fro")
         if bnorm > 0:
             b /= bnorm
@@ -104,12 +156,23 @@ def random_fssk(
         # Column-wise L1 normalisation (each R-column has L1-norm 1 across q).
         b /= np.sum(np.abs(b), axis=0, keepdims=True)
 
-    return FSSK.from_jordan(
+    fssk = FSSK.from_jordan(
         A=jnp.asarray(A, dtype=dtype),
         b=jnp.asarray(b, dtype=dtype),
         real_rates=jnp.asarray(real_rates, dtype=jnp.float64),
         real_sizes=real_sizes,
+        osc_decays=jnp.asarray(osc_decays, dtype=jnp.float64),
+        osc_freqs=jnp.asarray(osc_freqs, dtype=jnp.float64),
+        osc_sizes=osc_sizes,
     )
+
+    if as_dense:
+        return FSSK.from_matrix(
+            Lambda=fssk.Lambda.matrix(),
+            A=fssk.A,
+            b=fssk.b,
+        )
+    return fssk
 
 
 # ===========================================================================

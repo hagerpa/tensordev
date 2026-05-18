@@ -145,7 +145,7 @@ def main():
         R    = int(row["R"])
         N    = int(row["N"])
         form = row["form"]
-        as_jordan = (form == "jordan")
+        as_dense = (form == "dense")
 
         print(
             f"[{idx + 1:04d}/{len(df_design)}]  "
@@ -157,7 +157,9 @@ def main():
             q=q, R=R, m=_FIXED_M, d=_FIXED_D,
             seed=seed0 + idx,
             eig_min=0.1, eig_max=1.5,
+            freq_min=0.1, freq_max=2.0,
             normalise_b=False,
+            as_dense=as_dense,
         )
         sss = StateSpaceSignature(kernel=fssk, trunc=N)
 

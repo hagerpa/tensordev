@@ -81,7 +81,7 @@ def test_q1_fft_matches_vsig(order, trunc):
     kernel = FractionalKernel(beta=jnp.array([0.75]), A=jnp.eye(2)[None])
     ref = vsig(X, kernel=kernel, dt=0.5, trunc=trunc, order=order)
     got = vsig_fft(X, kernel=kernel, dt=0.5, trunc=trunc, order=order)
-    _assert_allclose(got, ref, atol=1e-8, label=f"q1 order={order} trunc={trunc}")
+    _assert_allclose(got, ref, atol=1e-10, label=f"q1 order={order} trunc={trunc}")
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +96,7 @@ def test_q2_m1_order_vs_vsig(order, trunc):
     ref = vsig(_X_1d, kernel=kernel, dt=0.25, trunc=trunc, order=order)
     got = vsig_fft(_X_1d, kernel=kernel, dt=0.25, trunc=trunc, order=order)
     _assert_allclose(
-        got, ref, atol=1e-8,
+        got, ref, atol=1e-10,
         label=f"q2 m1 order={order} trunc={trunc}",
     )
 
@@ -108,7 +108,7 @@ def test_q2_m1_various_betas(beta_pair):
     ref = vsig(_X_1d, kernel=kernel, dt=0.25, trunc=2, order=1)
     got = vsig_fft(_X_1d, kernel=kernel, dt=0.25, trunc=2, order=1)
     _assert_allclose(
-        got, ref, atol=1e-8,
+        got, ref, atol=1e-10,
         label=f"q2 m1 betas={beta_pair}",
     )
 
@@ -125,7 +125,7 @@ def test_q2_m2_order_vs_vsig(order, trunc):
     ref = vsig(_X_2d, kernel=kernel, dt=1.0, trunc=trunc, order=order)
     got = vsig_fft(_X_2d, kernel=kernel, dt=1.0, trunc=trunc, order=order)
     _assert_allclose(
-        got, ref, atol=1e-8,
+        got, ref, atol=1e-10,
         label=f"q2 m2 order={order} trunc={trunc}",
     )
 
@@ -142,7 +142,7 @@ def test_q2_m1_trajectory(order):
                output_starting_point=True)
     got = vsig_fft(_X_1d, kernel=kernel, dt=0.25, trunc=2, order=order,
                    output_starting_point=True)
-    _assert_allclose(got, ref, atol=1e-8, label=f"q2 m1 trajectory order={order}")
+    _assert_allclose(got, ref, atol=1e-10, label=f"q2 m1 trajectory order={order}")
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +170,7 @@ def test_q2_m1_precomputed_tables(order):
 
     # Also compare against vsig
     ref_vsig = vsig(_X_1d, kernel=kernel, dt=dt, trunc=trunc, order=order)
-    _assert_allclose(got, ref_vsig, atol=1e-8, label=f"q2 precomputed vs vsig order={order}")
+    _assert_allclose(got, ref_vsig, atol=1e-10, label=f"q2 precomputed vs vsig order={order}")
 
 
 # ---------------------------------------------------------------------------
@@ -185,5 +185,5 @@ def test_q2_m1_batch():
 
     ref = vsig(X_batch, kernel=kernel, dt=0.25, trunc=2, order=1, axis=-2)
     got = vsig_fft(X_batch, kernel=kernel, dt=0.25, trunc=2, order=1, axis=-2)
-    _assert_allclose(got, ref, atol=1e-8, label="q2 batch")
+    _assert_allclose(got, ref, atol=1e-10, label="q2 batch")
 

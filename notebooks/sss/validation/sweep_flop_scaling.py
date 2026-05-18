@@ -135,7 +135,12 @@ def main():
         )
 
         # Generate FSSK kernel (Jordan form via FSSK.from_jordan).
-        fssk = random_fssk(q=q, R=R, m=m, d=d, seed=seed0 + idx, eig_min=0.1, eig_max=1.5, normalise_b=False)
+        fssk = random_fssk(
+            q=q, R=R, m=m, d=d, seed=seed0 + idx,
+            eig_min=0.1, eig_max=1.5,
+            freq_min=0.1, freq_max=2.0,
+            normalise_b=False,
+        )
 
         # Construct the StateSpaceSignature object.
         # This step does NOT run expensive JAX ops; it only stores parameters.
