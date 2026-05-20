@@ -1235,6 +1235,9 @@ class FreeKernel(BaseKernel):
     def _batch_size(self, X) -> int:
         return int(X[0].shape[0])
 
+    def _batch_shape(self, X) -> tuple:
+        return X[0].shape[:-2]
+
     def _slice_batch(self, X, start: int, stop: int):
         return tuple(level[start:stop] for level in X)
 

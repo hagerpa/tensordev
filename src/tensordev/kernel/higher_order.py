@@ -161,11 +161,8 @@ class HigherOrderKernel(BaseKernel):
 
     Input convention
     ----------------
-    Inputs are tensor-valued paths in packed positive-level form.
-
-    - A single array is interpreted as a level-1 tensor path.
-    - A tuple/list is interpreted as packed positive tensor levels.
-    - A missing leading sample axis is promoted to batch size ``1``.
+    Inputs are level-1 tensor paths of shape ``(*batch, length, dim)``.
+    A missing leading sample axis is promoted to batch size ``1``.
 
     The parameters ``log_steps`` and ``log_degree`` determine the log-linear
     approximation used in the kernel evaluation.

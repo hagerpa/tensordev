@@ -91,7 +91,7 @@ class BaseKernel(ABC):
                             evaluate=evaluate, return_fg=return_fg, pairwise=True,
                             increment_input=inc,
                         ))
-                    row_blocks.append(jnp.concatenate(col_blocks, axis=1))
+                    row_blocks.append(jnp.concatenate(col_blocks, axis=len(self._batch_shape(X))))
                 return jnp.concatenate(row_blocks, axis=0)
 
         return self._dispatch(X, Y, evaluate=evaluate, return_fg=return_fg,
@@ -101,10 +101,9 @@ class BaseKernel(ABC):
         """pmap dispatch on already-normalised data."""
         if self.num_devices > 1:
             if pairwise:
-                X, Y = self._broadcast_pairwise(X, Y)
                 return pmap_batch(
                     lambda x: self._compute(x, Y, evaluate=evaluate, return_fg=return_fg,
-                                            pairwise=False, increment_input=increment_input),
+                                            pairwise=True, increment_input=increment_input),
                     X,
                     num_devices=self.num_devices,
                 )
@@ -157,6 +156,10 @@ class BaseKernel(ABC):
         """Return the empirical sample size on axis ``0`` of a plain array."""
         return int(jnp.asarray(X).shape[0])
 
+    def _batch_shape(self, X: Array) -> tuple:
+        """Return the full batch shape prefix ``(*batch,)`` of a plain array."""
+        return jnp.asarray(X).shape[:-2]
+
     def _slice_batch(self, X: Array, start: int, stop: int) -> Array:
         """Slice the leading sample axis of a plain array."""
         return X[start:stop]
@@ -188,17 +191,17 @@ class BaseKernel(ABC):
         Returns
         -------
         Array
-            Array of shape ``(n,)`` containing the batchwise kernel values.
+            Array of shape ``(*batch)`` containing the batchwise kernel values.
 
         Raises
         ------
         ValueError
-            If ``X`` and ``Y`` do not have the same empirical sample size.
+            If ``X`` and ``Y`` do not have the same batch shape.
         """
         X = self._as_sample_batch(X)
         Y = self._as_sample_batch(Y)
-        if self._batch_size(X) != self._batch_size(Y):
-            raise ValueError("compute_kernel expects matching batch sizes for X and Y.")
+        if self._batch_shape(X) != self._batch_shape(Y):
+            raise ValueError("compute_kernel expects matching batch shapes for X and Y.")
         return self(X, Y, evaluate="terminal", return_fg=False, pairwise=False,
                     max_batch=max_batch, increment_input=increment_input)
 
@@ -224,12 +227,12 @@ class BaseKernel(ABC):
         Returns
         -------
         Array
-            Gram matrix of shape ``(n_x, n_y)``.
+            Gram matrix of shape ``(*batch_x, *batch_y)``.
 
         Raises
         ------
         ValueError
-            If ``sym=True`` and the two empirical sample sizes do not agree.
+            If ``sym=True`` and the two batch shapes do not agree.
         """
         inc = self.increment_input if increment_input is None else increment_input
         X = self._as_sample_batch(X)
@@ -243,15 +246,17 @@ class BaseKernel(ABC):
             return self(X, Y, evaluate="terminal", return_fg=False, pairwise=True,
                         max_batch=max_batch, increment_input=inc)
 
+        if self._batch_shape(X) != self._batch_shape(Y):
+            raise ValueError("sym=True requires X and Y to have the same batch shape.")
+
         bx = self._batch_size(X)
         by = self._batch_size(Y)
-        if bx != by:
-            raise ValueError("sym=True requires X and Y to have the same batch size.")
 
         if max_batch is None or max_batch <= 0:
             return self._dispatch(X, Y, evaluate="terminal", return_fg=False,
                                   pairwise=True, increment_input=inc)
 
+        n_batch = len(self._batch_shape(X))
         G = None
         for i in range(0, bx, max_batch):
             i1 = min(i + max_batch, bx)
@@ -262,10 +267,13 @@ class BaseKernel(ABC):
                 block = self._dispatch(Xi, Yj, evaluate="terminal", return_fg=False,
                                        pairwise=True, increment_input=inc)
                 if G is None:
-                    G = jnp.zeros((bx, by), dtype=block.dtype)
-                G = G.at[i:i1, j:j1].set(block)
+                    G = jnp.zeros(self._batch_shape(X) + self._batch_shape(Y), dtype=block.dtype)
+                idx = (slice(i, i1),) + (slice(None),) * (n_batch - 1) + (slice(j, j1),) + (slice(None),) * (n_batch - 1)
+                G = G.at[idx].set(block)
                 if i != j:
-                    G = G.at[j:j1, i:i1].set(block.T)
+                    perm = list(range(n_batch, 2 * n_batch)) + list(range(n_batch))
+                    idx_T = (slice(j, j1),) + (slice(None),) * (n_batch - 1) + (slice(i, i1),) + (slice(None),) * (n_batch - 1)
+                    G = G.at[idx_T].set(jnp.transpose(block, perm))
 
         if G is None:
             raise ValueError("Cannot compute a Gram matrix from an empty batch.")
