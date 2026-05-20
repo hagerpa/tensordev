@@ -15,6 +15,15 @@ Checks verified per class
 3. compute_mmd >= 0 (positive semi-definiteness sanity)
 4. compute_scoring_rule / compute_expected_scoring_rule smoke-test (no crash,
    finite output)
+
+Multi-batch checks (Section 7)
+-------------------------------
+Inputs of shape (*batch, T, d) with len(batch) > 1 exercise the three fixes
+in BaseKernel:
+  a. compute_kernel: full batch-shape validation (not just axis 0)
+  b. compute_Gram non-sym: pairwise col-concat uses axis=len(X.shape)-2
+  c. compute_Gram sym: G is initialised as (*batch_x, *batch_y) and indexed
+     with inner-batch slice tuples
 """
 
 from jax import config
@@ -301,6 +310,110 @@ def test_hok_call_time_increment_input_agrees_with_ctor(hok_setup):
         np.asarray(out_ctor),
         rtol=1e-12, atol=1e-12,
         err_msg="call-time increment_input=True disagrees with ctor increment_input=True",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 7. Multi-batch axis: (*batch, T, d) inputs
+#    Uses SigKernel throughout — the fixes are in BaseKernel so one concrete
+#    kernel is sufficient.
+# ---------------------------------------------------------------------------
+
+# Small sizes so tests stay fast.
+_MB_B1, _MB_B2 = 4, 3   # X leading batch dims
+_MB_C1, _MB_C2 = 3, 2   # Y leading batch dims
+_MB_STEPS, _MB_DIM = 8, 2
+
+
+@pytest.fixture(scope="module")
+def multibatch_sig_setup():
+    key = jr.PRNGKey(9001)
+    X = random_trigonometric_polynomial_paths(
+        key, batch=_MB_B1 * _MB_B2, steps=_MB_STEPS, dim=_MB_DIM,
+    ).reshape(_MB_B1, _MB_B2, -1, _MB_DIM)
+    Y = random_trigonometric_polynomial_paths(
+        jr.fold_in(key, 1), batch=_MB_C1 * _MB_C2, steps=_MB_STEPS, dim=_MB_DIM,
+    ).reshape(_MB_C1, _MB_C2, -1, _MB_DIM)
+    kernel = SigKernel(dyadic_order=1, backend="scan")
+    return kernel, X, Y
+
+
+def test_multibatch_compute_kernel_shape_and_chunking(multibatch_sig_setup):
+    """compute_kernel on (*batch, T, d) input returns (*batch,) and is chunk-invariant."""
+    kernel, X, _ = multibatch_sig_setup
+    # element-wise: same batch shape for both args
+    result_full = kernel.compute_kernel(X, X, max_batch=None)
+    result_chunked = kernel.compute_kernel(X, X, max_batch=2)
+
+    assert result_full.shape == (_MB_B1, _MB_B2), (
+        f"Expected ({_MB_B1}, {_MB_B2}), got {result_full.shape}"
+    )
+    np.testing.assert_allclose(
+        np.asarray(result_chunked), np.asarray(result_full),
+        rtol=1e-10, atol=1e-10,
+        err_msg="multi-batch compute_kernel: chunked != full",
+    )
+
+
+def test_multibatch_compute_kernel_shape_mismatch_raises(multibatch_sig_setup):
+    """compute_kernel must reject inputs whose full batch shapes differ."""
+    kernel, X, Y = multibatch_sig_setup
+    # X: (B1, B2, T, d), Y: (C1, C2, T, d) — inner dims differ
+    with pytest.raises(ValueError, match="batch shape"):
+        kernel.compute_kernel(X, Y)
+
+
+def test_multibatch_gram_nonsym_shape_and_chunking(multibatch_sig_setup):
+    """Pairwise Gram on (*batch_x, T, d) × (*batch_y, T, d) returns (*batch_x, *batch_y)."""
+    kernel, X, Y = multibatch_sig_setup
+
+    G_full = kernel.compute_Gram(X, Y, sym=False, max_batch=None)
+    G_chunked = kernel.compute_Gram(X, Y, sym=False, max_batch=2)
+
+    expected_shape = (_MB_B1, _MB_B2, _MB_C1, _MB_C2)
+    assert G_full.shape == expected_shape, (
+        f"Expected {expected_shape}, got {G_full.shape}"
+    )
+    np.testing.assert_allclose(
+        np.asarray(G_chunked), np.asarray(G_full),
+        rtol=1e-10, atol=1e-10,
+        err_msg="multi-batch non-sym Gram: chunked != full",
+    )
+
+
+def test_multibatch_gram_sym_shape_symmetry_and_chunking(multibatch_sig_setup):
+    """Sym Gram on (*batch, T, d) returns (*batch, *batch), is symmetric, and is chunk-invariant."""
+    kernel, X, _ = multibatch_sig_setup
+
+    G_full = kernel.compute_Gram(X, sym=True, max_batch=None)
+    G_chunked = kernel.compute_Gram(X, sym=True, max_batch=2)
+    G_nonsym = kernel.compute_Gram(X, X, sym=False, max_batch=None)
+
+    expected_shape = (_MB_B1, _MB_B2, _MB_B1, _MB_B2)
+    assert G_full.shape == expected_shape, (
+        f"Expected {expected_shape}, got {G_full.shape}"
+    )
+
+    # Symmetry: G[i1, i2, j1, j2] == G[j1, j2, i1, i2]
+    G_np = np.asarray(G_full)
+    np.testing.assert_allclose(
+        G_np, G_np.transpose(2, 3, 0, 1),
+        rtol=1e-10, atol=1e-10,
+        err_msg="multi-batch sym Gram is not symmetric",
+    )
+
+    # sym=True must agree with sym=False (X, X)
+    np.testing.assert_allclose(
+        np.asarray(G_nonsym), G_np,
+        rtol=1e-10, atol=1e-10,
+        err_msg="multi-batch sym Gram disagrees with non-sym (X, X)",
+    )
+
+    # Chunking must not change the result
+    np.testing.assert_allclose(
+        np.asarray(G_chunked), G_np,
+        rtol=1e-10, atol=1e-10,
+        err_msg="multi-batch sym Gram: chunked != full",
     )
 
 

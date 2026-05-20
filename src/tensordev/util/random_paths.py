@@ -290,6 +290,31 @@ import numpy as np
 from numba import njit
 
 
+def brownian_motion_paths(
+    *,
+    dt: float,
+    n_paths: int,
+    dim: int,
+    T: float = 1.0,
+    seed: int = 0,
+    dtype=np.float64,
+) -> np.ndarray:
+    """
+    Generate standard Brownian motion (Wiener process) paths on [0, T].
+
+    Returns shape:
+        (n_paths, round(T / dt) + 1, dim)
+
+    All paths start at 0.  Increments are i.i.d. N(0, dt · I_dim).
+    """
+    steps = round(T / dt)
+    rng = np.random.default_rng(seed)
+    dW = rng.standard_normal((n_paths, steps, dim)) * np.sqrt(dt)
+    X = np.zeros((n_paths, steps + 1, dim), dtype=np.float64)
+    X[:, 1:, :] = np.cumsum(dW, axis=1)
+    return X.astype(dtype, copy=False)
+
+
 def unit_speed_paths(
     *,
     dt: float,

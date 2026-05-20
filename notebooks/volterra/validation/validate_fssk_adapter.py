@@ -35,7 +35,7 @@ sys.path.insert(0, str(_here.parents[3] / "src"))          # tensordev/src
 sys.path.insert(0, str(_here.parents[2]))                  # notebooks/
 sys.path.insert(0, str(_here.parents[2] / "sss" / "validation"))  # fssk_setup
 
-from tensordev.util.random_paths import unit_speed_paths
+from tensordev.util.random_paths import unit_speed_paths, brownian_motion_paths
 from tensordev.sss import StateSpaceSignature
 from tensordev.volterra import ConvolutionKernel, vsig
 from fssk_setup import random_fssk
@@ -99,6 +99,9 @@ def parse_args():
                    help="Materialise Jordan structure into a DenseLambda kernel.")
     p.add_argument("--dyadic-orders", nargs="+", type=int, default=[0],
                    help="Dyadic refinement orders to sweep. Default: 0.")
+    p.add_argument("--path-type", choices=["unit_speed", "brownian"],
+                   default="unit_speed",
+                   help="Path type: 'unit_speed' (default) or 'brownian' (Wiener process).")
     p.add_argument("--output-dir", type=Path, default=None,
                    help="Directory to write fssk_adapter_errors.csv. Skipped if not set.")
     return p.parse_args()
@@ -121,11 +124,13 @@ def main():
 
     # ── Paths ────────────────────────────────────────────────────────────────
     print("Generating paths ...")
-    X = jnp.asarray(
-        unit_speed_paths(dt=dt, dt_fine=dt / 1024, n_paths=batch,
-                         dim=dim, seed=args.seed, dtype=float),
-        dtype=dtype,
-    )
+    if args.path_type == "brownian":
+        _raw = brownian_motion_paths(dt=dt, n_paths=batch, dim=dim,
+                                     T=T, seed=args.seed, dtype=float)
+    else:
+        _raw = unit_speed_paths(dt=dt, dt_fine=dt / 1024, n_paths=batch,
+                                dim=dim, seed=args.seed, dtype=float)
+    X = jnp.asarray(_raw, dtype=dtype)
     m = args.m if args.m is not None else dim
     print(f"  X.shape: {X.shape}")
 

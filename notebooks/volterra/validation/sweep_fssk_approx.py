@@ -36,7 +36,7 @@ jax.config.update("jax_enable_x64", True)
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # notebooks/
 
-from tensordev.util.random_paths import unit_speed_paths
+from tensordev.util.random_paths import unit_speed_paths, brownian_motion_paths
 from tensordev.sss import StateSpaceSignature
 from tensordev.sss.rough_approx import fractional_fssk
 from tensordev.volterra import ConvolutionKernel, vsig
@@ -73,6 +73,9 @@ def parse_args():
     p.add_argument("--coef-quad-order", type=int, default=_DEFAULT_COEF_QUAD)
     p.add_argument("--seed", type=int, default=_DEFAULT_SEED)
     p.add_argument("--dim", type=int, default=3)
+    p.add_argument("--path-type", choices=["unit_speed", "brownian"],
+                   default="unit_speed",
+                   help="Path type: 'unit_speed' (default) or 'brownian' (Wiener process).")
     p.add_argument("--output-dir", type=Path,
                    default=Path(__file__).parent / "validation_outputs")
     return p.parse_args()
@@ -111,11 +114,13 @@ def main():
 
     # ── Path generation ──────────────────────────────────────────────────────
     print("Generating paths ...")
-    X = jnp.asarray(
-        unit_speed_paths(dt=dt, dt_fine=dt / 1024, n_paths=batch,
-                         dim=dim, seed=args.seed, dtype=float),
-        dtype=dtype,
-    )
+    if args.path_type == "brownian":
+        _raw = brownian_motion_paths(dt=dt, n_paths=batch, dim=dim,
+                                     T=T, seed=args.seed, dtype=float)
+    else:
+        _raw = unit_speed_paths(dt=dt, dt_fine=dt / 1024, n_paths=batch,
+                                dim=dim, seed=args.seed, dtype=float)
+    X = jnp.asarray(_raw, dtype=dtype)
     print(f"  X.shape: {X.shape}")
 
     A = jnp.eye(dim, dtype=dtype)[None, :2, :]  # (1, 2, dim): project to m=2

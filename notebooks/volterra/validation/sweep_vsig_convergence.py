@@ -40,7 +40,7 @@ jax.config.update("jax_enable_x64", True)
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # notebooks/
 
-from tensordev.util.random_paths import unit_speed_paths
+from tensordev.util.random_paths import unit_speed_paths, brownian_motion_paths
 from tensordev.volterra import ConvolutionKernel, vsig, vsig_fft
 from tensordev.volterra.iteration_fft import precompute_lag_tables
 from _validation_util.timing_utils import time_warmup, time_hot_calls, aggregate_timing
@@ -95,6 +95,9 @@ def parse_args():
     p.add_argument("--pc-dyadic-max", type=int, default=_DEFAULT_PC_DYADIC_MAX)
     p.add_argument("--ref-dyadic-extra", type=int, default=_DEFAULT_REF_DYADIC_EXTRA)
     p.add_argument("--dim", type=int, default=3)
+    p.add_argument("--path-type", choices=["unit_speed", "brownian"],
+                   default="unit_speed",
+                   help="Path type: 'unit_speed' (default) or 'brownian' (Wiener process).")
     p.add_argument("--output-dir", type=Path,
                    default=Path(__file__).parent / "validation_outputs")
     return p.parse_args()
@@ -138,6 +141,7 @@ def main():
     n_repeats    = args.n_timing_repeats
     vsig_orders  = args.vsig_orders
     dim          = args.dim
+    path_type    = args.path_type
     dtype        = jnp.float64
 
     # ── Mode-specific parameters ─────────────────────────────────────────────
@@ -161,21 +165,25 @@ def main():
         X_by_steps: dict[int, jax.Array] = {}
         for s in all_steps:
             dt_s = T / s
-            X_by_steps[s] = jnp.asarray(
-                unit_speed_paths(dt=dt_s, dt_fine=dt_s / 1024,
-                                 n_paths=batch, dim=dim, seed=args.seed, dtype=float),
-                dtype=dtype,
-            )
+            if path_type == "brownian":
+                _raw = brownian_motion_paths(dt=dt_s, n_paths=batch, dim=dim,
+                                             T=T, seed=args.seed, dtype=float)
+            else:
+                _raw = unit_speed_paths(dt=dt_s, dt_fine=dt_s / 1024,
+                                        n_paths=batch, dim=dim, seed=args.seed, dtype=float)
+            X_by_steps[s] = jnp.asarray(_raw, dtype=dtype)
             print(f"  steps={s:5d}: {X_by_steps[s].shape}")
         X_ref   = X_by_steps[ref_steps]
         dt_ref  = T / ref_steps
     else:
         dt_fixed = T / fixed_steps
-        X_single = jnp.asarray(
-            unit_speed_paths(dt=dt_fixed, dt_fine=dt_fixed / 1024,
-                             n_paths=batch, dim=dim, seed=args.seed, dtype=float),
-            dtype=dtype,
-        )
+        if path_type == "brownian":
+            _raw = brownian_motion_paths(dt=dt_fixed, n_paths=batch, dim=dim,
+                                         T=T, seed=args.seed, dtype=float)
+        else:
+            _raw = unit_speed_paths(dt=dt_fixed, dt_fine=dt_fixed / 1024,
+                                    n_paths=batch, dim=dim, seed=args.seed, dtype=float)
+        X_single = jnp.asarray(_raw, dtype=dtype)
         print(f"  steps={fixed_steps}: {X_single.shape}")
         X_ref   = X_single
         dt_ref  = T / fixed_steps
@@ -366,7 +374,7 @@ def main():
     params = dict(
         betas=betas, convergence_mode=mode, trunc=trunc, batch=batch,
         seed=args.seed, T=T, n_timing_repeats=n_repeats, vsig_orders=vsig_orders,
-        dim=dim,
+        dim=dim, path_type=path_type,
     )
     if mode == "steps":
         params.update(steps_list=steps_list, ref_steps=ref_steps,
