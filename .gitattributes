@@ -9,6 +9,7 @@ vendor/* linguist-vendored
 *.tsx linguist-language=TypeScript
 *.py linguist-language=Python
 
-# Exclude docs/data
+# Exclude docs/data/notebooks
 *.json linguist-detectable=false
 *.md linguist-detectable=false
+*.ipynb linguist-detectable=false
