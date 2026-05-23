@@ -1,0 +1,14 @@
+# Ignore generated files
+dist/* linguist-generated=true
+build/* linguist-generated=true
+
+# Ignore vendor libraries
+vendor/* linguist-vendored
+
+# Force language detection
+*.tsx linguist-language=TypeScript
+*.py linguist-language=Python
+
+# Exclude docs/data
+*.json linguist-detectable=false
+*.md linguist-detectable=false
