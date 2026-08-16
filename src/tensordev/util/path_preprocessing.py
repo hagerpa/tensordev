@@ -147,6 +147,7 @@ def bucket_pad_ragged_paths(
         chunk_size: int | None = None,
         sort: bool = True,
         return_indices: bool = False,
+        target_length: int | None = None,
 ):
     """
     Bucket and pad a ragged batch of Euclidean path values.
@@ -173,11 +174,16 @@ def bucket_pad_ragged_paths(
         If ``True``, also return one index tuple per chunk that records the
         original logical sample order. This can be used downstream to reassemble
         outputs in the original order.
+    target_length : int, optional
+        If given, pad every chunk to this fixed node length instead of the local
+        maximum. Useful when downstream code requires shape-stable batches
+        (e.g. to avoid JIT recompilation). Raises if any path is longer.
 
     Returns
     -------
     list[Array]
-        Dense padded chunks, each of shape ``(n_chunk, max_len, dim)``.
+        Dense padded chunks, each of shape ``(n_chunk, max_len, dim)``
+        (``(n_chunk, target_length, dim)`` when ``target_length`` is given).
 
     or
 
@@ -226,9 +232,13 @@ def bucket_pad_ragged_paths(
 
     for start in range(0, n_total, chunk_size):
         block = samples[start:start + chunk_size]
-        target_length = max(item[2] for item in block)
+        block_length = (
+            max(item[2] for item in block)
+            if target_length is None
+            else int(target_length)
+        )
 
-        padded = [_pad_path_values_to_length(item[0], target_length) for item in block]
+        padded = [_pad_path_values_to_length(item[0], block_length) for item in block]
         chunk = jnp.concatenate(padded, axis=0)
 
         chunks.append(chunk)
