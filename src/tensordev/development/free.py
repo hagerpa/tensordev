@@ -1,12 +1,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from functools import partial
+from functools import lru_cache, partial
 from typing import Any, Optional
 
 from tensordev.core.sequential import DenseElem, SequentialCore
 from tensordev.core.universal import DenseElemFirstOn
 from tensordev._backend import get_default_core, get_default_seq_core
+
+
+@lru_cache(maxsize=None)
+def _development_ops(core: Any, trunc: int):
+    """The reduce and accumulate operations, built once per `(core, trunc)`.
+
+    These reach `tensor_abra` as *static* arguments, so they take part in its
+    jit cache key. `functools.partial` compares by identity, so rebuilding
+    them per call makes every call a cache miss: the same program is traced
+    and compiled again, and the executable is retained. Caching them here is
+    what lets an unchanged call reuse an existing executable.
+    """
+    return (partial(core.tensor_fmexp, trunc=trunc, output_zero_level=True),
+            partial(core.tensor_product, trunc=trunc))
 
 
 def free_development(
@@ -92,8 +106,7 @@ def free_development(
     zero1 = core.xp.zeros_like(dX[0][idx])
     neutral = core.tensor_exponential((zero1,), trunc=trunc, output_zero_level=True)
 
-    reduce_op = partial(core.tensor_fmexp, trunc=trunc, output_zero_level=True)
-    acc_op = partial(core.tensor_product, trunc=trunc)
+    reduce_op, acc_op = _development_ops(core, trunc)
 
     seed = acc_op(starting_point, neutral) if starting_point is not None else neutral
 
