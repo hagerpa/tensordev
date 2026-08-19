@@ -13,11 +13,8 @@ from tensordev._backend import get_default_core, get_default_seq_core
 def _development_ops(core: Any, trunc: int):
     """The reduce and accumulate operations, built once per `(core, trunc)`.
 
-    These reach `tensor_abra` as *static* arguments, so they take part in its
-    jit cache key. `functools.partial` compares by identity, so rebuilding
-    them per call makes every call a cache miss: the same program is traced
-    and compiled again, and the executable is retained. Caching them here is
-    what lets an unchanged call reuse an existing executable.
+    Cached deliberately: these are static arguments to `tensor_abra`, and
+    partials compare by identity, so rebuilding them per call would recompile.
     """
     return (partial(core.tensor_fmexp, trunc=trunc, output_zero_level=True),
             partial(core.tensor_product, trunc=trunc))

@@ -163,8 +163,6 @@ def pmap_batch(fn, *sharded_pytrees, num_devices: int):
         return fn(*sharded_pytrees)
 
     # Every leaf is sharded with the same split, so they must agree on axis 0.
-    # Checking here reports the mismatch itself, rather than letting a later
-    # reshape fail on whichever leaf happens to be visited first.
     sizes = {
         int(leaf.shape[0])
         for pytree in sharded_pytrees
@@ -176,9 +174,8 @@ def pmap_batch(fn, *sharded_pytrees, num_devices: int):
         )
     batch = sizes.pop()
 
-    # With fewer items than devices there is nothing to gain from splitting —
-    # some device would sit idle either way — and the padding needed to fill
-    # the last shard would exceed the batch itself.
+    # Fewer items than devices: nothing to gain, and the padding would exceed
+    # the batch.
     if batch < num_devices:
         return fn(*sharded_pytrees)
 
@@ -186,9 +183,8 @@ def pmap_batch(fn, *sharded_pytrees, num_devices: int):
     local_batch = (batch + pad) // num_devices
 
     def _pad(x):
-        # Repeat rows cyclically: `x[:pad]` would supply only min(pad, batch)
-        # of them. The filler is dropped again by `_flatten`, so its content
-        # is irrelevant and only the row count matters.
+        # Repeat rows cyclically; `_flatten` drops the filler, so only the row
+        # count matters.
         if not pad:
             return x
         filler = jnp.take(x, jnp.arange(pad) % x.shape[0], axis=0)
