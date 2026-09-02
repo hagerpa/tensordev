@@ -1,89 +1,139 @@
-# FFT-based Volterra signature for uniform grids.
-# Supports both q = 1 (scalar fast path, ordinary tensor powers) and
-# q > 1 (multi-component path, normalized shuffle monomials and (p, ell) channels).
+"""FFT-based Volterra signatures on native graded tensor cores.
+
+The lag tables and logical FFT channels depend only on total order. Algebra
+grades are therefore combined inside each logical channel, and all output
+grades on one total-order diagonal are coordinate-packed into the same causal
+FFT. For the total-degree core every diagonal contains one block, so this
+schedule reduces to the dense total-degree case.
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from numbers import Integral
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tensordev.core.jax import Jax
-from tensordev.core.universal import DenseElem
-from tensordev.util.combinatorics import build_multiindex_layout, multiindex_batched_navigation
-from tensordev.volterra.kernel import ConvolutionKernel
+from tensordev._backend import _get as _get_backend_pair
+from tensordev.core.utils.pytrees import tree_map
+from tensordev.util.combinatorics import (
+    build_multiindex_layout,
+    multiindex_batched_navigation,
+)
+from tensordev.volterra._convolution import (
+    apply_transformed_causal_fft,
+    next_power_of_two,
+)
+from tensordev.volterra.algebra import (
+    GradeWorkset,
+    ResolvedVolterraAlgebra,
+    require_volterra_shuffle,
+    resolve_volterra_algebra,
+    resolve_volterra_core_pair,
+)
 from tensordev.volterra.iteration_quad import (
-    _normalize_times,
-    _make_unit,
     BasisExpansionSpec,
+    _basis_interpolation_matrix,
     _basis_rhos_multicomp,
     _chebyshev_lobatto_thetas,
-    _basis_interpolation_matrix,
+    _normalize_times,
 )
+from tensordev.volterra.kernel import ConvolutionKernel
+
 
 Array = jax.Array
+Grade = Any
+GradeBlocks = tuple[Array, ...]
+ComponentState = dict[Grade, Array]
 
-_CORE = Jax()
+
+def _total_degree_algebra(trunc: int, alphabet_dim: int) -> ResolvedVolterraAlgebra:
+    """Resolve the cached total-degree JAX algebra independently of defaults."""
+    total_core, _ = _get_backend_pair("jax")
+    return resolve_volterra_algebra(total_core, trunc, alphabet_dim)
 
 
 @dataclass(frozen=True, slots=True)
 class FFTContext:
-    """Preprocessing context shared by all FFT scheme variants.
-
-    Attributes
-    ----------
-    y:
-        Projected increments with shape ``(S, *batch_shape, q, m)``.
-        The q-axis is always present; for ``kernel.q == 1`` it has size 1.
-    y_powers:
-        Tuple of tensors ``y_scalar^{⊗r}`` for ``r = 0, ..., trunc``,
-        where ``y_scalar = y[..., 0, :]``.  Used exclusively by the scalar
-        (q = 1) fast path, which avoids the overhead of full multi-index
-        enumeration.  Set to ``None`` for q > 1, where the source channels
-        are built via :func:`_shuffle_monomials_by_degree` and
-        :func:`_local_multicomp_channels` instead.
-    """
+    """Static algebra metadata and dynamic data shared by FFT variants."""
 
     y: Array
-    y_powers: DenseElem | None
+    y_powers: tuple[GradeBlocks, ...] | None
     times: Array
     h: Array
-    unit: DenseElem
+    unit: Any
+    algebra: ResolvedVolterraAlgebra
+    seq_core: Any
 
     S: int
     m: int
-    trunc: int
+    max_order: int
     batch_shape: tuple[int, ...]
     dtype: jnp.dtype
 
+    @property
+    def trunc(self) -> Any:
+        """Resolved algebra truncation."""
+        return self.algebra.truncation
 
+
+@jax.tree_util.register_dataclass
 @dataclass(frozen=True, slots=True)
 class LagFFTTable:
-    """
-    weights[n - 1][b] is the FFT of the lag-weight sequence for tensor
-    increment order n and basis component b.
+    """Frequency-domain lag weights for one interpolation point.
+
+    ``weights[n - 1][b]`` is the transformed lag sequence for local total
+    order ``n`` and basis component ``b``. In the multi-component case its
+    leading axis follows the packed ``(kernel component, multi-index)`` order.
     """
 
     weights: tuple[tuple[Array, ...], ...]
-    nfft: int
-    out_len: int
+    nfft: int = field(metadata={"static": True})
+    out_len: int = field(metadata={"static": True})
 
 
+@jax.tree_util.register_dataclass
 @dataclass(frozen=True, slots=True)
 class PrecomputedLagTables:
-    """Build once with :func:`precompute_lag_tables` and pass to
-    :func:`vsig_fft` via ``lag_tables=`` to skip the (potentially
-    expensive) ``betainc`` / quadrature + rfft work on every call.
+    """Lag tables reusable across paths and compatible algebra gradings.
 
-    Only useful for the basis-expansion FFT schemes (``order >= 1``).
+    The table contains no algebra-coordinate data. Compatibility of the
+    kernel, step size, dtype, and basis exponents remains the caller's
+    responsibility; ``fft_iteration`` validates the effective step count,
+    scheme order, and sufficient total depth.
     """
 
     theta_tables: tuple[LagFFTTable, ...]
     output_table: LagFFTTable
-    S: int
-    trunc: int
-    order: int
+    S: int = field(metadata={"static": True})
+    max_order: int = field(metadata={"static": True})
+    order: int = field(metadata={"static": True})
+
+    @property
+    def trunc(self) -> int:
+        """Maximum total order represented by the lag tables."""
+        return self.max_order
+
+
+def _lag_table_max_order(
+        kernel: ConvolutionKernel,
+        trunc: Any,
+        core: Any,
+) -> int:
+    """Resolve public lag-table truncation without grading ambiguity."""
+    if isinstance(trunc, Integral) and not isinstance(trunc, bool):
+        max_order = int(trunc)
+        if max_order <= 0:
+            raise ValueError(f"trunc must be positive, got {max_order}.")
+        # Integer precomputation is deliberately algebra-independent, even
+        # when a non-total background or explicit core is present.
+        return max_order
+
+    resolved_core, _ = resolve_volterra_core_pair(core, None)
+    algebra = resolve_volterra_algebra(resolved_core, trunc, kernel.m)
+    return algebra.max_order
 
 
 def precompute_lag_tables(
@@ -92,44 +142,30 @@ def precompute_lag_tables(
         S: int,
         h: float | Array,
         order: int,
-        trunc: int,
+        trunc: int | tuple[int, int] | None,
         dtype: jnp.dtype,
+        core: Any = None,
 ) -> PrecomputedLagTables:
-    """Precompute lag FFT tables for :func:`vsig_fft`.
+    """Precompute grading-independent lag FFT tables for ``fft_iteration``.
 
-    Call once per (kernel, grid, order, trunc, dtype) configuration, then
-    pass the result as ``lag_tables=`` to :func:`vsig_fft`.  This avoids
-    recomputing the kernel-dependent weights on every call when only the
-    path data changes.
+    An integer ``trunc`` is interpreted directly as total depth and never
+    consults the selected background core. A pair, or ``None``, resolves the
+    explicit/background core and uses the resulting algebra's ``max_order``.
+    A table built to a larger depth can serve a smaller active truncation.
 
-    This approach is fully JAX JIT-friendly: the tables are plain JAX
-    arrays computed eagerly outside of any JIT boundary.  Under
-    ``jax.jit`` the arrays are captured as XLA constants, so there is no
-    runtime overhead.
-
-    Parameters
-    ----------
-    kernel:
-        Volterra kernel.
-    S:
-        Number of increments (after any dyadic refinement).
-    h:
-        Uniform step size.
-    order:
-        FFT scheme order (0, 1, or 2).
-    trunc:
-        Tensor truncation level.
-    dtype:
-        Floating-point dtype.
-
-    Returns
-    -------
-    PrecomputedLagTables
-        Pass directly to ``vsig_fft(..., lag_tables=...)``.
+    ``PrecomputedLagTables`` validates ``S``, ``order``, and total depth only.
+    Callers are responsible for reusing a table with the same kernel, step
+    size, dtype, and derived basis exponents.
     """
+    if isinstance(S, bool) or not isinstance(S, Integral):
+        raise TypeError(f"S must be a positive integer, got {S!r}.")
+    S = int(S)
+    if S <= 0:
+        raise ValueError(f"S must be positive, got {S}.")
     if order not in (0, 1, 2):
         raise ValueError(f"order must be 0, 1, or 2, got {order}.")
 
+    max_order = _lag_table_max_order(kernel, trunc, core)
     dtype_ = jnp.dtype(dtype)
     h_arr = jnp.asarray(h, dtype=dtype_)
     rhos = _basis_rhos_multicomp(order, betas=kernel.beta, dtype=dtype_)
@@ -140,7 +176,7 @@ def precompute_lag_tables(
             kernel=kernel,
             S=S,
             h=h_arr,
-            trunc=trunc,
+            trunc=max_order,
             dtype=dtype_,
             out_len=S,
             theta=theta,
@@ -152,7 +188,7 @@ def precompute_lag_tables(
         kernel=kernel,
         S=S,
         h=h_arr,
-        trunc=trunc,
+        trunc=max_order,
         dtype=dtype_,
         out_len=S + 1,
         theta=jnp.asarray(0.0, dtype=dtype_),
@@ -162,7 +198,7 @@ def precompute_lag_tables(
         theta_tables=theta_tables,
         output_table=output_table,
         S=S,
-        trunc=trunc,
+        max_order=max_order,
         order=order,
     )
 
@@ -171,110 +207,68 @@ def fft_iteration(
         dX: Array,
         *,
         kernel: ConvolutionKernel,
-        trunc: int,
+        trunc=None,
         dt: Array | float = 1.0,
         axis: int = -2,
         return_trajectory: bool = False,
         order: int = 0,
         lag_tables: PrecomputedLagTables | None = None,
-) -> DenseElem:
+        core=None,
+        seq_core=None,
+):
     r"""Volterra signature via FFT convolution on a uniform grid.
 
-    Expects ``dX`` already in increment form and on the final time grid.
-    All preprocessing is the responsibility of the caller — typically the
-    high-level :func:`~tensordev.volterra.signature.vsig`.
-
-    Requires a **uniform** time grid; for non-uniform grids use
-    :func:`quadratic_iteration` instead.  Supports both scalar
-    (``kernel.q == 1``) and multi-component (``kernel.q > 1``) kernels.
-
-    Parameters
-    ----------
-    dX:
-        Increments.  Shape ``(*batch, S, d)`` with step axis at ``axis``
-        and trailing path dimension ``d = kernel.path_dim``.
-    kernel:
-        Volterra kernel.
-    trunc:
-        Tensor truncation level (positive integer).
-    dt:
-        Uniform step size scalar (default ``1.0``).  Passing a 1-D array
-        silently uses only ``times[1] - times[0]`` as the step size.
-    axis:
-        Step axis of ``dX`` (default ``-2``).
-    return_trajectory:
-        If ``True``, return ``[V_1, ..., V_S]`` with the step axis at
-        ``axis``.  If ``False`` (default), return the terminal ``V_S``.
-    order:
-        ``0`` (default) constant basis; ``1`` fractional basis
-        ``{1, s^beta, s}``; ``2`` extended basis
-        ``{1, s^beta, s, s^(beta+1), s^2}``.
-    lag_tables:
-        Optional precomputed lag FFT tables from :func:`precompute_lag_tables`.
-        Must match ``S``, ``trunc``, and ``order``.
-
-    Returns
-    -------
-    DenseElem
-        Terminal signature, or full trajectory when ``return_trajectory=True``.
-
-    Raises
-    ------
-    ValueError
-        For invalid truncation, axis, or scheme order.
+    ``dX`` must already contain increments on the final grid. The returned
+    tensor uses the representation native to the resolved algebra core.
+    ``trunc`` may therefore be an integer for total degree or a bidegree pair
+    for a standard bidegree core; a bounded core may supply its default when
+    ``trunc`` is omitted.
     """
-    if trunc <= 0:
-        raise ValueError(f"trunc must be positive, got {trunc}.")
     if order not in (0, 1, 2):
-        raise ValueError(f"order must currently be 0, 1, or 2, got {order}.")
+        raise ValueError(f"order must be 0, 1, or 2, got {order}.")
 
-    dX = jnp.asarray(dX)
+    core, seq_core = resolve_volterra_core_pair(core, seq_core)
+    algebra = resolve_volterra_algebra(core, trunc, kernel.m)
+    if kernel.q > 1:
+        require_volterra_shuffle(algebra, feature="The q > 1 FFT scheme")
+    xp = core.xp
+
+    dX = xp.asarray(dX)
     if dX.ndim < 2:
-        raise ValueError("dX must have at least a step axis and a trailing path dimension.")
-
+        raise ValueError(
+            "dX must have at least a step axis and a trailing path dimension."
+        )
     axis_norm = axis % dX.ndim
     if axis_norm == dX.ndim - 1:
-        raise ValueError("axis must identify the step axis, not the trailing path dimension.")
+        raise ValueError(
+            "axis must identify the step axis, not the trailing path dimension."
+        )
     if dX.shape[-1] != kernel.path_dim:
         raise ValueError(
             f"dX trailing dimension must be {kernel.path_dim}, got {dX.shape[-1]}."
         )
 
     dtype = dX.dtype
-    dX = dX.astype(dtype)
-
-    S = dX.shape[axis_norm]
+    S = int(dX.shape[axis_norm])
     if S == 0:
         raise ValueError("fft_iteration requires at least one increment.")
+    dt_array = xp.asarray(dt, dtype=dtype)
+    if dt_array.ndim != 0:
+        raise ValueError(
+            "fft_iteration requires a scalar dt because FFT convolution "
+            "assumes a uniform grid."
+        )
 
-    projected = jnp.einsum("qmd,...d->...qm", kernel.A.astype(dtype), dX)
-    # y has shape (S, *batch_shape, q, m) — q-axis always present.
-    y = jnp.moveaxis(projected, axis_norm, 0)
-
-    times_arr = _normalize_times(dt, S=S, dtype=dtype)
+    projected = xp.einsum("qmd,...d->...qm", kernel.A.astype(dtype), dX)
+    # (S, *batch, q, m), with the kernel-component axis always present.
+    y = xp.moveaxis(projected, axis_norm, 0)
+    times_arr = _normalize_times(dt_array, S=S, dtype=dtype)
     h = times_arr[1] - times_arr[0]
-
-    # batch_shape strips the leading S and the trailing (q, m) axes.
     batch_shape = tuple(y.shape[1:-2])
-    m = kernel.m
 
-    unit = _make_unit(
-        batch_shape=batch_shape,
-        m=m,
-        trunc=trunc,
-        dtype=dtype,
-    )
-
-    # q = 1 scalar fast path: build tensor powers from the single q = 0 slice.
-    # This avoids all multi-index overhead.
-    # q > 1: y_powers is not used; the multi-component path builds normalized
-    # shuffle monomials on demand inside _run_basis_fft.
     if kernel.q == 1:
-        y_scalar = y[..., 0, :]  # shape: (S, *batch_shape, m)
-        y_powers: DenseElem | None = _tensor_powers(
-            y_scalar,
-            trunc=trunc,
-            dtype=dtype,
+        y_powers = _native_tensor_powers(
+            y[..., 0, :], algebra=algebra, dtype=dtype
         )
     else:
         y_powers = None
@@ -284,40 +278,87 @@ def fft_iteration(
         y_powers=y_powers,
         times=times_arr,
         h=h,
-        unit=unit,
+        unit=algebra.unit(batch_shape=batch_shape, dtype=dtype),
+        algebra=algebra,
+        seq_core=seq_core,
         S=S,
-        m=m,
-        trunc=trunc,
+        m=kernel.m,
+        max_order=algebra.max_order,
         batch_shape=batch_shape,
         dtype=dtype,
     )
-
     if lag_tables is not None:
-        if lag_tables.S != S:
-            raise ValueError(
-                f"lag_tables.S={lag_tables.S} does not match the effective S={S} "
-                f"(after dyadic refinement).  Rebuild with precompute_lag_tables."
-            )
-        if lag_tables.trunc != trunc:
-            raise ValueError(
-                f"lag_tables.trunc={lag_tables.trunc} != trunc={trunc}."
-            )
-        if lag_tables.order != order:
-            raise ValueError(
-                f"lag_tables.order={lag_tables.order} != order={order}."
-            )
+        _validate_lag_tables(lag_tables, ctx=ctx, order=order)
 
-    out_levels = _run_basis_fft(ctx=ctx, kernel=kernel, order=order, lag_tables=lag_tables)
-
+    output = _run_basis_fft(
+        ctx=ctx, kernel=kernel, order=order, lag_tables=lag_tables
+    )
     if return_trajectory:
-        # Drop the leading unit (V_0) so the trajectory is [V_1, ..., V_S],
-        # matching the S-entry convention of quadratic_iteration.
-        traj = tuple(level[1:] for level in out_levels)
-        if axis_norm == 0:
-            return traj
-        return tuple(jnp.moveaxis(level, 0, axis_norm) for level in traj)
+        trajectory = tree_map(lambda block: block[1:], output)
+        if axis_norm != 0:
+            trajectory = tree_map(
+                lambda block: xp.moveaxis(block, 0, axis_norm), trajectory
+            )
+        return trajectory
+    return tree_map(lambda block: block[-1], output)
 
-    return tuple(level[-1] for level in out_levels)
+
+def _validate_lag_tables(
+        lag_tables: PrecomputedLagTables,
+        *,
+        ctx: FFTContext,
+        order: int,
+) -> None:
+    if lag_tables.S != ctx.S:
+        raise ValueError(
+            f"lag_tables.S={lag_tables.S} does not match the effective S={ctx.S} "
+            "(after dyadic refinement). Rebuild with precompute_lag_tables."
+        )
+    if lag_tables.max_order < ctx.max_order:
+        raise ValueError(
+            f"lag_tables.max_order={lag_tables.max_order} is smaller than the "
+            f"required total depth {ctx.max_order}."
+        )
+    if lag_tables.order != order:
+        raise ValueError(
+            f"lag_tables.order={lag_tables.order} != order={order}."
+        )
+
+
+def _native_tensor_powers(
+        y_scalar: Array,
+        *,
+        algebra: ResolvedVolterraAlgebra,
+        dtype: jnp.dtype,
+) -> tuple[GradeBlocks, ...]:
+    """Build exact-order generator powers as native grade diagonals."""
+    S = y_scalar.shape[0]
+    batch_shape = tuple(y_scalar.shape[1:-1])
+    powers: list[GradeBlocks] = [
+        (
+            algebra.core.xp.ones(
+                (S,) + batch_shape + (algebra.block_width(algebra.zero_grade),),
+                dtype=dtype,
+            ),
+        )
+    ]
+    if algebra.max_order == 0:
+        return tuple(powers)
+
+    generator = dict(algebra.generator_blocks(y_scalar))
+    powers.append(
+        tuple(generator[grade] for grade in algebra.diagonal(1).grades)
+    )
+    for total_order in range(2, algebra.max_order + 1):
+        powers.append(
+            algebra.right_generator_action(
+                algebra.diagonal(total_order - 1),
+                powers[-1],
+                y_scalar,
+                algebra.diagonal(total_order),
+            )
+        )
+    return tuple(powers)
 
 
 def _tensor_powers(
@@ -325,41 +366,15 @@ def _tensor_powers(
         *,
         trunc: int,
         dtype: jnp.dtype,
-) -> DenseElem:
-    """Compute ``y_scalar^{⊗r}`` for ``r = 0, ..., trunc``.
-
-    ``y_scalar`` has shape ``(S, *batch_shape, m)`` — the q=0 slice of
-    the projected increments.
-    """
-
-    S = y_scalar.shape[0]
-    batch_shape = tuple(y_scalar.shape[1:-1])
-
-    powers: list[Array] = [
-        jnp.ones((S,) + batch_shape + (1,), dtype=dtype),
-        y_scalar,
-    ]
-
-    for _ in range(2, trunc + 1):
-        powers.append(_CORE.tensor_product_homogeneous(powers[-1], y_scalar))
-
-    return tuple(powers[: trunc + 1])
-
-
-def _finish_fft_output(
-        out_levels: DenseElem,
-        *,
-        axis_norm: int,
-        output_starting_point: bool,
-) -> DenseElem:
-    """Return either the full trajectory or only the terminal signature."""
-
-    if output_starting_point:
-        if axis_norm == 0:
-            return tuple(out_levels)
-        return tuple(jnp.moveaxis(level, 0, axis_norm) for level in out_levels)
-
-    return tuple(level[-1] for level in out_levels)
+):
+    """Dense total-degree view of the native power recurrence."""
+    algebra = _total_degree_algebra(trunc, int(y_scalar.shape[-1]))
+    return tuple(
+        algebra.diagonal(total_order).pack(algebra.core.xp, values)
+        for total_order, values in enumerate(
+            _native_tensor_powers(y_scalar, algebra=algebra, dtype=dtype)
+        )
+    )
 
 
 def _run_basis_fft(
@@ -368,48 +383,34 @@ def _run_basis_fft(
         kernel: ConvolutionKernel,
         order: int,
         lag_tables: PrecomputedLagTables | None = None,
-) -> DenseElem:
-    """Basis-expansion FFT scheme (order 0, 1, or 2).
-
-    Dispatches internally between two source-construction strategies:
-
-    q = 1 (scalar fast path)
-        Source channels are ordinary tensor powers ``y^{⊗r}`` stored in
-        ``ctx.y_powers``.  No shuffle-monomial overhead.
-
-    q > 1 (multi-component path)
-        Normalized shuffle monomials are built once via
-        :func:`_shuffle_monomials_by_degree`, then individual output levels
-        are computed by :func:`_compute_basis_level_multicomp`, which uses
-        ``(p, ell)`` source channels with channel order
-        ``p * M_{r-1} + ell_index``.
-
-    In both cases the persistent state is ``components[b][level]``; the
-    ``(p, ell)`` multi-index appears only in the temporary FFT source
-    channels and never in the state.
-    """
-
+):
+    """Run the shared basis expansion with native grade-block state."""
     spec = _basis_spec(ctx=ctx, kernel=kernel, order=order)
     B = len(spec.rhos)
+    zero = ctx.algebra.zero_grade
 
-    # Initialise level-0 histories: component 0 is all-ones, the rest zero.
-    components: tuple[DenseElem, ...] = tuple(
-        (jnp.ones((ctx.S,) + ctx.batch_shape + (1,), dtype=ctx.dtype),)
-        if b == 0
-        else (jnp.zeros((ctx.S,) + ctx.batch_shape + (1,), dtype=ctx.dtype),)
+    components: tuple[ComponentState, ...] = tuple(
+        {
+            zero: (
+                ctx.algebra.core.xp.ones(
+                    (ctx.S,) + ctx.batch_shape + (1,), dtype=ctx.dtype
+                )
+                if b == 0
+                else ctx.algebra.core.xp.zeros(
+                    (ctx.S,) + ctx.batch_shape + (1,), dtype=ctx.dtype
+                )
+            )
+        }
         for b in range(B)
     )
 
-    if lag_tables is not None:
-        theta_tables = lag_tables.theta_tables
-        output_table = lag_tables.output_table
-    else:
+    if lag_tables is None:
         theta_tables = tuple(
             _make_lag_fft_table(
                 kernel=kernel,
                 S=ctx.S,
                 h=ctx.h,
-                trunc=ctx.trunc,
+                trunc=ctx.max_order,
                 dtype=ctx.dtype,
                 out_len=ctx.S,
                 theta=theta,
@@ -421,45 +422,50 @@ def _run_basis_fft(
             kernel=kernel,
             S=ctx.S,
             h=ctx.h,
-            trunc=ctx.trunc,
+            trunc=ctx.max_order,
             dtype=ctx.dtype,
             out_len=ctx.S + 1,
             theta=jnp.asarray(0.0, dtype=ctx.dtype),
             rhos=spec.rhos,
         )
+    else:
+        theta_tables = lag_tables.theta_tables
+        output_table = lag_tables.output_table
 
     if kernel.q == 1:
-        # Scalar fast path: tensor powers already in ctx.y_powers; no monomials.
         monomials = None
     else:
-        # Multi-component path: build normalized shuffle monomials once.
-        # For output level n, local order r ranges 1..n, and we need monomials[r-1].
-        # The maximum needed degree is therefore ctx.trunc - 1.
-        monomials = _shuffle_monomials_by_degree(
-            ctx.y, trunc=ctx.trunc - 1, dtype=ctx.dtype
+        monomials = _shuffle_monomials_by_grade(
+            ctx.y,
+            max_order=ctx.max_order - 1,
+            dtype=ctx.dtype,
+            algebra=ctx.algebra,
         )
 
-    for ell in range(1, ctx.trunc + 1):
-        if monomials is None:
-            evaluations = tuple(
-                _compute_basis_level_scalar(ell, ctx=ctx, components=components, table=table)
-                for table in theta_tables
+    for total_order in range(1, ctx.max_order + 1):
+        evaluations = tuple(
+            _compute_basis_diagonal(
+                total_order,
+                ctx=ctx,
+                components=components,
+                table=table,
+                monomials=monomials,
             )
-        else:
-            evaluations = tuple(
-                _compute_basis_level_multicomp(
-                    ell, ctx=ctx, components=components, table=table, monomials=monomials
-                )
-                for table in theta_tables
-            )
-        components = _append_interpolated_basis_level(
+            for table in theta_tables
+        )
+        components = _append_interpolated_basis_diagonal(
+            total_order=total_order,
             components=components,
             evaluations=evaluations,
             interpolation_inverse=spec.interpolation_inverse,
+            algebra=ctx.algebra,
         )
 
-    return _basis_output_levels(
-        ctx=ctx, components=components, table=output_table, monomials=monomials
+    return _basis_output(
+        ctx=ctx,
+        components=components,
+        table=output_table,
+        monomials=monomials,
     )
 
 
@@ -469,12 +475,6 @@ def _basis_spec(
         kernel: ConvolutionKernel,
         order: int,
 ) -> BasisExpansionSpec:
-    """Return the basis/interpolation specification for a higher-order scheme.
-
-    The only thing that varies across orders is the exponent tuple ``rhos``.
-    Chebyshev-Lobatto nodes are used for all orders; for order=1 (n=3) they
-    coincide with ``{0, 1/2, 1}``.
-    """
     rhos = _basis_rhos_multicomp(order, betas=kernel.beta, dtype=ctx.dtype)
     thetas = _chebyshev_lobatto_thetas(n=len(rhos), dtype=ctx.dtype)
     interpolation = _basis_interpolation_matrix(
@@ -490,54 +490,155 @@ def _basis_spec(
     )
 
 
-def _append_interpolated_basis_level(
+def _append_interpolated_basis_diagonal(
         *,
-        components: tuple,
-        evaluations: DenseElem,
+        total_order: int,
+        components: tuple[ComponentState, ...],
+        evaluations: tuple[Array, ...],
         interpolation_inverse: Array,
-) -> tuple:
-    """Append one level of basis coefficients from point evaluations."""
+        algebra: ResolvedVolterraAlgebra,
+) -> tuple[ComponentState, ...]:
+    """Interpolate once across a packed native output diagonal."""
+    stacked = algebra.core.xp.stack(evaluations, axis=0)
+    coefficients = algebra.core.xp.tensordot(
+        interpolation_inverse, stacked, axes=1
+    )
+    diagonal = algebra.diagonal(total_order)
+    updated: list[ComponentState] = []
+    for component, packed in zip(components, coefficients):
+        values = diagonal.split(packed)
+        state = dict(component)
+        state.update(zip(diagonal.grades, values))
+        updated.append(state)
+    return tuple(updated)
 
-    F = jnp.stack(evaluations, axis=0)
-    all_coeffs = jnp.tensordot(interpolation_inverse, F, axes=1)
 
-    return tuple(
-        levels + (all_coeffs[b],)
-        for b, levels in enumerate(components)
+def _basis_output(
+        *,
+        ctx: FFTContext,
+        components: tuple[ComponentState, ...],
+        table: LagFFTTable,
+        monomials: tuple[GradeBlocks, ...] | None,
+):
+    blocks: dict[Grade, Array] = {
+        ctx.algebra.zero_grade: ctx.algebra.core.xp.ones(
+            (ctx.S + 1,) + ctx.batch_shape + (1,), dtype=ctx.dtype
+        )
+    }
+    for total_order in range(1, ctx.max_order + 1):
+        packed = _compute_basis_diagonal(
+            total_order,
+            ctx=ctx,
+            components=components,
+            table=table,
+            monomials=monomials,
+        )
+        diagonal = ctx.algebra.diagonal(total_order)
+        blocks.update(zip(diagonal.grades, diagonal.split(packed)))
+    return ctx.algebra.assemble(
+        tuple(blocks[grade] for grade in ctx.algebra.grades)
     )
 
 
-def _basis_output_levels(
+def _state_diagonal(
+        component: ComponentState,
+        workset: GradeWorkset,
+) -> GradeBlocks:
+    return tuple(component[grade] for grade in workset.grades)
+
+
+def _sum_product_splits(
+        *,
+        algebra: ResolvedVolterraAlgebra,
+        output_grade: Grade,
+        history_workset: GradeWorkset,
+        history_values: GradeBlocks,
+        local_workset: GradeWorkset,
+        local_values: GradeBlocks,
+) -> Array:
+    """Group all algebra-grade splits into one logical FFT source block."""
+    contributions: list[tuple[Array, Array, Grade, Grade]] = []
+    for history_grade, local_grade in algebra.layout.product_splits(output_grade):
+        if not (
+            history_workset.contains(history_grade)
+            and local_workset.contains(local_grade)
+        ):
+            continue
+        history = history_workset.block(history_values, history_grade)[None, ...]
+        local = local_workset.block(local_values, local_grade)
+        contributions.append(
+            (history, local, history_grade, local_grade)
+        )
+    if not contributions:
+        raise ValueError(
+            f"no admissible source split for output grade {output_grade!r}."
+        )
+    return algebra.product_output_block(contributions, output_grade)
+
+
+def _compute_basis_diagonal(
+        total_order: int,
         *,
         ctx: FFTContext,
-        components: tuple,
+        components: tuple[ComponentState, ...],
         table: LagFFTTable,
-        monomials: tuple[Array, ...] | None,
-) -> DenseElem:
-    """Build trajectory levels from the final basis-expansion state.
+        monomials: tuple[GradeBlocks, ...] | None,
+) -> Array:
+    """Compute one coordinate-packed output diagonal in one causal FFT."""
+    algebra = ctx.algebra
+    target = algebra.diagonal(total_order)
+    basis_count = len(components)
+    source_groups: list[Array] = []
+    weight_groups: list[Array] = []
 
-    Dispatches to :func:`_compute_basis_level_scalar` (q = 1) or
-    :func:`_compute_basis_level_multicomp` (q > 1) based on whether
-    ``monomials`` is ``None``.
-    """
-
-    out_levels: list[Array] = [
-        jnp.ones((ctx.S + 1,) + ctx.batch_shape + (1,), dtype=ctx.dtype)
-    ]
-
-    for ell in range(1, ctx.trunc + 1):
+    for local_order in range(1, total_order + 1):
+        local_workset = algebra.diagonal(local_order)
         if monomials is None:
-            out_levels.append(
-                _compute_basis_level_scalar(ell, ctx=ctx, components=components, table=table)
+            assert ctx.y_powers is not None
+            # Scalar path has one logical local channel.
+            local_values = tuple(
+                block[None, ...] for block in ctx.y_powers[local_order]
             )
         else:
-            out_levels.append(
-                _compute_basis_level_multicomp(
-                    ell, ctx=ctx, components=components, table=table, monomials=monomials
-                )
+            local_values = _local_multicomp_channels_by_grade(
+                monomials,
+                ctx.y,
+                local_order,
+                algebra=algebra,
             )
 
-    return tuple(out_levels)
+        history_workset = algebra.diagonal(total_order - local_order)
+        for basis_index in range(basis_count):
+            history_values = _state_diagonal(
+                components[basis_index], history_workset
+            )
+            output_blocks = tuple(
+                _sum_product_splits(
+                    algebra=algebra,
+                    output_grade=output_grade,
+                    history_workset=history_workset,
+                    history_values=history_values,
+                    local_workset=local_workset,
+                    local_values=local_values,
+                )
+                for output_grade in target.grades
+            )
+            source_groups.append(target.pack(algebra.core.xp, output_blocks))
+
+            weights = table.weights[local_order - 1][basis_index]
+            if monomials is None:
+                weights = weights[None, :]
+            weight_groups.append(weights)
+
+    sources = algebra.core.xp.concat(source_groups, axis=0)
+    transformed_weights = algebra.core.xp.concat(weight_groups, axis=0)
+    convolved = apply_transformed_causal_fft(
+        sources,
+        transformed_weights,
+        nfft=table.nfft,
+        out_len=table.out_len,
+    )
+    return algebra.core.xp.sum(convolved, axis=0)
 
 
 def _make_lag_fft_table(
@@ -551,11 +652,6 @@ def _make_lag_fft_table(
         theta: Array,
         rhos: tuple[Array, ...],
 ) -> LagFFTTable:
-    """Dispatch to the scalar or multi-component lag FFT table constructor.
-
-    q = 1  →  :func:`_make_lag_fft_table_scalar`
-    q > 1  →  :func:`_make_lag_fft_table_multicomp`
-    """
     if kernel.q == 1:
         return _make_lag_fft_table_scalar(
             kernel=kernel,
@@ -590,39 +686,22 @@ def _make_lag_fft_table_scalar(
         theta: Array,
         rhos: tuple[Array, ...],
 ) -> LagFFTTable:
-    """Precompute FFTs of all lag weights needed for one interpolation point.
-
-    Scalar fast path (``kernel.q == 1``): exploits the fact that the kernel
-    matrix is 1×1 so only the ``[0, 0]`` entry is extracted.
-
-    ``weights[n-1][b]`` has shape ``(nfft//2+1,)`` — one frequency vector per
-    (local order n, basis component b).
-    """
-
-    nfft = _next_pow2(S + out_len - 1)
+    nfft = next_power_of_two(S + out_len - 1)
     rows: list[tuple[Array, ...]] = []
-
-    for n in range(1, trunc + 1):
+    for local_order in range(1, trunc + 1):
         cols = []
-
         for rho in rhos:
-            w = kernel.lag_weights(
+            weights = kernel.lag_weights(
                 out_len=out_len,
                 h=h,
                 theta=theta,
-                n=n,
+                n=local_order,
                 rho=rho,
                 dtype=dtype,
             )[..., 0, 0]
-            cols.append(jnp.fft.rfft(w, n=nfft))
-
+            cols.append(jnp.fft.rfft(weights, n=nfft))
         rows.append(tuple(cols))
-
-    return LagFFTTable(
-        weights=tuple(rows),
-        nfft=nfft,
-        out_len=out_len,
-    )
+    return LagFFTTable(weights=tuple(rows), nfft=nfft, out_len=out_len)
 
 
 def _make_lag_fft_table_multicomp(
@@ -636,100 +715,63 @@ def _make_lag_fft_table_multicomp(
         theta: Array,
         rhos: tuple[Array, ...],
 ) -> LagFFTTable:
-    """Precompute FFTs of all lag weights for one interpolation point (q > 1).
-
-    ``kernel.lag_weights(...)`` returns shape ``(out_len, q, M_{n-1})``,
-    where ``M_{n-1}`` is the number of packed multi-indices of degree ``n-1``
-    for ``q`` components.  The ``(q, M_{n-1})`` trailing axes are flattened
-    into a single channel axis using the **same ordering as the source
-    channels** built by :func:`_local_multicomp_channels`:
-
-    .. code-block:: text
-
-        channel = p * M_{n-1} + ell_index
-
-    so that weight and source channels are always aligned.
-
-    ``weights[n-1][b]`` has shape ``(q * M_{n-1}, nfft//2+1)`` — one
-    frequency vector per (lag channel, basis component b).
-    """
     q = kernel.q
-    nfft = _next_pow2(S + out_len - 1)
+    nfft = next_power_of_two(S + out_len - 1)
     rows: list[tuple[Array, ...]] = []
-
-    for n in range(1, trunc + 1):
+    for local_order in range(1, trunc + 1):
         cols = []
-
         for rho in rhos:
-            # w: (out_len, q, M_{n-1})
-            w = kernel.lag_weights(
+            weights = kernel.lag_weights(
                 out_len=out_len,
                 h=h,
                 theta=theta,
-                n=n,
+                n=local_order,
                 rho=rho,
                 dtype=dtype,
             )
-            M = w.shape[-1]
-            assert w.shape == (out_len, q, M), (
-                f"lag_weights returned unexpected shape {w.shape}; "
-                f"expected (out_len={out_len}, q={q}, M_{n-1}={M})."
-            )
-            # Flatten (q, M) into a single channel axis: (out_len, q*M)
-            w_flat = w.reshape(out_len, q * M)
-            # rfft over the lag axis → (nfft//2+1, q*M)
-            W_freq = jnp.fft.rfft(w_flat, n=nfft, axis=0)
-            # Transpose to channel-first: (q*M, nfft//2+1)
-            cols.append(W_freq.T)
-
+            multiindices = weights.shape[-1]
+            if weights.shape != (out_len, q, multiindices):
+                raise ValueError(
+                    f"lag_weights returned unexpected shape {weights.shape}; "
+                    f"expected ({out_len}, {q}, {multiindices})."
+                )
+            flattened = weights.reshape(out_len, q * multiindices)
+            cols.append(jnp.fft.rfft(flattened, n=nfft, axis=0).T)
         rows.append(tuple(cols))
-
-    return LagFFTTable(
-        weights=tuple(rows),
-        nfft=nfft,
-        out_len=out_len,
-    )
+    return LagFFTTable(weights=tuple(rows), nfft=nfft, out_len=out_len)
 
 
-def _compute_basis_level_scalar(
-        ell: int,
+def _local_multicomp_channels_by_grade(
+        monomials: tuple[GradeBlocks, ...],
+        y: Array,
+        local_order: int,
         *,
-        ctx: FFTContext,
-        components: tuple,
-        table: LagFFTTable,
-) -> Array:
-    r"""Compute one level of the basis-expansion FFT scheme (scalar fast path).
-
-    Scalar fast path (``kernel.q == 1``): uses ordinary tensor powers
-    ``y^{⊗r}`` rather than a generic multi-index construction.
-
-    .. math::
-
-        F_j^\ell(\theta) = \sum_{i < j}
-            \sum_{n=1}^{\ell} \sum_b w_{n,b}(j-i+\theta) C_{i,\ell-n,b} \otimes y_i^{\otimes n}
-    """
-    B = len(components)
-
-    srcs = jnp.stack(
-        [
-            _CORE.tensor_product_homogeneous(components[b][ell - q_ord], ctx.y_powers[q_ord])
-            for q_ord in range(1, ell + 1)
-            for b in range(B)
-        ],
-        axis=0,
-    )
-    Ws = jnp.stack(
-        [
-            table.weights[q_ord - 1][b]
-            for q_ord in range(1, ell + 1)
-            for b in range(B)
-        ],
-        axis=0,
-    )
-
-    return jnp.sum(
-        _causal_conv_fft_batched(srcs, Ws, nfft=table.nfft, out_len=table.out_len),
-        axis=0,
+        algebra: ResolvedVolterraAlgebra,
+) -> GradeBlocks:
+    """Build native local blocks in logical ``(component, multi-index)`` order."""
+    prefix_workset = algebra.diagonal(local_order - 1)
+    target_workset = algebra.diagonal(local_order)
+    prefix = monomials[local_order - 1]
+    q = int(y.shape[-2])
+    by_component: list[GradeBlocks] = []
+    for component in range(q):
+        generator = y[..., component, :][..., None, :]
+        values = algebra.right_generator_action(
+            prefix_workset,
+            prefix,
+            generator,
+            target_workset,
+        )
+        # The multi-index row is the final batch axis; make it the logical
+        # channel axis while preserving time and all path batch axes.
+        by_component.append(
+            tuple(jnp.moveaxis(block, -2, 0) for block in values)
+        )
+    return tuple(
+        jnp.concatenate(
+            tuple(values[index] for values in by_component), axis=0
+        )
+        for index in range(target_workset.size)
     )
 
 
@@ -738,146 +780,97 @@ def _local_multicomp_channels(
         y: Array,
         r: int,
 ) -> Array:
-    r"""Build batched local source channels for all ``(p, ell)`` at local order ``r``.
-
-    For local order ``r``, the source assigned to channel
-    ``p * M_{r-1} + ell_index`` is
-
-    .. math::
-
-        M_\ell(y_i) \otimes y_{i,p}
-
-    where ``|\ell| = r-1`` and ``p = 0, \ldots, q-1``.
-
-    This channel ordering matches :func:`_make_lag_fft_table_multicomp`
-    exactly, so weight channel ``p * M_{r-1} + ell_index`` and source
-    channel ``p * M_{r-1} + ell_index`` always correspond to the same
-    ``(p, ell)`` pair.
-
-    Parameters
-    ----------
-    monomials:
-        Output of :func:`_shuffle_monomials_by_degree`; ``monomials[k]`` has
-        shape ``(S, *batch, M_k, m**k)``.
-    y:
-        Projected increments, shape ``(S, *batch, q, m)``.
-    r:
-        Local order (positive integer).
-
-    Returns
-    -------
-    Array, shape ``(q * M_{r-1}, S, *batch, m**r)``
-    """
-    # prefix: (S, *batch, M_{r-1}, m**(r-1))
-    prefix = monomials[r - 1]
-    q = y.shape[-2]
-
-    channels_per_p: list[Array] = []
-    for p in range(q):
-        # tail: (S, *batch, 1, m) — broadcast over M_{r-1} rows of prefix.
-        tail = y[..., p, :][..., None, :]
-        # tensor_product_homogeneous sees batch=(S,*batch,M_{r-1}), returns
-        # (S, *batch, M_{r-1}, m**r).
-        local_p = _CORE.tensor_product_homogeneous(prefix, tail)
-        # Move M_{r-1} axis to front: (M_{r-1}, S, *batch, m**r).
-        channels_per_p.append(jnp.moveaxis(local_p, -2, 0))
-
-    # Concatenate over p → (q * M_{r-1}, S, *batch, m**r).
-    return jnp.concatenate(channels_per_p, axis=0)
+    """Dense total-degree view of native local multi-component channels."""
+    algebra = _total_degree_algebra(r, int(y.shape[-1]))
+    graded_monomials = tuple((monomial,) for monomial in monomials[:r])
+    return _local_multicomp_channels_by_grade(
+        graded_monomials, y, r, algebra=algebra
+    )[0]
 
 
-def _compute_basis_level_multicomp(
-        n: int,
+def _shuffle_monomials_by_grade(
+        y: Array,
         *,
-        ctx: FFTContext,
-        components: tuple,
-        table: LagFFTTable,
-        monomials: tuple[Array, ...],
-) -> Array:
-    r"""Compute one output tensor level for q > 1 via batched FFT convolution.
+        max_order: int,
+        dtype: jnp.dtype,
+        algebra: ResolvedVolterraAlgebra,
+) -> tuple[GradeBlocks, ...]:
+    """Build normalized shuffle monomials as sparse native grade diagonals."""
+    if max_order < 0:
+        raise ValueError(f"max_order must be non-negative, got {max_order}.")
+    if y.ndim < 3:
+        raise ValueError(
+            f"y must have at least 3 dimensions (S, ..., q, m), got ndim={y.ndim}."
+        )
 
-    For output level ``n``, local order ``r``, and basis component ``b``,
-    the source for lag channel ``(p, ell)`` (with ``|\ell| = r-1``) is
+    xp = algebra.core.xp
+    y = xp.asarray(y, dtype=dtype)
+    S = int(y.shape[0])
+    q = int(y.shape[-2])
+    batch_shape = tuple(y.shape[1:-2])
+    layout = build_multiindex_layout(q=q, trunc=max_order)
+    offsets = np.asarray(layout.offsets)
+    _, successors = multiindex_batched_navigation(q=q, trunc=max_order)
 
-    .. math::
+    monomials: list[GradeBlocks] = [
+        (
+            xp.ones(
+                (S,) + batch_shape + (1, algebra.block_width(algebra.zero_grade)),
+                dtype=dtype,
+            ),
+        )
+    ]
+    for degree in range(max_order):
+        source_workset = algebra.diagonal(degree)
+        target_workset = algebra.diagonal(degree + 1)
+        current = monomials[degree]
+        current_rows = int(offsets[degree + 1] - offsets[degree])
+        next_rows = int(offsets[degree + 2] - offsets[degree + 1])
+        inverse_degree = xp.asarray(1.0 / (degree + 1), dtype=dtype)
 
-        C^{(b)}_{i,n-r} \otimes M_\ell(y_i) \otimes y_{i,p}
+        predecessor_tables: list[np.ndarray] = []
+        for component in range(q):
+            predecessor = np.full(next_rows, current_rows, dtype=np.intp)
+            for source_index, target_index in enumerate(successors[degree][component]):
+                predecessor[target_index] = source_index
+            predecessor_tables.append(predecessor)
 
-    convolved against lag-weight channel ``a_{p,\ell}`` from
-    ``table.weights[r - 1][b]``.
-
-    All ``(r, b)`` source blocks are concatenated along the channel axis and
-    processed in a single call to :func:`_causal_conv_fft_batched`.
-
-    Parameters
-    ----------
-    n:
-        Output tensor level (positive integer, ``1 <= n <= ctx.trunc``).
-    ctx:
-        FFT context; ``ctx.y`` has shape ``(S, *batch, q, m)``.
-    components:
-        Persistent basis-coefficient histories; ``components[b][level]`` has
-        shape ``(S, *batch, m**level)``.
-    table:
-        Precomputed lag FFT table built by :func:`_make_lag_fft_table_multicomp`.
-    monomials:
-        Shuffle monomials from :func:`_shuffle_monomials_by_degree`;
-        ``monomials[k]`` has shape ``(S, *batch, M_k, m**k)``.
-
-    Returns
-    -------
-    Array, shape ``(table.out_len, *batch, m**n)``
-    """
-    B = len(components)
-    all_srcs: list[Array] = []
-    all_Ws: list[Array] = []
-
-    for r in range(1, n + 1):
-        # Build all (p, ell) source channels for this local order.
-        # Shape: (q * M_{r-1}, S, *batch, m**r)
-        local_r = _local_multicomp_channels(monomials, ctx.y, r)
-        C_r = local_r.shape[0]  # = q * M_{r-1}
-
-        for b in range(B):
-            # History component for this (r, b) pair.
-            # hist: (S, *batch, m**(n-r))
-            hist = components[b][n - r]
-
-            # Tensor-product history with every channel of local_r.
-            # Expand hist to (1, S, *batch, m**(n-r)) so it broadcasts over C_r.
-            hist_exp = hist[None, ...]  # (1, S, *batch, m**(n-r))
-            # tensor_product_homogeneous sees batch=(C_r, S, *batch), returns
-            # (C_r, S, *batch, m**n).
-            srcs_rb = _CORE.tensor_product_homogeneous(hist_exp, local_r)
-
-            Ws_rb = table.weights[r - 1][b]  # (C_r, nfreq)
-
-            assert srcs_rb.shape[0] == C_r, (
-                f"Source channel count {srcs_rb.shape[0]} != C_r={C_r} "
-                f"at n={n}, r={r}, b={b}."
+        extended = tuple(
+            xp.concat(
+                (
+                    block,
+                    xp.zeros(
+                        block.shape[:-2] + (1, block.shape[-1]), dtype=dtype
+                    ),
+                ),
+                axis=-2,
             )
-            assert Ws_rb.shape[0] == C_r, (
-                f"Weight channel count {Ws_rb.shape[0]} != C_r={C_r} "
-                f"at n={n}, r={r}, b={b}."
+            for block in current
+        )
+        accumulated: GradeBlocks | None = None
+        for component in range(q):
+            gathered = tuple(
+                block[..., predecessor_tables[component], :]
+                for block in extended
             )
-
-            all_srcs.append(srcs_rb)
-            all_Ws.append(Ws_rb)
-
-    # Stack all (r, b) blocks into a single batch for the FFT convolution.
-    srcs = jnp.concatenate(all_srcs, axis=0)  # (C_total, S, *batch, m**n)
-    Ws = jnp.concatenate(all_Ws, axis=0)      # (C_total, nfreq)
-
-    result = jnp.sum(
-        _causal_conv_fft_batched(srcs, Ws, nfft=table.nfft, out_len=table.out_len),
-        axis=0,
-    )  # (out_len, *batch, m**n)
-
-    assert result.shape == (table.out_len,) + ctx.batch_shape + (ctx.m ** n,), (
-        f"Result shape {result.shape} != expected "
-        f"{(table.out_len,) + ctx.batch_shape + (ctx.m ** n,)} at n={n}."
-    )
-    return result
+            generator = y[..., component, :][..., None, :]
+            contribution = algebra.shuffle_generator_action(
+                source_workset,
+                gathered,
+                generator,
+                target_workset,
+            )
+            if accumulated is None:
+                accumulated = contribution
+            else:
+                accumulated = tuple(
+                    left + right for left, right in zip(accumulated, contribution)
+                )
+        assert accumulated is not None
+        monomials.append(
+            tuple(inverse_degree * block for block in accumulated)
+        )
+    return tuple(monomials)
 
 
 def _shuffle_monomials_by_degree(
@@ -886,134 +879,30 @@ def _shuffle_monomials_by_degree(
         trunc: int,
         dtype: jnp.dtype,
 ) -> tuple[Array, ...]:
-    r"""Build normalized shuffle monomials by total degree.
-
-    For projected increments ``y`` with shape ``(S, *batch_shape, q, m)`` returns
-    a tuple ``monomials`` where
-
-    ``monomials[k]`` has shape ``(S, *batch_shape, M_k, m**k)``
-
-    and entry ``ell_index`` (along the ``M_k`` axis) stores
-
-    .. math::
-
-        M_\ell(y_i) = \frac{1}{\ell !}\,
-            y_1^{\sqcup\,\ell_1} \sqcup \cdots \sqcup y_q^{\sqcup\,\ell_q}
-
-    for the ``ell_index``-th multi-index ``\ell`` of total degree ``k``.
-
-    The multi-index ordering within each degree block is the same
-    ``_compositions_desc`` order used by
-    :func:`~tensordev.util.combinatorics.build_multiindex_layout` and by
-    :meth:`~tensordev.volterra.kernel.ConvolutionKernel.lag_weights`, so that
-    the ``ell_index`` axis here aligns directly with the last axis of
-    ``kernel.lag_weights(..., n=k+1)``.
-
-    Recursion (forward, by degree):
-
-    .. math::
-
-        M_{\ell + e_a}(y) \mathrel{+}=
-            \frac{1}{k+1}\,(M_\ell(y) \sqcup y_a)
-
-    summed over all predecessors ``\ell`` with ``|\ell| = k``.
-
-    Parameters
-    ----------
-    y:
-        Projected increments, shape ``(S, *batch_shape, q, m)``.
-    trunc:
-        Maximum total degree.
-    dtype:
-        Floating-point dtype.
-
-    Returns
-    -------
-    tuple of ``trunc + 1`` arrays, ``monomials[k]`` with shape
-    ``(S, *batch_shape, M_k, m**k)``.
-
-    Notes
-    -----
-    This helper is used only by the q > 1 FFT path.  The q = 1 scalar path
-    continues to use ordinary tensor powers via :func:`_tensor_powers`.
-    """
+    """Dense total-degree view of the native monomial recurrence."""
     if trunc < 0:
         raise ValueError(f"trunc must be non-negative, got {trunc}.")
     if y.ndim < 3:
         raise ValueError(
             f"y must have at least 3 dimensions (S, ..., q, m), got ndim={y.ndim}."
         )
-
-    y = jnp.asarray(y, dtype=dtype)
-    S = y.shape[0]
-    q = y.shape[-2]
-    m = y.shape[-1]
-    batch_shape = tuple(y.shape[1:-2])
-
-    # Host-side layout & successor tables — computed once, never traced by JAX.
-    layout = build_multiindex_layout(q=q, trunc=trunc)
-    # Convert offsets to a plain NumPy array once so all degree-block size
-    # arithmetic stays on the host and is never accidentally traced by JAX.
-    offsets = np.asarray(layout.offsets)
-    _, succ_local_by_deg = multiindex_batched_navigation(q=q, trunc=trunc)
-
-    # Degree 0: single scalar 1, shape (S, *batch, 1, 1).
-    monomials: list[Array] = [
-        jnp.ones((S,) + batch_shape + (1, 1), dtype=dtype)
-    ]
-
-    for k in range(trunc):
-        cur = monomials[k]  # (S, *batch, M_k, m**k)
-        M_k = int(offsets[k + 1] - offsets[k])
-        M_k1 = int(offsets[k + 2] - offsets[k + 1])
-        inv = jnp.asarray(1.0 / (k + 1), dtype=dtype)
-
-        # succ_local_by_deg[k]: tuple of q numpy int arrays, each shape (M_k,).
-        # succ_local_by_deg[k][a][i] = local index (in degree-(k+1) block) of
-        # the successor of degree-k entry i via component a.
-        succ_r = succ_local_by_deg[k]
-
-        # Build predecessor tables (host-side, static numpy) by inverting succ_r.
-        # pred_locals[a][j] = local index (in degree-k block) of the predecessor
-        # of degree-(k+1) entry j via component a.
-        # Sentinel value M_k (beyond cur's last row) marks "no predecessor via a".
-        pred_locals: list[np.ndarray] = []
-        for a in range(q):
-            pred_a = np.full(M_k1, M_k, dtype=np.intp)  # default = sentinel
-            for i_src, j_dst in enumerate(succ_r[a]):
-                pred_a[j_dst] = i_src
-            pred_locals.append(pred_a)
-
-        # Append a zero row to cur so the sentinel index M_k maps to zero.
-        # Shuffling zero with any vector gives zero, so no masking is needed.
-        cur_ext = jnp.concatenate(
-            [cur, jnp.zeros((S,) + batch_shape + (1, m ** k), dtype=dtype)],
-            axis=-2,
-        )  # (S, *batch, M_k+1, m**k)
-
-        nxt = jnp.zeros((S,) + batch_shape + (M_k1, m ** (k + 1)), dtype=dtype)
-
-        for a in range(q):
-            # Gather: pred_locals[a] is a static numpy int array of shape (M_{k+1},).
-            # JAX compiles this as a gather (no scatter / .at[].add overhead).
-            # Entries where pred_locals[a][j] == M_k pick up the zero sentinel row.
-            preds = cur_ext[..., pred_locals[a], :]  # (S, *batch, M_{k+1}, m**k)
-
-            # Shuffle all predecessors with y_a simultaneously — (S, *batch, M_{k+1})
-            # is the effective batch for tensor_shuffle_vector_homogeneous.
-            y_a_exp = y[..., a, :][..., None, :]  # (S, *batch, 1, m)
-            shuffled = _CORE.tensor_shuffle_vector_homogeneous(preds, y_a_exp, k)
-            # (S, *batch, M_{k+1}, m**(k+1))
-
-            nxt = nxt + inv * shuffled
-
-        monomials.append(nxt)
-
-    return tuple(monomials)
+    if trunc == 0:
+        return (
+            jnp.ones(
+                tuple(y.shape[0:-2]) + (1, 1),
+                dtype=dtype,
+            ),
+        )
+    algebra = _total_degree_algebra(trunc, int(y.shape[-1]))
+    graded = _shuffle_monomials_by_grade(
+        y, max_order=trunc, dtype=dtype, algebra=algebra
+    )
+    return tuple(values[0] for values in graded)
 
 
 def _next_pow2(n: int) -> int:
-    return 1 if n <= 1 else 1 << (n - 1).bit_length()
+    """Return the causal-FFT transform size for ``n`` entries."""
+    return next_power_of_two(n)
 
 
 def _causal_conv_fft_batched(
@@ -1023,26 +912,10 @@ def _causal_conv_fft_batched(
         nfft: int,
         out_len: int,
 ) -> Array:
-    """Batched causal FFT convolution over B source/weight pairs.
-
-    Args:
-        srcs: ``(B, S, ..., m^ell)``
-        Ws:   ``(B, nfft//2+1)`` — precomputed rfft of lag weights.
-
-    Returns:
-        ``(B, out_len, ..., m^ell)``
-    """
-    B, S = srcs.shape[:2]
-    trailing = srcs.shape[2:]
-
-    srcs_flat = srcs.reshape((B, S, -1))
-    SRC = jnp.fft.rfft(srcs_flat, n=nfft, axis=1)
-    out_flat = jnp.fft.irfft(
-        SRC * Ws[:, :, None],
-        n=nfft,
-        axis=1,
+    """Apply transformed batched causal convolution."""
+    return apply_transformed_causal_fft(
+        srcs, Ws, nfft=nfft, out_len=out_len
     )
-    return out_flat[:, :out_len].reshape((B, out_len) + trailing)
 
 
 __all__ = ["fft_iteration", "precompute_lag_tables", "PrecomputedLagTables"]

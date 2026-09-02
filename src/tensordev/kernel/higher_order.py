@@ -6,17 +6,19 @@ from typing import Literal
 import jax.numpy as jnp
 
 from tensordev import Jax
+from tensordev._coordinate_guard import standard_total_degree_only
 from tensordev.core.jax import JaxSequentialCore
 from tensordev.development.free import free_development
 from tensordev.kernel.free import free_kernel
 from tensordev.kernel.base_kernel import BaseKernel
 from tensordev.util.path_preprocessing import DyadicOrder
 
-_CORE = Jax()
-_SEQ_CORE = JaxSequentialCore()
+_TOTAL_DEGREE_CORE = Jax()
+_TOTAL_DEGREE_SEQ_CORE = JaxSequentialCore()
 Array = jnp.ndarray
 
 
+@standard_total_degree_only("higher_order_kernel")
 def higher_order_kernel(
         X: Array,
         Y: Array,
@@ -90,7 +92,6 @@ def higher_order_kernel(
     """
     log_steps_x, log_steps_y = log_steps
     log_degree_x, log_degree_y = log_degree
-    # log_degree_x, log_degree_y = max(log_degree_x + 1, 0), max(log_degree_y + 1, 0)
 
     if log_steps_x <= 0:
         raise ValueError(f"log_steps[0] must be positive, got {log_steps_x}.")
@@ -124,17 +125,17 @@ def higher_order_kernel(
             f"log_steps[1]={log_steps_y} must divide the number of Y-intervals {sy}."
         )
 
-    sig_x = free_development(dx, increment_input=True, seq_core=_SEQ_CORE, trunc=log_degree_x, axis=-2,
-                             block_size=log_steps_x, accumulate=False, output_starting_point=False, core=_CORE)
-    sig_y = free_development(dy, increment_input=True, seq_core=_SEQ_CORE, trunc=log_degree_y, axis=-2,
-                             block_size=log_steps_y, accumulate=False, output_starting_point=False, core=_CORE)
+    sig_x = free_development(dx, increment_input=True, seq_core=_TOTAL_DEGREE_SEQ_CORE, trunc=log_degree_x, axis=-2,
+                             block_size=log_steps_x, accumulate=False, output_starting_point=False, core=_TOTAL_DEGREE_CORE)
+    sig_y = free_development(dy, increment_input=True, seq_core=_TOTAL_DEGREE_SEQ_CORE, trunc=log_degree_y, axis=-2,
+                             block_size=log_steps_y, accumulate=False, output_starting_point=False, core=_TOTAL_DEGREE_CORE)
 
-    log_x = _CORE.tensor_logarithm(
+    log_x = _TOTAL_DEGREE_CORE.tensor_logarithm(
         sig_x[1:],
         trunc=log_degree_x,
         output_zero_level=False,
     )
-    log_y = _CORE.tensor_logarithm(
+    log_y = _TOTAL_DEGREE_CORE.tensor_logarithm(
         sig_y[1:],
         trunc=log_degree_y,
         output_zero_level=False,
@@ -203,4 +204,3 @@ class HigherOrderKernel(BaseKernel):
             dyadic_order=self.dyadic_order,
             increment_input=increment_input,
         )
-

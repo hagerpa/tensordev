@@ -1,19 +1,15 @@
-"""
-End-to-end JAX path tests for JaxShuffleCore.
-"""
-import sys
-sys.path.insert(0, "src")
+"""End-to-end shuffle tests through the configured total-degree JAX core."""
 
 import numpy as np
 import jax
 import jax.numpy as jnp
 
 from tensordev.core.utils.annotations import iter_class_jittables, is_jittable
-from tensordev.core.jax import JaxShuffleCore
+from tensordev.core.jax import Jax
 
 
-def _make_jax_core(N: int) -> JaxShuffleCore:
-    return JaxShuffleCore(d=1, trunc=N)
+def _make_jax_core(N: int) -> Jax:
+    return Jax(d=1, max_trunc=N, precompute_shuffle=True)
 
 
 def _jax_dense(scalars):
@@ -25,8 +21,9 @@ def _jax_dense(scalars):
 # ---------------------------------------------------------------------------
 
 def test_registration():
-    jittables = {name: kw for name, _, kw in iter_class_jittables(JaxShuffleCore)}
+    jittables = {name: kw for name, _, kw in iter_class_jittables(Jax)}
 
+    assert "permutation_einsum" in jittables
     assert "tensor_shuffle_product_homogeneous" in jittables
     assert "tensor_shuffle_product" in jittables
 
@@ -34,10 +31,9 @@ def test_registration():
     for expected in ("trunc", "a_first_on", "b_first_on", "first_on_out"):
         assert expected in static_names, f"'{expected}' must be in static_argnames"
 
-    # JaxShuffleCore.sparse_einsum is @partial(jax.jit, ...) — must NOT carry JIT_TAG
-    assert not is_jittable(getattr(JaxShuffleCore, "sparse_einsum"))
-
-    print("PASS test_registration")
+    assert is_jittable(getattr(Jax, "permutation_einsum"))
+    static_args = set(jittables["permutation_einsum"].get("static_argnums", ()))
+    assert {0, 3, 4} <= static_args
 
 
 # ---------------------------------------------------------------------------
@@ -49,26 +45,23 @@ def test_instance_wiring():
 
     assert "tensor_shuffle_product_homogeneous" in sc.__dict__
     assert "tensor_shuffle_product" in sc.__dict__
-    # sparse_einsum lives at class level via @partial(jax.jit, ...) — not instance attr
-    assert "sparse_einsum" not in sc.__dict__
-
-    print("PASS test_instance_wiring")
+    assert "permutation_einsum" in sc.__dict__
+    assert sc.shuffle_plan_store is not None
 
 
 # ---------------------------------------------------------------------------
-# 3. sparse_einsum returns a JAX array
+# 3. permutation_einsum returns a JAX array
 # ---------------------------------------------------------------------------
 
-def test_sparse_einsum_dispatch():
+def test_permutation_einsum_dispatch():
     sc = _make_jax_core(2)
 
     Ai = jnp.array([[3.0]])
     Bj = jnp.array([[2.0]])
-    res = sc.sparse_einsum(Ai, Bj, 1, 0)
+    res = sc.permutation_einsum(Ai, Bj, 1, 0)
 
     assert isinstance(res, jax.Array)
     np.testing.assert_allclose(np.array(res), [[6.0]])
-    print("PASS test_sparse_einsum_dispatch")
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +78,6 @@ def test_homogeneous_jax():
 
     assert isinstance(res, jax.Array)
     np.testing.assert_allclose(np.array(res), [[30.0]])
-    print("PASS test_homogeneous_jax")
 
 
 # ---------------------------------------------------------------------------
@@ -103,14 +95,13 @@ def test_shuffle_product_jax_basic():
     np.testing.assert_allclose(np.array(C[0]), [[1.0]])
     np.testing.assert_allclose(np.array(C[1]), [[5.0]])
     np.testing.assert_allclose(np.array(C[2]), [[12.0]])
-    print("PASS test_shuffle_product_jax_basic")
 
 
 # ---------------------------------------------------------------------------
-# 6. Same instance → same compiled function (no spurious retrace)
+# 6. Repeated-call consistency
 # ---------------------------------------------------------------------------
 
-def test_static_reuse():
+def test_repeated_call_consistency():
     sc = _make_jax_core(4)
 
     A = _jax_dense([1.0, 2.0])
@@ -119,7 +110,6 @@ def test_static_reuse():
     C2 = sc.tensor_shuffle_product(A, B)
     for k in range(len(C1)):
         np.testing.assert_allclose(np.array(C1[k]), np.array(C2[k]))
-    print("PASS test_static_reuse")
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +127,6 @@ def test_commutativity_jax():
         np.testing.assert_allclose(
             np.array(C_AB[k]), np.array(C_BA[k]), err_msg=f"degree {k}"
         )
-    print("PASS test_commutativity_jax")
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +143,6 @@ def test_trunc_jax():
     assert len(C_trunc) == 2
     np.testing.assert_allclose(np.array(C_trunc[0]), np.array(C_full[0]))
     np.testing.assert_allclose(np.array(C_trunc[1]), np.array(C_full[1]))
-    print("PASS test_trunc_jax")
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +159,6 @@ def test_first_on_out_jax():
     assert len(C_drop) == len(C_full) - 1
     for k in range(len(C_drop)):
         np.testing.assert_allclose(np.array(C_drop[k]), np.array(C_full[k + 1]))
-    print("PASS test_first_on_out_jax")
 
 
 # ---------------------------------------------------------------------------
@@ -189,22 +176,3 @@ def test_batch_jax():
     assert len(C) == 4
     for k, Ck in enumerate(C):
         assert Ck.shape == (batch, 1), f"degree {k}: wrong shape {Ck.shape}"
-    print("PASS test_batch_jax")
-
-
-# ---------------------------------------------------------------------------
-# Run all
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    test_registration()
-    test_instance_wiring()
-    test_sparse_einsum_dispatch()
-    test_homogeneous_jax()
-    test_shuffle_product_jax_basic()
-    test_static_reuse()
-    test_commutativity_jax()
-    test_trunc_jax()
-    test_first_on_out_jax()
-    test_batch_jax()
-    print("\nAll 10 JaxShuffleCore tests passed.")

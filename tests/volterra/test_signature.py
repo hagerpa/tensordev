@@ -9,9 +9,17 @@ import numpy as np
 
 import pytest
 
+from tensordev import total_degree_core
 from tensordev.core.jax import Jax
 from tensordev.development import path_signature
-from tensordev.volterra import ConvolutionKernel, FractionalKernel, GammaKernel, vsig, vsig_fft
+from tensordev.volterra import (
+    ConvolutionKernel,
+    FractionalKernel,
+    GammaKernel,
+    VolterraSignature,
+    vsig,
+    vsig_fft,
+)
 from tensordev.volterra.eval_general import eval_e as eval_e_general
 from tensordev.volterra.eval_general import eval_vte as eval_vte_general
 from tensordev.volterra.eval_scalar import eval_vte as eval_vte_scalar
@@ -115,6 +123,26 @@ def test_volterra_vsig_beta_one_q_one_recovers_classical_signature():
     expected = path_signature(X, trunc=trunc, axis=-2, core=_CORE)
 
     _assert_dense_allclose(got, expected, atol=2e-10, rtol=2e-10)
+
+
+def test_bounded_total_core_supplies_default_volterra_truncation():
+    core = total_degree_core(d=2, max_trunc=4, default_trunc=2)
+    X = jnp.array(
+        [[0.0, 0.0], [0.2, -0.1], [0.4, 0.3]],
+        dtype=jnp.float64,
+    )
+    kernel = FractionalKernel(
+        beta=jnp.array([1.0]),
+        A=jnp.eye(2, dtype=jnp.float64)[None, :, :],
+    )
+
+    result = vsig(X, kernel=kernel, dt=1.0, core=core)
+    reference = vsig(X, kernel=kernel, dt=1.0, trunc=2, core=core)
+    signature = VolterraSignature(kernel=kernel, core=core)
+
+    assert len(result) == 3
+    assert signature.trunc == 2
+    _assert_dense_allclose(result, reference)
 
 
 def test_volterra_vsig_output_starting_point_returns_padded_history_trajectory():

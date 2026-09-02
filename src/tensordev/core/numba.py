@@ -1,103 +1,182 @@
-# ---- Numba backend ----
+"""Numba-backed implementations of the total-degree tensor cores."""
+
 from __future__ import annotations
 
-import numpy as np
 import numba as nb
+import numpy as np
 
-from .shuffle import ShuffleCore
-from .universal import Universal, Array, DenseElem, DenseElemFirstOn, Callable
+from .shuffle import (
+    TotalDegreeShufflePlanStore,
+    _direct_homogeneous_shuffle,
+    _homogeneous_outer_product,
+    _normalize_precompute_shuffle,
+    _prepare_homogeneous_shuffle_inputs,
+    _sum_homogeneous_axis_permutations,
+)
+from .universal import Universal
 
-
-# ---------------------------------------------------------------------------
-# Module-level numba kernel (lazy: compiled on first call, not at import time)
-# ---------------------------------------------------------------------------
 
 @nb.njit(fastmath=True, cache=True)
-def _sparse_einsum_nb(Ai, Bj, segment_ids, rows, cols, data):
+def _permutation_shuffle_nb(
+        left: np.ndarray,
+        right: np.ndarray,
+        axis_permutations: np.ndarray,
+        dimension: int,
+        left_degree: int,
+) -> np.ndarray:
+    """Apply a compact homogeneous shuffle plan to flattened batches.
+
+    ``axis_permutations[k]`` describes which input tensor axis occupies each
+    output position for shuffle ``k``. Inverting that small table once per call
+    lets the hot loop recover the left and right flat coordinates without
+    materialising a coordinate-to-coordinate gather map.
     """
-    Numba-JIT sparse bilinear contraction (inner loop).
+    permutation_count, output_degree = axis_permutations.shape
+    inverse_permutations = np.empty_like(axis_permutations)
+    for permutation_index in range(permutation_count):
+        for output_axis in range(output_degree):
+            input_axis = axis_permutations[permutation_index, output_axis]
+            inverse_permutations[permutation_index, input_axis] = output_axis
 
-    Computes  res[b, segment_ids[k]] += Ai[b, rows[k]] * Bj[b, cols[k]] * data[k]
-    for all k, accumulating into a zero-initialised output of shape
-    (batch, d_i * d_j).
-    """
-    res = np.zeros((Ai.shape[0], Ai.shape[1] * Bj.shape[1]), dtype=Ai.dtype)
-    for k in range(len(segment_ids)):
-        res[:, segment_ids[k]] += Ai[:, rows[k]] * Bj[:, cols[k]] * data[k]
-    return res
+    # Coordinate-major buffers make the batch loop contiguous for Numba
+    # vectorization.  Each output word and its shuffled input coordinates are
+    # therefore decoded once rather than once per batch item.
+    left_by_coordinate = np.ascontiguousarray(left.T)
+    right_by_coordinate = np.ascontiguousarray(right.T)
+    output_width = left.shape[1] * right.shape[1]
+    result = np.zeros((output_width, left.shape[0]), dtype=left.dtype)
+    digits = np.empty(output_degree, dtype=np.intp)
+
+    for output_index in range(output_width):
+        remainder = output_index
+        for axis in range(output_degree - 1, -1, -1):
+            digits[axis] = remainder % dimension
+            remainder //= dimension
+
+        for permutation_index in range(permutation_count):
+            left_index = 0
+            for input_axis in range(left_degree):
+                output_axis = inverse_permutations[
+                    permutation_index, input_axis
+                ]
+                left_index = left_index * dimension + digits[output_axis]
+
+            right_index = 0
+            for input_axis in range(left_degree, output_degree):
+                output_axis = inverse_permutations[
+                    permutation_index, input_axis
+                ]
+                right_index = right_index * dimension + digits[output_axis]
+
+            for batch_index in range(left.shape[0]):
+                result[output_index, batch_index] += (
+                    left_by_coordinate[left_index, batch_index]
+                    * right_by_coordinate[right_index, batch_index]
+                )
+
+    return np.ascontiguousarray(result.T)
 
 
-# ---------------------------------------------------------------------------
-# Numba backend class
-# ---------------------------------------------------------------------------
+class NumbaTotalDegreeShufflePlanStore(TotalDegreeShufflePlanStore):
+    """Ordinary shuffle plans executed by the compiled Numba kernel."""
 
-class Numba(Universal[np.ndarray]):
-    """
-    Numba-accelerated backend.
+    NUMPY_FALLBACK_BATCH_THRESHOLD = 8
+    NUMPY_FALLBACK_OUTPUT_WIDTH_THRESHOLD = 1024
 
-    Inherits all graded tensor operations from ``Universal`` (numpy fallback).
-    Overrides ``sparse_einsum`` with a ``@nb.njit``-compiled loop for the
-    shuffle product inner kernel.
+    def apply(self, xp, left, right, i: int, j: int):
+        """Apply the precomputed homogeneous plan to broadcast input batches."""
+        del xp
+        plan = self.plan(i, j)
 
-    Other operations (tensor_product, tensor_exponential, …) remain as the
-    numpy implementations from ``Universal``.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(np)
-
-    def sparse_einsum(self, Ai, Bj, d: int, i: int, j: int):
-        """
-        Numba-JIT override of ``Universal.sparse_einsum``.
-
-        Retrieves the operator from cache and delegates to the module-level
-        ``_sparse_einsum_nb`` kernel, which is compiled by numba on first call.
-
-        Parameters
-        ----------
-        Ai : np.ndarray
-            Left factor with shape ``(batch, d**i)``.
-        Bj : np.ndarray
-            Right factor with shape ``(batch, d**j)``.
-        d : int
-            Base dimension of the tensor algebra.
-        i : int
-            Degree of ``Ai`` (must satisfy ``i >= j``).
-        j : int
-            Degree of ``Bj``.
-
-        Returns
-        -------
-        np.ndarray
-            Result with shape ``(batch, d**(i+j))``.
-        """
-        # Retrieve operator from cache
-        operator = self._shuffle_cache[d].operators[(i, j)]
-        _, Q = operator
-        segment_ids, rows, cols, data = Q
-        return _sparse_einsum_nb(
-            np.asarray(Ai, dtype=np.float64),
-            np.asarray(Bj, dtype=np.float64),
-            segment_ids, rows, cols, data,
+        # The compiled Numba shuffle contract uses float64 arrays irrespective
+        # of input dtype.
+        left = np.asarray(left, dtype=np.float64)
+        right = np.asarray(right, dtype=np.float64)
+        batch_shape, left, right = _prepare_homogeneous_shuffle_inputs(
+            np,
+            left,
+            right,
+            plan,
         )
 
+        if plan.uses_direct_scaling:
+            return _direct_homogeneous_shuffle(left, right, plan)
 
-class NumbaShuffleCore(ShuffleCore[np.ndarray]):
-    """
-    Numba-accelerated shuffle product engine.
+        flat_batch_size = int(np.prod(batch_shape, dtype=np.int64))
+        if (
+            flat_batch_size < self.NUMPY_FALLBACK_BATCH_THRESHOLD
+            and plan.output_width >= self.NUMPY_FALLBACK_OUTPUT_WIDTH_THRESHOLD
+        ):
+            outer = _homogeneous_outer_product(
+                np,
+                left,
+                right,
+                batch_shape,
+                plan,
+            )
+            return _sum_homogeneous_axis_permutations(
+                np,
+                outer,
+                batch_shape,
+                plan,
+            )
 
-    Operators are precomputed at construction; ``sparse_einsum`` dispatches
-    to the module-level ``@nb.njit`` kernel.
-    """
+        left_flat = left.reshape(-1, plan.left_width)
+        right_flat = right.reshape(-1, plan.right_width)
+        output_flat = _permutation_shuffle_nb(
+            left_flat,
+            right_flat,
+            plan.axis_permutations,
+            plan.dimension,
+            plan.left_degree,
+        )
+        return output_flat.reshape(batch_shape + (plan.output_width,))
 
-    def __init__(self, d: int, trunc: int) -> None:
-        super().__init__(np, d, trunc)
 
-    def sparse_einsum(self, Ai, Bj, i: int, j: int):
-        _, Q = self.operators[(i, j)]
-        segment_ids, rows, cols, data = Q
-        batch = np.broadcast_shapes(Ai.shape[:-1], Bj.shape[:-1])
-        Ai_flat = np.broadcast_to(np.asarray(Ai, dtype=np.float64), batch + (Ai.shape[-1],)).reshape(-1, Ai.shape[-1])
-        Bj_flat = np.broadcast_to(np.asarray(Bj, dtype=np.float64), batch + (Bj.shape[-1],)).reshape(-1, Bj.shape[-1])
-        out_flat = _sparse_einsum_nb(Ai_flat, Bj_flat, segment_ids, rows, cols, data)
-        return out_flat.reshape(batch + (out_flat.shape[-1],))
+class Numba(Universal[np.ndarray]):
+    """NumPy tensor algebra with individually Numba-backed kernels where useful."""
+
+    def __init__(
+        self,
+        *,
+        d: int | None = None,
+        max_trunc: int | None = None,
+        default_trunc: int | None = None,
+        precompute_shuffle: bool = False,
+        shuffle_plan_store: TotalDegreeShufflePlanStore | None = None,
+    ) -> None:
+        shuffle_scope = _normalize_precompute_shuffle(
+            precompute_shuffle,
+            allow_generator=False,
+        )
+        if shuffle_plan_store is not None:
+            if shuffle_scope != "none":
+                raise ValueError(
+                    "precompute_shuffle and shuffle_plan_store are mutually "
+                    "exclusive."
+                )
+            if not isinstance(
+                shuffle_plan_store,
+                NumbaTotalDegreeShufflePlanStore,
+            ):
+                raise TypeError(
+                    "shuffle_plan_store must be a Numba shuffle plan store, "
+                    f"got {type(shuffle_plan_store).__name__}."
+                )
+
+        super().__init__(
+            np,
+            d=d,
+            max_trunc=max_trunc,
+            default_trunc=default_trunc,
+            shuffle_plan_store=shuffle_plan_store,
+        )
+        if shuffle_scope == "full":
+            if self.d is None or self.max_truncation is None:
+                raise ValueError(
+                    "precompute_shuffle requires both d and max_trunc."
+                )
+            self.shuffle_plan_store = NumbaTotalDegreeShufflePlanStore(
+                self.d,
+                self.max_truncation,
+            )

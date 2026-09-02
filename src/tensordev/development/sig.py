@@ -5,14 +5,18 @@ from typing import Any, Optional
 
 from tensordev.core.sequential import DenseElem, SequentialCore
 from tensordev.core.universal import _Array
-from tensordev._backend import get_default_core, get_default_seq_core
+from tensordev._backend import (
+    _resolve_seq_core,
+    get_default_core,
+    get_default_core_pair,
+)
 from .free import free_development
 
 
 def path_signature(
         x: _Array,
         *,
-        trunc: int,
+        trunc: Any = None,
         increment_input: bool = False,
         starting_point: Optional[DenseElem] = None,
         axis: Optional[int] = None,
@@ -36,8 +40,9 @@ def path_signature(
     x : Array
         Path with shape ``batch + (S+1, d)`` when ``increment_input=False``,
         or ``batch + (S, d)`` when ``increment_input=True``.
-    trunc : int
-        Maximum output degree (inclusive).
+    trunc : int or pair of int, optional
+        Active truncation. The unbounded total-degree core requires an integer;
+        a bidegree core accepts ``(N, M)`` and may supply a default.
     increment_input : bool, default False
         If True, ``x`` is already in increment form; skip differencing.
     starting_point : DenseElem, optional
@@ -84,8 +89,8 @@ class Signature:
 
     Parameters
     ----------
-    trunc : int
-        Truncation level.
+    trunc : int or pair of int, optional
+        Active truncation. May be omitted when the bound core supplies a default.
     core : optional
         Tensor algebra backend.  Defaults to the backend selected by the
         ``TENSORDEV_BACKEND`` environment variable (default: ``"jax"``).
@@ -93,17 +98,25 @@ class Signature:
         Sequential operations backend.  Defaults to the same backend as ``core``.
     """
 
-    trunc: int
+    trunc: Any = None
     core: Any = field(default=None, repr=False, compare=False)
     seq_core: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.trunc < 0:
-            raise ValueError(f"trunc must be non-negative, got {self.trunc}.")
         if self.core is None:
             object.__setattr__(self, "core", get_default_core())
+        object.__setattr__(
+            self, "trunc", self.core.normalize_truncation(self.trunc)
+        )
         if self.seq_core is None:
-            object.__setattr__(self, "seq_core", get_default_seq_core())
+            default_core, default_seq_core = get_default_core_pair()
+            object.__setattr__(
+                self,
+                "seq_core",
+                default_seq_core
+                if self.core is default_core
+                else _resolve_seq_core(self.core, None),
+            )
 
     def __call__(
             self,

@@ -366,6 +366,78 @@ def test_free_development_starting_point_equivalent_to_chen(dim, trunc):
     )
 
 
+def test_nonaccumulating_blocks_broadcast_starting_point_exactly_once():
+    dim, trunc, steps, block_size = 2, 3, 8, 2
+    path_key, seed_key = jr.split(jr.PRNGKey(115_000))
+    path = _random_level_one_path(
+        "trig", path_key, batch=2, steps=steps, dim=dim
+    )
+    X = (jnp.asarray(path),)
+    seed_increment = 0.15 * jr.normal(
+        seed_key, (dim,), dtype=jnp.float64
+    )
+    starting_point = CORE.tensor_exponential(
+        (seed_increment,), trunc=trunc, output_zero_level=True
+    )
+
+    plain_blocks = free_development(
+        X,
+        seq_core=SEQ,
+        trunc=trunc,
+        axis=-2,
+        block_size=block_size,
+        accumulate=False,
+        core=CORE,
+    )
+    seeded_blocks = free_development(
+        X,
+        seq_core=SEQ,
+        trunc=trunc,
+        axis=-2,
+        block_size=block_size,
+        accumulate=False,
+        starting_point=starting_point,
+        core=CORE,
+    )
+    emitted = free_development(
+        X,
+        seq_core=SEQ,
+        trunc=trunc,
+        axis=-2,
+        block_size=block_size,
+        accumulate=False,
+        starting_point=starting_point,
+        output_starting_point=True,
+        core=CORE,
+    )
+
+    block_count = steps // block_size
+    for block_index in range(block_count):
+        plain_block = tuple(level[..., block_index, :] for level in plain_blocks)
+        expected = CORE.tensor_product(
+            starting_point, plain_block, trunc=trunc
+        )
+        actual = tuple(
+            level[..., block_index, :] for level in seeded_blocks
+        )
+        emitted_block = tuple(
+            level[..., block_index + 1, :] for level in emitted
+        )
+        _assert_dense_allclose(actual, expected, atol=1e-10, rtol=1e-10)
+        _assert_dense_allclose(
+            emitted_block, expected, atol=1e-10, rtol=1e-10
+        )
+
+    emitted_seed = tuple(level[..., 0, :] for level in emitted)
+    expected_seed = tuple(
+        jnp.broadcast_to(level, actual.shape)
+        for level, actual in zip(starting_point, emitted_seed)
+    )
+    _assert_dense_allclose(
+        emitted_seed, expected_seed, atol=1e-12, rtol=1e-12
+    )
+
+
 # ---------------------------------------------------------------------------
 # output_starting_point
 # ---------------------------------------------------------------------------

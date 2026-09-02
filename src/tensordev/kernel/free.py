@@ -9,6 +9,7 @@ from jax import lax
 from dataclasses import dataclass
 
 from tensordev import Jax
+from tensordev._coordinate_guard import standard_total_degree_only
 from tensordev.core.jax import JaxSequentialCore
 from tensordev.core.universal import DenseElemFirstOn
 from tensordev.development.free import free_development
@@ -16,8 +17,8 @@ from tensordev.kernel.base_kernel import BaseKernel
 from tensordev.kernel.static_kernels import LinearKernel, StaticKernel
 from tensordev.util.path_preprocessing import DyadicOrder, normalize_dyadic_order
 
-_CORE = Jax()
-_SEQ_CORE = JaxSequentialCore()
+_TOTAL_DEGREE_CORE = Jax()
+_TOTAL_DEGREE_SEQ_CORE = JaxSequentialCore()
 Array = jnp.ndarray
 
 
@@ -150,6 +151,7 @@ class FreeRowState:
         return cls(u=u, f=f, g=g)
 
 
+@standard_total_degree_only("free_kernel")
 def free_kernel(
         x,
         y,
@@ -210,9 +212,8 @@ def free_kernel(
                    - k(x_{i+1}, y_j)   + k(x_i, y_j)
 
         where ``x_i`` are the cumulative-sum node values of the level-1
-        increments.  The default ``LinearKernel(scale=1.0)`` reproduces the
-        original increment-based inner-product formula ``G[i,j] = ⟨dx_i, dy_j⟩``
-        exactly, so existing behaviour is unchanged.
+        increments. With the default ``LinearKernel(scale=1.0)``, this is
+        exactly the increment inner product ``G[i,j] = ⟨dx_i, dy_j⟩``.
 
         Has no effect when ``M > 1`` or ``N > 1``.
 
@@ -418,8 +419,8 @@ def _build_scan_boundaries(
                 for k in range(out_trunc)
             )
 
-        boundary_full = free_development(driving, increment_input=True, seq_core=_SEQ_CORE, trunc=out_trunc, axis=-2,
-                                         block_size=1, accumulate=True, output_starting_point=True, core=_CORE)
+        boundary_full = free_development(driving, increment_input=True, seq_core=_TOTAL_DEGREE_SEQ_CORE, trunc=out_trunc, axis=-2,
+                                         block_size=1, accumulate=True, output_starting_point=True, core=_TOTAL_DEGREE_CORE)
         return tuple(
             jnp.broadcast_to(
                 boundary_full[k + 1],
@@ -482,8 +483,8 @@ def _build_scan_boundaries(
     dy_scaled = tuple(level / r_y for level in dy) if dyadic_order_y > 0 else dy
 
     # Move interval axis to position 0 for scanning (coarse grid)
-    dx_steps_coarse = _CORE.tensor_moveaxis(dx_scaled, source=-2, destination=0)
-    dy_steps_coarse = _CORE.tensor_moveaxis(dy_scaled, source=-2, destination=0)
+    dx_steps_coarse = _TOTAL_DEGREE_CORE.tensor_moveaxis(dx_scaled, source=-2, destination=0)
+    dy_steps_coarse = _TOTAL_DEGREE_CORE.tensor_moveaxis(dy_scaled, source=-2, destination=0)
 
     # West boundary values for rows i = 1, ..., S_fine
     w_boundary_steps = jnp.moveaxis(w_col_0[..., 1:], -1, 0)
@@ -491,7 +492,7 @@ def _build_scan_boundaries(
     # West f-boundary values for rows i = 1, ..., S_fine
     # Expand coarse f_boundary to fine grid, then extract rows 1..S_fine
     f_boundary_fine = _expand_boundary_to_fine(f_boundary_coarse, S_fine + 1, dyadic_order_x)
-    f_boundary_steps = _CORE.tensor_moveaxis(
+    f_boundary_steps = _TOTAL_DEGREE_CORE.tensor_moveaxis(
         tuple(level[..., 1:, :] for level in f_boundary_fine),
         source=-2,
         destination=0,
@@ -566,17 +567,17 @@ def _free_cell_step(cell: FreeCellData, *, M, N, m, n, P, P_f, P_g):
         Right-adjoint tensor at the SE corner (``m`` levels).
     """
     adj_left = partial(
-        _CORE.tensor_adjoint_product,
+        _TOTAL_DEGREE_CORE.tensor_adjoint_product,
         side="left", w_first_on=True, y_first_on=True, first_on_out=True,
     )
     adj_right = partial(
-        _CORE.tensor_adjoint_product,
+        _TOTAL_DEGREE_CORE.tensor_adjoint_product,
         side="right", w_first_on=True, y_first_on=True, first_on_out=True,
     )
-    t_prod = partial(_CORE.tensor_product, a_first_on=True, b_first_on=True)
-    t_sum = _CORE.tensor_summation
-    t_scal = _CORE.tensor_scalar_multiply
-    t_inner = _CORE.tensor_inner_product
+    t_prod = partial(_TOTAL_DEGREE_CORE.tensor_product, a_first_on=True, b_first_on=True)
+    t_sum = _TOTAL_DEGREE_CORE.tensor_summation
+    t_scal = _TOTAL_DEGREE_CORE.tensor_scalar_multiply
+    t_inner = _TOTAL_DEGREE_CORE.tensor_inner_product
 
     dx_i, dy_j = cell.dx_i, cell.dy_j
     u_nw, u_n, u_w = cell.u_nw, cell.u_n, cell.u_w
@@ -764,11 +765,11 @@ def _solve_scan(
 
     def _split_tensor_row(some_row):
         """Split a tensor-row into (north j+1, northwest j) with scan axis at 0."""
-        some_n = _CORE.tensor_moveaxis(
+        some_n = _TOTAL_DEGREE_CORE.tensor_moveaxis(
             tuple(level[..., 1:, :] for level in some_row),
             source=-2, destination=0,
         )
-        some_nw = _CORE.tensor_moveaxis(
+        some_nw = _TOTAL_DEGREE_CORE.tensor_moveaxis(
             tuple(level[..., :-1, :] for level in some_row),
             source=-2, destination=0,
         )
@@ -925,16 +926,16 @@ def _solve_wavefront(
     # Scale coarse increments and move interval axis to position 0
     dx_sc = tuple(level / r_x for level in dx) if dyadic_order_x > 0 else dx
     dy_sc = tuple(level / r_y for level in dy) if dyadic_order_y > 0 else dy
-    dx_steps = _CORE.tensor_moveaxis(dx_sc, source=-2, destination=0)
-    dy_steps = _CORE.tensor_moveaxis(dy_sc, source=-2, destination=0)
+    dx_steps = _TOTAL_DEGREE_CORE.tensor_moveaxis(dx_sc, source=-2, destination=0)
+    dy_steps = _TOTAL_DEGREE_CORE.tensor_moveaxis(dy_sc, source=-2, destination=0)
 
     # --- Boundary developments on the fine grid ---
 
     def _bdev(driving, *, out_trunc):
         if out_trunc == 0:
             return tuple()
-        bnd = free_development(driving, increment_input=True, seq_core=_SEQ_CORE, trunc=out_trunc, axis=-2,
-                               block_size=1, accumulate=True, output_starting_point=True, core=_CORE)
+        bnd = free_development(driving, increment_input=True, seq_core=_TOTAL_DEGREE_SEQ_CORE, trunc=out_trunc, axis=-2,
+                               block_size=1, accumulate=True, output_starting_point=True, core=_TOTAL_DEGREE_CORE)
         return tuple(
             jnp.broadcast_to(bnd[k + 1], batch_shape + bnd[k + 1].shape[-2:])
             for k in range(out_trunc)
@@ -1265,4 +1266,3 @@ class FreeKernel(BaseKernel):
             increment_in=increment_input,
             static_kernel=self.static_kernel,
         )
-

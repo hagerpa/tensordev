@@ -2,14 +2,20 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
-from typing import Literal, Optional
+import threading
+from collections import OrderedDict, namedtuple
+from dataclasses import dataclass, field, fields as dataclass_instance_fields
+from typing import Any, Literal, Optional
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 
-from tensordev.core.universal import DenseElem
+from tensordev.core.utils.pytrees import tree_prepend, tree_stack, tree_take
+from tensordev.volterra.algebra import (
+    ResolvedVolterraAlgebra,
+    resolve_volterra_algebra,
+    resolve_volterra_core_pair,
+)
 from tensordev.volterra.kernel import ConvolutionKernel, FractionalKernel, GammaKernel
 from tensordev.volterra.iteration_quad import quadratic_iteration as _vsig_quadratic
 from tensordev.volterra.iteration_fft import fft_iteration as _vsig_fft, PrecomputedLagTables
@@ -18,23 +24,242 @@ from tensordev.volterra.iteration_pc import pc_iteration as _vsig_pc
 Array = jax.Array
 
 
-def vsig(
+# Whole-solver JIT boundaries avoid dispatching each compiled Volterra
+# subroutine separately.  Numerical values, including kernel leaves, remain
+# dynamic; only the finite algebra and Python control-flow choices are
+# captured.  Cache keys never depend on kernel object identity.
+_SOLVER_CACHE_MAXSIZE = 32
+_SolverCacheInfo = namedtuple("SolverCacheInfo", "hits misses maxsize currsize")
+_solver_cache: OrderedDict[tuple[Any, ...], Any] = OrderedDict()
+_solver_cache_lock = threading.RLock()
+_solver_cache_hits = 0
+_solver_cache_misses = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _KernelRebuilder:
+    """Rebuild a kernel with dynamic leaves without running validation.
+
+    JAX's default dataclass unflattening invokes the dataclass constructor.
+    Kernel constructors deliberately perform eager value validation, which is
+    not legal for tracer-valued leaves.  Public ``vsig`` has already received
+    and validated a concrete immutable kernel, so a compiled solver can safely
+    rebuild the same class by assigning its dynamic fields directly.
+
+    Only kernels whose PyTree leaves are direct dataclass attributes use this
+    fast path.  More involved third-party or nested kernel PyTrees use eager
+    orchestration to preserve their semantics.
+    """
+
+    kernel_type: type
+    dynamic_fields: tuple[str, ...]
+    static_fields: tuple[tuple[str, Any], ...]
+    static_key: tuple[Any, ...]
+
+    def rebuild(self, leaves: tuple[Any, ...]) -> Any:
+        if len(leaves) != len(self.dynamic_fields):
+            raise ValueError(
+                f"kernel expects {len(self.dynamic_fields)} dynamic leaves, "
+                f"got {len(leaves)}."
+            )
+        kernel = object.__new__(self.kernel_type)
+        for name, value in self.static_fields:
+            object.__setattr__(kernel, name, value)
+        for name, value in zip(self.dynamic_fields, leaves):
+            object.__setattr__(kernel, name, value)
+        return kernel
+
+
+def _static_value_key(value: Any) -> tuple[Any, ...]:
+    """Content key for small static kernel metadata, never array identity."""
+    if hasattr(value, "shape") and hasattr(value, "dtype"):
+        array = np.asarray(jax.device_get(value))
+        return ("array", array.dtype.str, tuple(array.shape), array.tobytes())
+    if value is None or isinstance(value, (bool, int, float, complex, str, bytes)):
+        return ("value", type(value), value)
+    if isinstance(value, tuple):
+        return ("tuple", tuple(_static_value_key(item) for item in value))
+    if isinstance(value, frozenset):
+        return ("frozenset", frozenset(_static_value_key(item) for item in value))
+    # An arbitrary object's hash commonly encodes its identity and can also
+    # hide mutable semantics.  Such custom metadata stays on the eager path.
+    raise TypeError(
+        f"unsupported static kernel metadata type {type(value).__name__}"
+    )
+
+
+def _kernel_rebuilder(
+        kernel: ConvolutionKernel,
+        *,
+        static_leaf_fields: tuple[str, ...] = (),
+):
+    """Return ``(rebuilder, leaves, treedef)`` or ``None`` for eager fallback."""
+    try:
+        path_leaves, treedef = jax.tree_util.tree_flatten_with_path(kernel)
+        all_leaf_fields = tuple(
+            path[0].name
+            for path, _ in path_leaves
+            if len(path) == 1 and isinstance(path[0], jax.tree_util.GetAttrKey)
+        )
+        if len(all_leaf_fields) != len(path_leaves):
+            return None
+        # A malformed/custom registration with duplicate attribute paths is
+        # not suitable for direct reconstruction.
+        if len(set(all_leaf_fields)) != len(all_leaf_fields):
+            return None
+        promoted_static = frozenset(static_leaf_fields)
+        if not promoted_static.issubset(all_leaf_fields):
+            return None
+        dynamic_fields = tuple(
+            name for name in all_leaf_fields if name not in promoted_static
+        )
+        dynamic_set = set(dynamic_fields)
+    except (AttributeError, TypeError):
+        return None
+
+    try:
+        dataclass_fields = dataclass_instance_fields(kernel)
+    except TypeError:
+        return None
+    try:
+        static_fields = tuple(
+            (item.name, getattr(kernel, item.name))
+            for item in dataclass_fields
+            if item.name not in dynamic_set
+        )
+        static_key = tuple(
+            (name, _static_value_key(value))
+            for name, value in static_fields
+        )
+    except (AttributeError, TypeError, ValueError):
+        return None
+    leaf_by_name = dict(zip(all_leaf_fields, (leaf for _, leaf in path_leaves)))
+    return (
+        _KernelRebuilder(type(kernel), dynamic_fields, static_fields, static_key),
+        tuple(leaf_by_name[name] for name in dynamic_fields),
+        treedef,
+    )
+
+
+def _solver_cache_info():
+    """Return a snapshot of the bounded whole-solver cache statistics."""
+    with _solver_cache_lock:
+        return _SolverCacheInfo(
+            _solver_cache_hits,
+            _solver_cache_misses,
+            _SOLVER_CACHE_MAXSIZE,
+            len(_solver_cache),
+        )
+
+
+def _clear_solver_cache() -> None:
+    """Clear cached public Volterra solver boundaries."""
+    global _solver_cache_hits, _solver_cache_misses
+    with _solver_cache_lock:
+        _solver_cache.clear()
+        _solver_cache_hits = 0
+        _solver_cache_misses = 0
+
+
+def _validate_vsig_static_options(
+        *,
+        scheme: str,
+        dyadic_order: int,
+        order: int,
+        block_size: Optional[int],
+) -> None:
+    if scheme not in ("auto", "fft", "quadratic", "adams"):
+        raise ValueError(f"scheme must be 'auto', 'fft', 'quadratic', or 'adams', got {scheme!r}.")
+    if dyadic_order < 0:
+        raise ValueError(f"dyadic_order must be non-negative, got {dyadic_order}.")
+    if order not in (0, 1, 2):
+        raise ValueError(f"order must be 0, 1, or 2, got {order}.")
+    if block_size is not None and block_size <= 0:
+        raise ValueError(f"block_size must be a positive integer, got {block_size}.")
+
+
+def _make_compiled_solver(
+        *,
+        rebuilder: _KernelRebuilder,
+        trunc: Any,
+        axis: int,
+        block_size: Optional[int],
+        accumulate: bool,
+        output_starting_point: bool,
+        increment_input: bool,
+        order: int,
+        dyadic_order: int,
+        scheme: str,
+        core: Any,
+        seq_core: Any,
+):
+    """Bind static orchestration once while keeping all arrays dynamic."""
+
+    @jax.jit
+    def solve(X, dt, kernel_leaves, starting_point, lag_tables):
+        kernel = rebuilder.rebuild(kernel_leaves)
+        return _vsig_impl(
+            X,
+            kernel=kernel,
+            trunc=trunc,
+            dt=dt,
+            axis=axis,
+            block_size=block_size,
+            accumulate=accumulate,
+            starting_point=starting_point,
+            output_starting_point=output_starting_point,
+            increment_input=increment_input,
+            order=order,
+            dyadic_order=dyadic_order,
+            scheme=scheme,
+            lag_tables=lag_tables,
+            core=core,
+            seq_core=seq_core,
+        )
+
+    return solve
+
+
+def _cached_compiled_solver(key: tuple[Any, ...], **kwargs):
+    """Return one solver from a bounded, thread-safe LRU."""
+    global _solver_cache_hits, _solver_cache_misses
+    # Validate third-party static PyTree descriptors before cache lookup so an
+    # unsupported descriptor cannot affect public behavior.
+    hash(key)
+    with _solver_cache_lock:
+        cached = _solver_cache.get(key)
+        if cached is not None:
+            _solver_cache.move_to_end(key)
+            _solver_cache_hits += 1
+            return cached
+
+        solver = _make_compiled_solver(**kwargs)
+        _solver_cache[key] = solver
+        _solver_cache_misses += 1
+        if len(_solver_cache) > _SOLVER_CACHE_MAXSIZE:
+            _solver_cache.popitem(last=False)
+        return solver
+
+
+def _vsig_impl(
         X: Array,
         *,
         kernel: ConvolutionKernel,
-        trunc: int,
+        trunc=None,
         dt: Array | float = 1.0,
         axis: int = -2,
         block_size: Optional[int] = None,
         accumulate: bool = True,
-        starting_point: Optional[DenseElem] = None,
+        starting_point: Any = None,
         output_starting_point: bool = False,
         increment_input: bool = False,
         order: int = 0,
         dyadic_order: int = 0,
         scheme: Literal["auto", "fft", "quadratic", "adams"] = "auto",
         lag_tables: Optional[PrecomputedLagTables] = None,
-) -> DenseElem:
+        core=None,
+        seq_core=None,
+):
     """Compute the truncated Volterra signature of ``X``.
 
     High-level entry point that handles scheme selection, blocking, and
@@ -48,7 +273,9 @@ def vsig(
     kernel:
         Volterra kernel supplying projections and coefficient builders.
     trunc:
-        Tensor truncation level (positive integer).
+        Active tensor truncation.  The total-degree core requires a positive
+        integer; a bounded bidegree core accepts ``(N, M)`` and may provide a
+        default when this is omitted.
     dt:
         Step size(s).  A scalar gives a uniform grid; a 1-D array of length
         ``S`` gives a non-uniform grid via cumulative sums (default ``1.0``).
@@ -66,8 +293,9 @@ def vsig(
         independently by reshaping the batch dimension.  Ignored when
         ``block_size`` is ``None``.
     starting_point:
-        Optional unit-level seed prepended to the output when
-        ``output_starting_point=True``.  Defaults to the tensor unit.
+        Optional native tensor element prepended when
+        ``output_starting_point=True``.  This is output-only and does not seed
+        the recurrence.  Defaults to the selected core's tensor unit.
     output_starting_point:
         If ``True``, prepend the seed (unit or ``starting_point``) to the
         output along ``axis``.
@@ -100,9 +328,9 @@ def vsig(
 
     Returns
     -------
-    DenseElem
-        Terminal Volterra signature when ``block_size`` is ``None``.
-        With blocking, each level carries an extra block axis at ``axis``.
+    object
+        Native tensor element for the selected core.  With blocking, each
+        native block carries an extra block axis at ``axis``.
         With ``output_starting_point=True``, the seed is prepended along
         that axis.
 
@@ -111,36 +339,14 @@ def vsig(
     ValueError
         For invalid truncation, scheme, block size, or non-divisible ``S``.
     """
-    if trunc <= 0:
-        raise ValueError(f"trunc must be positive, got {trunc}.")
-    if scheme not in ("auto", "fft", "quadratic", "adams"):
-        raise ValueError(f"scheme must be 'auto', 'fft', 'quadratic', or 'adams', got {scheme!r}.")
-    if dyadic_order < 0:
-        raise ValueError(f"dyadic_order must be non-negative, got {dyadic_order}.")
-    if order not in (0, 1, 2):
-        raise ValueError(f"order must be 0, 1, or 2, got {order}.")
-    if block_size is not None and block_size <= 0:
-        raise ValueError(f"block_size must be a positive integer, got {block_size}.")
-
-    # scheme selection
-    _use_adams = scheme == "adams"
-    if scheme == "auto":
-        if np.ndim(dt) == 0:
-            _x_shape = np.shape(X)
-            _s_eff = (_x_shape[axis % len(_x_shape)] - (0 if increment_input else 1)) * (1 << dyadic_order)
-            _j_eff = 1 << math.ceil(math.log2(max(2 * _s_eff - 1, 2))) if _s_eff > 1 else 1
-            _fft_cost = _s_eff * math.log2(_j_eff) * (trunc ** kernel.q)
-            _quad_cost = _s_eff ** 2 if kernel.q <= 1 else _s_eff ** 2 * trunc
-            _use_fft = _s_eff > 1 and _fft_cost < _quad_cost
-        else:
-            _use_fft = False
-    elif scheme == "fft":
-        _use_fft = True
-    else:
-        _use_fft = False
+    core, seq_core = resolve_volterra_core_pair(core, seq_core)
+    algebra = resolve_volterra_algebra(core, trunc, kernel.m)
+    trunc = algebra.truncation
+    max_order = algebra.max_order
+    xp = core.xp
 
     # preprocessing
-    X = jnp.asarray(X)
+    X = xp.asarray(X)
     if X.ndim < 2:
         raise ValueError("X must have at least a step axis and a trailing path dimension.")
 
@@ -152,7 +358,34 @@ def vsig(
             f"X trailing dimension must be {kernel.path_dim}, got {X.shape[-1]}."
         )
 
-    dX = X if increment_input else jnp.diff(X, axis=axis_norm)
+    # scheme selection
+    _use_adams = scheme == "adams"
+    if scheme == "auto":
+        if np.ndim(dt) == 0:
+            _x_shape = X.shape
+            _s_eff = (_x_shape[axis % len(_x_shape)] - (0 if increment_input else 1)) * (1 << dyadic_order)
+            _j_eff = 1 << math.ceil(math.log2(max(2 * _s_eff - 1, 2))) if _s_eff > 1 else 1
+            _fft_cost = _s_eff * math.log2(_j_eff) * (max_order ** kernel.q)
+            _quad_cost = _s_eff ** 2 if kernel.q <= 1 else _s_eff ** 2 * max_order
+            _use_fft = _s_eff > 1 and _fft_cost < _quad_cost
+        else:
+            _use_fft = False
+    elif scheme == "fft":
+        _use_fft = True
+    else:
+        _use_fft = False
+    if _use_adams and np.ndim(dt) != 0:
+        raise ValueError(
+            "scheme='adams' requires a scalar dt because it assumes a "
+            "uniform grid."
+        )
+    if _use_fft and np.ndim(dt) != 0:
+        raise ValueError(
+            "scheme='fft' requires a scalar dt because FFT convolution "
+            "assumes a uniform grid."
+        )
+
+    dX = X if increment_input else xp.diff(X, axis=axis_norm)
     S_orig = dX.shape[axis_norm]
     if S_orig == 0:
         raise ValueError("vsig requires at least one increment.")
@@ -161,13 +394,23 @@ def vsig(
     factor = 1
     if dyadic_order > 0:
         factor = 1 << int(dyadic_order)
-        dX = jnp.repeat(dX / factor, factor, axis=axis_norm)
-        dt_arr = jnp.asarray(dt, dtype=dX.dtype)
-        dt = dt_arr / factor if dt_arr.ndim == 0 else jnp.repeat(dt_arr / factor, factor)
+        dX = xp.repeat(dX / factor, factor, axis=axis_norm)
+        dt_arr = xp.asarray(dt, dtype=dX.dtype)
+        dt = dt_arr / factor if dt_arr.ndim == 0 else xp.repeat(dt_arr / factor, factor)
     if block_size is not None and S_orig % block_size != 0:
         raise ValueError(
             f"S={S_orig} must be divisible by block_size={block_size}."
         )
+    output_seed = (
+        _resolve_starting_point(
+            starting_point,
+            algebra=algebra,
+            batch_shape=_path_batch_shape(dX.shape, axis_norm),
+            dtype=dX.dtype,
+        )
+        if output_starting_point
+        else None
+    )
 
     # --- routing ---
     if _use_adams:
@@ -180,23 +423,24 @@ def vsig(
         _iter_fn = _vsig_quadratic
         _extra_kwargs = {}
 
+    _iteration_kwargs = dict(
+        kernel=kernel,
+        trunc=trunc,
+        core=core,
+        seq_core=seq_core,
+        order=order,
+    )
+
     if block_size is None:
         result = _iter_fn(
-            dX, kernel=kernel, trunc=trunc, dt=dt,
-            axis=axis_norm, order=order, **_extra_kwargs,
+            dX,
+            dt=dt,
+            axis=axis_norm,
+            **_iteration_kwargs,
+            **_extra_kwargs,
         )
         if output_starting_point:
-            seed = starting_point if starting_point is not None else tuple(
-                jnp.ones_like(result[0]) if n == 0 else jnp.zeros_like(result[n])
-                for n in range(len(result))
-            )
-            result = tuple(
-                jnp.concatenate([
-                    jnp.expand_dims(seed[n], axis=axis_norm),
-                    jnp.expand_dims(result[n], axis=axis_norm),
-                ], axis=axis_norm)
-                for n in range(len(result))
-            )
+            result = tree_stack(xp, (output_seed, result), axis=axis_norm)
         return result  # type: ignore[return-value]
 
     num_blocks = S_orig // block_size
@@ -206,76 +450,251 @@ def vsig(
         # Output convenience only: run the full scan, subsample at block boundaries.
         # accumulate=True blocking carries no efficiency gain — O(S²) either way.
         full_traj = _iter_fn(
-            dX, kernel=kernel, trunc=trunc, dt=dt,
-            axis=axis_norm, return_trajectory=True, order=order, **_extra_kwargs,
+            dX,
+            dt=dt,
+            axis=axis_norm,
+            return_trajectory=True,
+            **_iteration_kwargs,
+            **_extra_kwargs,
         )
-        # full_traj[n]: [V_1, ..., V_{S_ref}] along axis_norm (0-indexed).
+        # Every native block contains [V_1, ..., V_{S_ref}] along axis_norm.
         # Block boundary b maps to refined index b*block_size_ref - 1.
-        block_indices = jnp.arange(1, num_blocks + 1) * block_size_ref - 1
-        result = tuple(
-            jnp.take(full_traj[n], block_indices, axis=axis_norm)
-            for n in range(trunc + 1)
+        block_indices = xp.arange(1, num_blocks + 1) * block_size_ref - 1
+        result = tree_take(
+            xp,
+            full_traj,
+            block_indices,
+            axis=axis_norm,
         )
 
     else:
         # Independent blocks: split step axis, vmap over blocks.
         # O(S · block_size) — genuine compute saving vs O(S²).
+        if not seq_core.supports("map"):
+            raise RuntimeError(
+                f"{type(seq_core).__name__} does not provide the map "
+                "capability required for independent Volterra blocks."
+            )
         pre_batch = dX.shape[:axis_norm]
         post_batch = dX.shape[axis_norm + 1:-1]
         dX_blocked = dX.reshape(pre_batch + (num_blocks, block_size_ref) + post_batch + (dX.shape[-1],))
 
         if np.ndim(dt) == 0:
-            dt_per_block, dt_in_axis = dt, None
+            def _call_block(dX_b):
+                return _iter_fn(
+                    dX_b,
+                    dt=dt,
+                    axis=axis_norm,
+                    **_iteration_kwargs,
+                    **_extra_kwargs,
+                )
+
+            result = seq_core.tensor_map(
+                (dX_blocked,),
+                map_op=_call_block,
+                in_axes=(axis_norm,),
+                out_axis=axis_norm,
+            )
         else:
-            dt_per_block, dt_in_axis = jnp.reshape(dt, (num_blocks, block_size_ref)), 0
+            dt_per_block = xp.reshape(dt, (num_blocks, block_size_ref))
 
-        def _call_block(dX_b, dt_b):
-            return _iter_fn(dX_b, kernel=kernel, trunc=trunc, dt=dt_b,
-                            axis=axis_norm, order=order, **_extra_kwargs)
+            def _call_block(dX_b, dt_b):
+                return _iter_fn(
+                    dX_b,
+                    dt=dt_b,
+                    axis=axis_norm,
+                    **_iteration_kwargs,
+                    **_extra_kwargs,
+                )
 
-        result_stacked = jax.vmap(_call_block, in_axes=(axis_norm, dt_in_axis))(
-            dX_blocked, dt_per_block
-        )
-        # vmap stacks output on axis 0; move to axis_norm.
-        result = tuple(
-            jnp.moveaxis(result_stacked[n], 0, axis_norm)
-            for n in range(trunc + 1)
-        )
+            result = seq_core.tensor_map(
+                (dX_blocked, dt_per_block),
+                map_op=_call_block,
+                in_axes=(axis_norm, 0),
+                out_axis=axis_norm,
+            )
 
     if output_starting_point:
-        seed = starting_point if starting_point is not None else tuple(
-            jnp.ones_like(jnp.take(result[0], jnp.array([0]), axis=axis_norm))
-            if n == 0
-            else jnp.zeros_like(jnp.take(result[n], jnp.array([0]), axis=axis_norm))
-            for n in range(len(result))
-        )
-        result = tuple(
-            jnp.concatenate([seed[n], result[n]], axis=axis_norm)
-            for n in range(len(result))
-        )
+        result = tree_prepend(xp, output_seed, result, axis=axis_norm)
     return result  # type: ignore[return-value]
+
+
+def vsig(
+        X: Array,
+        *,
+        kernel: ConvolutionKernel,
+        trunc=None,
+        dt: Array | float = 1.0,
+        axis: int = -2,
+        block_size: Optional[int] = None,
+        accumulate: bool = True,
+        starting_point: Any = None,
+        output_starting_point: bool = False,
+        increment_input: bool = False,
+        order: int = 0,
+        dyadic_order: int = 0,
+        scheme: Literal["auto", "fft", "quadratic", "adams"] = "auto",
+        lag_tables: Optional[PrecomputedLagTables] = None,
+        core=None,
+        seq_core=None,
+):
+    """Compute the truncated Volterra signature of ``X``."""
+    _validate_vsig_static_options(
+        scheme=scheme,
+        dyadic_order=dyadic_order,
+        order=order,
+        block_size=block_size,
+    )
+    core, seq_core = resolve_volterra_core_pair(core, seq_core)
+    algebra = resolve_volterra_algebra(core, trunc, kernel.m)
+    trunc = algebra.truncation
+
+    # Higher-order basis exponents and their deduplication are a static
+    # interpolation schedule.  Specialize on beta *content* in that case;
+    # all other kernel arrays (and beta for order zero/Adams) remain dynamic.
+    static_leaf_fields = (
+        ("beta",)
+        if order > 0 and scheme != "adams"
+        else ()
+    )
+    rebuilt = _kernel_rebuilder(
+        kernel,
+        static_leaf_fields=static_leaf_fields,
+    )
+    if rebuilt is not None:
+        rebuilder, kernel_leaves, kernel_treedef = rebuilt
+        key = (
+            id(core),
+            id(seq_core),
+            type(kernel),
+            kernel_treedef,
+            rebuilder.static_key,
+            trunc,
+            axis,
+            block_size,
+            accumulate,
+            output_starting_point,
+            increment_input,
+            order,
+            dyadic_order,
+            scheme,
+        )
+        try:
+            solver = _cached_compiled_solver(
+                key,
+                rebuilder=rebuilder,
+                trunc=trunc,
+                axis=axis,
+                block_size=block_size,
+                accumulate=accumulate,
+                output_starting_point=output_starting_point,
+                increment_input=increment_input,
+                order=order,
+                dyadic_order=dyadic_order,
+                scheme=scheme,
+                core=core,
+                seq_core=seq_core,
+            )
+        except TypeError:
+            # An unhashable static PyTree descriptor cannot key the LRU and
+            # therefore uses eager orchestration.
+            pass
+        else:
+            X_arg = core.xp.asarray(X)
+            dt_arg = core.xp.asarray(dt)
+            starting_arg = starting_point if output_starting_point else None
+            return solver(
+                X_arg,
+                dt_arg,
+                kernel_leaves,
+                starting_arg,
+                lag_tables,
+            )
+
+    return _vsig_impl(
+        X,
+        kernel=kernel,
+        trunc=trunc,
+        dt=dt,
+        axis=axis,
+        block_size=block_size,
+        accumulate=accumulate,
+        starting_point=starting_point,
+        output_starting_point=output_starting_point,
+        increment_input=increment_input,
+        order=order,
+        dyadic_order=dyadic_order,
+        scheme=scheme,
+        lag_tables=lag_tables,
+        core=core,
+        seq_core=seq_core,
+    )
+
+vsig.__doc__ = _vsig_impl.__doc__
+
+
+def _path_batch_shape(shape: tuple[int, ...], axis: int) -> tuple[int, ...]:
+    return tuple(shape[:axis]) + tuple(shape[axis + 1:-1])
+
+
+def _resolve_starting_point(
+        starting_point,
+        *,
+        algebra: ResolvedVolterraAlgebra,
+        batch_shape: tuple[int, ...],
+        dtype,
+):
+    if starting_point is None:
+        return algebra.unit(batch_shape=batch_shape, dtype=dtype)
+    for grade in algebra.grades:
+        block = algebra.block(starting_point, grade)
+        if tuple(block.shape[:-1]) != batch_shape:
+            raise ValueError(
+                f"starting_point block {grade!r} has batch shape "
+                f"{tuple(block.shape[:-1])}, expected {batch_shape}."
+            )
+    return starting_point
 
 
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True, slots=True)
 class VolterraSignature:
     """
-    Thin wrapper around :class:`ConvolutionKernel` that bundles a truncation level.
+    Thin wrapper binding a kernel, truncation, and coherent core pair.
 
     Parameters
     ----------
     kernel:
         The underlying Volterra kernel.
     trunc:
-        Tensor truncation level. Required. Static (changes cause retracing).
+        Active integer or bidegree truncation.  May be omitted when the bound
+        core supplies a default.  Static (changes cause retracing).
+    core, seq_core:
+        Algebra and sequential backends.  Omitted values resolve from the
+        process-wide coherent default pair.
     """
 
     kernel: ConvolutionKernel
-    trunc: int = field(metadata={"static": True})
+    trunc: Any = field(default=None, metadata={"static": True})
+    core: Any = field(
+        default=None,
+        repr=False,
+        compare=False,
+        metadata={"static": True},
+    )
+    seq_core: Any = field(
+        default=None,
+        repr=False,
+        compare=False,
+        metadata={"static": True},
+    )
 
     def __post_init__(self) -> None:
-        if self.trunc <= 0:
-            raise ValueError(f"trunc must be positive, got {self.trunc}.")
+        core, seq_core = resolve_volterra_core_pair(self.core, self.seq_core)
+        algebra = resolve_volterra_algebra(core, self.trunc, self.kernel.m)
+        object.__setattr__(self, "core", core)
+        object.__setattr__(self, "seq_core", seq_core)
+        object.__setattr__(self, "trunc", algebra.truncation)
 
     # ------------------------------------------------------------------
     # Convenience constructors — thin wrappers around kernel constructors.
@@ -285,21 +704,35 @@ class VolterraSignature:
     def fractional(
             cls,
             *,
-            trunc: int,
+            trunc=None,
+            core=None,
+            seq_core=None,
             **kwargs,
     ) -> "VolterraSignature":
         """Construct from a fractional kernel. Forwards all kwargs to :class:`FractionalKernel`."""
-        return cls(kernel=FractionalKernel(**kwargs), trunc=trunc)
+        return cls(
+            kernel=FractionalKernel(**kwargs),
+            trunc=trunc,
+            core=core,
+            seq_core=seq_core,
+        )
 
     @classmethod
     def gamma(
             cls,
             *,
-            trunc: int,
+            trunc=None,
+            core=None,
+            seq_core=None,
             **kwargs,
     ) -> "VolterraSignature":
         """Construct from a Gamma kernel. Forwards all kwargs to :class:`GammaKernel`."""
-        return cls(kernel=GammaKernel(**kwargs), trunc=trunc)
+        return cls(
+            kernel=GammaKernel(**kwargs),
+            trunc=trunc,
+            core=core,
+            seq_core=seq_core,
+        )
 
     # ------------------------------------------------------------------
     # Forwarded properties
@@ -332,13 +765,14 @@ class VolterraSignature:
             axis: int = -2,
             block_size: Optional[int] = None,
             accumulate: bool = True,
-            starting_point: Optional[DenseElem] = None,
+            starting_point: Any = None,
             output_starting_point: bool = False,
             increment_input: bool = False,
             dyadic_order: int = 0,
             order: int = 0,
             scheme: Literal["auto", "fft", "quadratic", "adams"] = "auto",
-    ) -> DenseElem:
+            lag_tables: Optional[PrecomputedLagTables] = None,
+    ):
         """Compute the truncated Volterra signature of ``X``.
 
         Thin wrapper around the module-level :func:`vsig`.  ``self.kernel``
@@ -374,8 +808,8 @@ class VolterraSignature:
 
         Returns
         -------
-        DenseElem
-            Volterra signature; see module-level :func:`vsig` for details.
+        object
+            Native Volterra tensor; see module-level :func:`vsig` for details.
         """
         return vsig(
             X,
@@ -391,6 +825,9 @@ class VolterraSignature:
             dyadic_order=dyadic_order,
             order=order,
             scheme=scheme,
+            lag_tables=lag_tables,
+            core=self.core,
+            seq_core=self.seq_core,
         )
 
 

@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 
+from tensordev._coordinate_guard import standard_total_degree_only
 from tensordev.core.jax import Jax
 from tensordev.core.universal import DenseElem, DenseElemFirstOn
 from tensordev.sss.coeffs import FSSKCoefficients
@@ -17,9 +18,10 @@ from tensordev.sss.recursion_general import update_state as update_state_general
 
 Array = jax.Array
 
-_CORE = Jax()
+_TOTAL_DEGREE_CORE = Jax()
 
 
+@standard_total_degree_only("fssk_state")
 @partial(
     jax.jit,
     static_argnames=(
@@ -101,10 +103,9 @@ def fssk_state(
     projected = jnp.einsum("qmd,...d->...qm", kernel.A.astype(dtype), dX)
     y = projected[..., 0, :] if kernel.q == 1 else projected
 
-    # Optimisation: when dt is uniform across all steps (scalar input or a
-    # length-1 1-D array), compute exactly *one* coefficient set and let
-    # broadcast_time(S) inside fssk_state_from_coef expand it lazily.
-    # For genuinely time-varying dt we fall back to the full per-step grid.
+    # Uniform dt (a scalar or length-one vector) needs one coefficient set;
+    # broadcast_time(S) expands it lazily.  Time-varying dt uses the full
+    # per-step grid.
     dt_arr = jnp.asarray(dt)
     if dt_arr.ndim == 0 or (dt_arr.ndim == 1 and dt_arr.shape[0] == 1):
         dt_for_coef = dt_arr.reshape(())   # scalar → one matrix-exponential
@@ -259,10 +260,11 @@ def _update_state(
 ) -> DenseElemFirstOn:
     """Per-step state transition dispatcher."""
     if coef.q == 1:
-        return update_state_scalar(Z, y, coef, core=_CORE)
-    return update_state_general(Z, y, coef, core=_CORE)
+        return update_state_scalar(Z, y, coef, core=_TOTAL_DEGREE_CORE)
+    return update_state_general(Z, y, coef, core=_TOTAL_DEGREE_CORE)
 
 
+@standard_total_degree_only("fssk_vsig")
 @partial(
     jax.jit,
     static_argnames=(

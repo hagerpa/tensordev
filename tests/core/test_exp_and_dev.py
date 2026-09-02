@@ -83,6 +83,41 @@ from tensordev import Jax
 CORE = Jax()
 
 
+def test_scalar_only_series_use_canonical_level_and_remain_composable():
+    unit = CORE.tensor_exponential((), trunc=0, output_zero_level=True)
+    zero = CORE.tensor_logarithm((), trunc=0, output_zero_level=True)
+    densified_zero = CORE.tensor_densify((None, None))
+
+    assert unit[0].shape == (1,)
+    assert zero[0].shape == (1,)
+    assert densified_zero[0].shape == (1,)
+    _assert_tuple_allclose(
+        CORE.tensor_product(unit, unit, trunc=0),
+        unit,
+    )
+    _assert_tuple_allclose(
+        CORE.tensor_product(zero, unit, trunc=0),
+        zero,
+    )
+    _assert_tuple_allclose(
+        CORE.tensor_product(densified_zero, unit, trunc=0),
+        densified_zero,
+    )
+    _assert_tuple_allclose(
+        CORE.tensor_from_standard_coordinates(densified_zero, trunc=0),
+        densified_zero,
+    )
+
+
+@pytest.mark.parametrize("batch_shape", [(), (3,)])
+def test_scalar_only_flatten_preserves_empty_positive_batch_and_dtype(batch_shape):
+    scalar = jnp.ones(batch_shape + (1,), dtype=jnp.float32)
+    flat = CORE.tensor_to_flat((scalar,), start_at_level_one=True)
+
+    assert flat.shape == batch_shape + (0,)
+    assert flat.dtype == scalar.dtype
+
+
 @pytest.mark.parametrize("batch_shape", [(), (2,)])
 def test_tensor_exponential_degree_3_matches_manual_formula(batch_shape):
     """

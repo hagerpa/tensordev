@@ -5,10 +5,14 @@ from dataclasses import dataclass, replace
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax import lax
 
-from tensordev.core.jax import Jax
-from tensordev.core.universal import DenseElem
+from tensordev.core.utils.pytrees import tree_index, tree_map
+from tensordev.volterra.algebra import (
+    ResolvedVolterraAlgebra,
+    require_volterra_shuffle,
+    resolve_volterra_algebra,
+    resolve_volterra_core_pair,
+)
 from tensordev.volterra.coeffs import VolterraCoefficients
 from tensordev.volterra.kernel import ConvolutionKernel
 from tensordev.volterra.eval_scalar import eval_vte as eval_vte_scalar
@@ -16,19 +20,19 @@ from tensordev.volterra.eval_general import eval_vte as eval_vte_general
 
 Array = jax.Array
 
-_CORE = Jax()
-
 
 def quadratic_iteration(
         dX: Array,
         *,
         kernel: ConvolutionKernel,
-        trunc: int,
+        trunc=None,
         dt: Array | float = 1.0,
         axis: int = -2,
         return_trajectory: bool = False,
         order: int = 0,
-) -> DenseElem:
+        core=None,
+        seq_core=None,
+):
     r"""
     Quadratic Volterra-Chen recursion on pre-processed increments.
 
@@ -45,7 +49,8 @@ def quadratic_iteration(
     kernel:
         Volterra kernel supplying projections and coefficient builders.
     trunc:
-        Tensor truncation level (positive integer).
+        Active integer or bidegree truncation.  May be omitted for a bounded
+        core with a configured default.
     dt:
         Step size(s).  Scalar → uniform grid; 1-D array of length ``S``
         → non-uniform grid (default ``1.0``).
@@ -58,18 +63,36 @@ def quadratic_iteration(
         Quadrature order for the basis-expansion scheme.  ``0`` (default)
         left-point; ``1`` uses ``{1, s^beta, s}``; ``2`` uses
         ``{1, s^beta, s, s^(beta+1), s^2}``.
+    core, seq_core:
+        Algebra and sequential JAX cores.  Omitted values resolve from the
+        coherent process default.
 
     Returns
     -------
-    DenseElem
-        Terminal signature, or full trajectory when ``return_trajectory=True``.
+    object
+        Native tensor element, or a native full trajectory when
+        ``return_trajectory=True``.
     """
-    if trunc <= 0:
-        raise ValueError(f"trunc must be positive, got {trunc}.")
     if order not in (0, 1, 2):
         raise ValueError(f"order must be 0, 1, or 2, got {order}.")
 
-    dX = jnp.asarray(dX)
+    core, seq_core = resolve_volterra_core_pair(core, seq_core)
+    missing_sequential = tuple(
+        capability
+        for capability in ("scan", "functional_indexed_update")
+        if not seq_core.supports(capability)
+    )
+    if missing_sequential:
+        raise RuntimeError(
+            f"{type(seq_core).__name__} lacks the sequential capabilities "
+            f"required by quadratic_iteration: {missing_sequential}."
+        )
+    algebra = resolve_volterra_algebra(core, trunc, kernel.m)
+    if kernel.q > 1:
+        require_volterra_shuffle(algebra, feature="The q > 1 quadratic scheme")
+    xp = core.xp
+
+    dX = xp.asarray(dX)
     if dX.ndim < 2:
         raise ValueError("dX must have at least a step axis and a trailing path dimension.")
 
@@ -86,16 +109,15 @@ def quadratic_iteration(
     if S == 0:
         raise ValueError("quadratic_iteration requires at least one increment.")
 
-    projected = jnp.einsum("qmd,...d->...qm", kernel.A.astype(dtype), dX.astype(dtype))
+    projected = xp.einsum("qmd,...d->...qm", kernel.A.astype(dtype), dX.astype(dtype))
     y = projected[..., 0, :] if kernel.q == 1 else projected
 
-    y_time = jnp.moveaxis(y, axis_norm, 0)
+    y_time = xp.moveaxis(y, axis_norm, 0)
     y_time = _normalize_projected_y_time(y_time, kernel)
     times_arr = _normalize_times(dt, S=S, dtype=dtype)
 
     batch_shape = tuple(y_time.shape[1:-1]) if kernel.q == 1 else tuple(y_time.shape[1:-2])
-    unit = _make_unit(batch_shape=batch_shape, m=kernel.m, trunc=trunc, dtype=dtype)
-    source = jnp.arange(S, dtype=jnp.int32)
+    unit = algebra.unit(batch_shape=batch_shape, dtype=dtype)
 
     # Unified interval-basis scan for all orders and all q.
     # For q > 1 the basis includes all beta_p values; for q=1 it reduces to
@@ -104,25 +126,29 @@ def quadratic_iteration(
     thetas = _chebyshev_lobatto_thetas(n=len(rhos), dtype=dtype)
     B = len(rhos)
     components0 = _make_basis_seed(
-        B=B, S=S, batch_shape=batch_shape, m=kernel.m, trunc=trunc, dtype=dtype,
+        B=B,
+        S=S,
+        batch_shape=batch_shape,
+        dtype=dtype,
+        algebra=algebra,
     )
-    source_indices = jnp.arange(S, dtype=jnp.int32)
+    source_indices = xp.arange(S, dtype=jnp.int32)
     h_all = times_arr[1:] - times_arr[:-1]
-    interp_inv_all = jnp.linalg.inv(
+    interp_inv_all = xp.linalg.inv(
         _basis_interpolation_matrix_batched(h_all, thetas=thetas, rhos=rhos, dtype=dtype)
     )
 
     def step_basis(
             components: tuple,
             j: Array,
-    ) -> tuple[tuple, DenseElem]:
+    ):
         t_j = times_arr[j]
         t_jp1 = times_arr[j + 1]
         h_j = t_jp1 - t_j
 
         past_mask = source_indices < j
 
-        evals: list[DenseElem] = [
+        evals = [
             _basis_readout(
                 components,
                 tau=t_j + thetas[k] * h_j,
@@ -132,22 +158,50 @@ def quadratic_iteration(
                 y_time=y_time,
                 rhos=rhos,
                 unit=unit,
-                batch_shape=batch_shape,
-                trunc=trunc,
                 dtype=dtype,
+                algebra=algebra,
             )
             for k in range(B)
         ]
 
         interp_inv = interp_inv_all[j]
         components_next = components
-        for n in range(1, trunc + 1):
-            evals_n = jnp.stack([evals[k][n] for k in range(B)], axis=0)
-            new_vals_n = jnp.einsum("bk,k...->b...", interp_inv, evals_n)
-            components_next = tuple(
+        for degree in range(1, algebra.max_order + 1):
+            diagonal = algebra.diagonal(degree)
+            evals_packed = xp.stack(
                 tuple(
-                    (level.at[j].set(new_vals_n[b]) if lvl_n == n else level)
-                    for lvl_n, level in enumerate(components_next[b])
+                    diagonal.pack(
+                        xp,
+                        tuple(
+                            algebra.block(evals[k], grade)
+                            for grade in diagonal.grades
+                        ),
+                    )
+                    for k in range(B)
+                ),
+                axis=0,
+            )
+            new_values = xp.einsum("bk,k...->b...", interp_inv, evals_packed)
+            old_diagonals = tuple(
+                tuple(algebra.block(component, grade) for grade in diagonal.grades)
+                for component in components_next
+            )
+            split_values = tuple(
+                diagonal.split(new_values[b]) for b in range(B)
+            )
+            updated_diagonals = seq_core.tensor_update_index(
+                old_diagonals,
+                j,
+                split_values,
+            )
+            components_next = tuple(
+                algebra.assemble(
+                    tuple(
+                        updated_diagonals[b][diagonal.index(grade)]
+                        if diagonal.contains(grade)
+                        else algebra.block(components_next[b], grade)
+                        for grade in algebra.grades
+                    )
                 )
                 for b in range(B)
             )
@@ -162,22 +216,26 @@ def quadratic_iteration(
             y_time=y_time,
             rhos=rhos,
             unit=unit,
-            batch_shape=batch_shape,
-            trunc=trunc,
             dtype=dtype,
+            algebra=algebra,
         )
 
         return components_next, V_jp1
 
-    _, traj = lax.scan(step_basis, components0, source)
+    _, traj = seq_core.tensor_scan(
+        source_indices,
+        initial=components0,
+        scan_op=step_basis,
+        axis=0,
+        out_axis=0,
+    )
 
     if return_trajectory:
         if axis_norm != 0:
-            traj = tuple(jnp.moveaxis(level, 0, axis_norm) for level in traj)
+            traj = tree_map(lambda block: xp.moveaxis(block, 0, axis_norm), traj)
         return traj
 
-
-    return tuple(level[-1] for level in traj)
+    return tree_index(traj, -1)
 
 
 def _normalize_projected_y_time(y_time: Array, kernel: ConvolutionKernel) -> Array:
@@ -198,23 +256,6 @@ def _normalize_projected_y_time(y_time: Array, kernel: ConvolutionKernel) -> Arr
             f"got shape {y_time.shape}."
         )
     return y_time
-
-
-def _refine_dt(
-        dt: Array | float,
-        *,
-        factor: int,
-        dtype: jnp.dtype,
-) -> Array | float:
-    """Subdivide ``dt`` for dyadic refinement by ``factor``.
-
-    Scalar ``dt`` divides by ``factor``.  A per-step array produces a refined
-    array repeated ``factor`` times per original step.
-    """
-    dt_arr = jnp.asarray(dt, dtype=dtype)
-    if dt_arr.ndim == 0:
-        return dt_arr / factor
-    return jnp.repeat(dt_arr / factor, factor)
 
 
 def _normalize_times(
@@ -238,49 +279,29 @@ def _normalize_times(
     )
 
 
-def _make_unit(
-        *,
-        batch_shape: tuple[int, ...],
-        m: int,
-        trunc: int,
-        dtype: jnp.dtype,
-) -> DenseElem:
-    """Tensor unit with zero positive levels."""
-    return (
-        jnp.ones(batch_shape + (1,), dtype=dtype),
-        *(
-            jnp.zeros(batch_shape + (m ** n,), dtype=dtype)
-            for n in range(1, trunc + 1)
-        ),
-    )
-
-
-
-
 def _make_basis_seed(
         *,
         B: int,
         S: int,
         batch_shape: tuple[int, ...],
-        m: int,
-        trunc: int,
         dtype: jnp.dtype,
+        algebra: ResolvedVolterraAlgebra,
 ) -> tuple:
     """Initial interval basis coefficients for the higher-order scan.
 
-    Returns B DenseElems of shape ``(S, *batch_shape, m**n)`` per level n.
-    Level-0 of component b=0 is all-ones; everything else is zero.
+    Returns ``B`` native elements whose blocks carry a leading source axis.
+    The scalar block of component zero is all ones; everything else is zero.
     """
     components = []
     for b in range(B):
-        levels = []
-        for n in range(trunc + 1):
-            shape = (S,) + batch_shape + (m ** n,)
-            if n == 0 and b == 0:
-                levels.append(jnp.ones(shape, dtype=dtype))
+        blocks = []
+        for grade in algebra.grades:
+            shape = (S,) + batch_shape + (algebra.block_width(grade),)
+            if grade == algebra.zero_grade and b == 0:
+                blocks.append(algebra.core.xp.ones(shape, dtype=dtype))
             else:
-                levels.append(jnp.zeros(shape, dtype=dtype))
-        components.append(tuple(levels))
+                blocks.append(algebra.core.xp.zeros(shape, dtype=dtype))
+        components.append(algebra.assemble(tuple(blocks)))
     return tuple(components)
 
 
@@ -293,36 +314,50 @@ def _basis_readout(
         times_arr: Array,
         y_time: Array,
         rhos: tuple,
-        unit: DenseElem,
-        batch_shape: tuple,
-        trunc: int,
+        unit,
         dtype: jnp.dtype,
-) -> DenseElem:
+        algebra: ResolvedVolterraAlgebra,
+):
     """Evaluate V at time ``tau`` from interval basis coefficients with masking.
 
     ``source_mask[i]`` is True for source intervals i that should contribute.
     """
-    contributions: list[DenseElem] = []
+    xp = algebra.core.xp
+    contributions = []
+    batch_ndim = len(algebra.block(unit, algebra.zero_grade).shape[:-1])
     for b, rho in enumerate(rhos):
         coef = kernel.coef(
             times_arr[:-1], times_arr[1:], tau,
-            trunc=trunc, rho=rho, dtype=dtype,
+            trunc=algebra.max_order, rho=rho, dtype=dtype,
         )
-        coef = _insert_singleton_batch_axes(coef, batch_ndim=len(batch_shape))
+        coef = _insert_singleton_batch_axes(coef, batch_ndim=batch_ndim)
         terms = (
-            eval_vte_scalar(components[b], y_time, coef)
+            eval_vte_scalar(components[b], y_time, coef, algebra=algebra)
             if kernel.q == 1
-            else eval_vte_general(components[b], y_time, coef)
+            else eval_vte_general(components[b], y_time, coef, algebra=algebra)
         )
-        mask = source_mask.reshape(source_mask.shape + (1,) * (terms[0].ndim - 1))
-        terms = tuple(jnp.where(mask, level, jnp.zeros_like(level)) for level in terms)
-        contributions.append(tuple(jnp.sum(level, axis=0) for level in terms))
+        masked = tree_map(
+            lambda block: xp.where(
+                source_mask.reshape(
+                    source_mask.shape + (1,) * (block.ndim - source_mask.ndim)
+                ),
+                block,
+                xp.zeros_like(block),
+            ),
+            terms,
+        )
+        contributions.append(tree_map(lambda block: xp.sum(block, axis=0), masked))
 
-    acc = tuple(
-        jnp.sum(jnp.stack([c[n] for c in contributions], axis=0), axis=0)
-        for n in range(trunc + 1)
+    acc = tree_map(
+        lambda *blocks: xp.sum(xp.stack(blocks, axis=0), axis=0),
+        contributions[0],
+        *contributions[1:],
     )
-    return _CORE.tensor_summation(unit, acc, trunc=trunc)
+    return algebra.core.tensor_summation(
+        unit,
+        acc,
+        trunc=algebra.truncation,
+    )
 
 
 def _insert_singleton_batch_axes(
@@ -354,46 +389,6 @@ class BasisExpansionSpec:
     interpolation_inverse: Array
 
 
-def _basis_rhos(
-        order: int,
-        *,
-        beta: Array,
-        dtype: jnp.dtype,
-) -> tuple[Array, ...]:
-    """Basis exponents for the fractional higher-order scheme of the given order.
-
-    Duplicate exponents (e.g. when ``beta == 1``) are removed so that the
-    interpolation matrix remains non-singular.  The returned tuple is sorted
-    in ascending order.
-
-    order=0: ``{0}``
-    order=1: ``{0} | {beta} | {1}``
-    order=2: ``{0} | {beta} | {1} | {beta+1} | {2}``
-    """
-    zero = jnp.asarray(0.0, dtype=dtype)
-    if order == 0:
-        return (zero,)
-
-    b = float(jnp.asarray(beta, dtype=dtype))
-    candidates: list[float] = [0.0, b, 1.0]
-    if order == 2:
-        candidates += [b + 1.0, 2.0]
-    elif order != 1:
-        raise NotImplementedError(
-            f"Basis-expansion scheme order={order} is not implemented yet."
-        )
-
-    seen: set[float] = set()
-    unique: list[float] = []
-    for v in candidates:
-        if v not in seen:
-            seen.add(v)
-            unique.append(v)
-    unique.sort()
-
-    return tuple(jnp.asarray(v, dtype=dtype) for v in unique)
-
-
 def _basis_rhos_multicomp(
         order: int,
         *,
@@ -412,13 +407,14 @@ def _basis_rhos_multicomp(
     order=1: ``{0} | {beta_p} | {1}``
     order=2: ``{0} | {beta_p} | {1} | {beta_p + 1} | {2}``
     """
+    zero = jnp.asarray(0.0, dtype=dtype)
+    if order == 0:
+        return (zero,)
+
     # Use numpy to extract concrete float values — jnp indexing inside a jit
     # trace produces abstract tracers, which cannot be converted to Python float.
     betas_np = np.asarray(betas).reshape(-1).astype(float)
     q = int(betas_np.shape[0])
-    zero = jnp.asarray(0.0, dtype=dtype)
-    if order == 0:
-        return (zero,)
 
     # Collect candidates as Python floats so exact deduplication via a set works.
     beta_vals = [float(betas_np[p]) for p in range(q)]
@@ -427,7 +423,8 @@ def _basis_rhos_multicomp(
         candidates += [b + 1.0 for b in beta_vals] + [2.0]
     elif order != 1:
         raise NotImplementedError(
-            f"Basis-expansion scheme order={order} is not implemented yet."
+            "Basis-expansion scheme supports order=1 or order=2, "
+            f"got order={order}."
         )
 
     seen: set[float] = set()
