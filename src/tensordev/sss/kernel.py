@@ -94,7 +94,7 @@ class FSSK:
     ) -> "FSSK":
         r"""Construct a kernel from a dense matrix realization.
 
-        This constructor uses the finite-state-space representation
+        This constructor uses the finite-state-space realization
 
         .. math::
             K_{A,b}^{\Lambda}(t,s)

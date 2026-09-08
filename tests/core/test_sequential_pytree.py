@@ -487,6 +487,66 @@ def test_accumulation_applies_non_neutral_seed_exactly_once(in_tree):
     _assert_tree_allclose(block_prefixes, expected_blocks)
 
 
+@pytest.mark.parametrize("output_starting_point", [False, True])
+@pytest.mark.parametrize("accumulate", [False, True])
+@pytest.mark.parametrize("first_apply_all", [False, True])
+def test_single_block_applies_seed_and_optional_starting_point(
+    output_starting_point,
+    accumulate,
+    first_apply_all,
+):
+    batch, steps = 2, 5
+    sequence = _TreeElement(
+        scalar=jnp.arange(batch * steps, dtype=jnp.float64).reshape(
+            batch, steps, 1
+        ),
+        vector=jnp.arange(batch * steps * 2, dtype=jnp.float64).reshape(
+            batch, steps, 2
+        ),
+        layout="single-block-seed-layout",
+    )
+    neutral = _TreeElement(
+        scalar=jnp.zeros((batch, 1), dtype=jnp.float64),
+        vector=jnp.zeros((batch, 2), dtype=jnp.float64),
+        layout=sequence.layout,
+    )
+    seed = _TreeElement(
+        scalar=jnp.full((batch, 1), 7.0),
+        vector=jnp.full((batch, 2), 11.0),
+        layout=sequence.layout,
+    )
+
+    result = SEQ.tensor_abra(
+        sequence,
+        reduce_op=_add,
+        acc_op=_add,
+        neutral=neutral,
+        seed=seed,
+        axis=-2,
+        accumulate=accumulate,
+        output_starting_point=output_starting_point,
+        first_apply_all=first_apply_all,
+        reduce_in_tree=first_apply_all,
+    )
+    terminal = _TreeElement(
+        scalar=(seed.scalar if accumulate else neutral.scalar)
+        + jnp.sum(sequence.scalar, axis=-2),
+        vector=(seed.vector if accumulate else neutral.vector)
+        + jnp.sum(sequence.vector, axis=-2),
+        layout=sequence.layout,
+    )
+    expected = (
+        _TreeElement(
+            scalar=jnp.stack((seed.scalar, terminal.scalar), axis=-2),
+            vector=jnp.stack((seed.vector, terminal.vector), axis=-2),
+            layout=sequence.layout,
+        )
+        if output_starting_point
+        else terminal
+    )
+    _assert_tree_allclose(result, expected)
+
+
 def test_nonaccumulating_abra_prepends_seed_on_requested_axis():
     batch, steps = 2, 6
     sequence = _TreeElement(

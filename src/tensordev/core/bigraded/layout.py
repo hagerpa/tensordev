@@ -70,8 +70,8 @@ class BigradedLayout:
         return self.spec.coordinates
 
     @property
-    def representation(self) -> str:
-        return self.spec.representation
+    def partially_symmetrized(self) -> bool:
+        return self.spec.partially_symmetrized
 
     @property
     def dims(self) -> Bidegree:
@@ -93,10 +93,10 @@ class BigradedLayout:
         return self.spec.rank_count(grade)
 
     def placement_count(self, grade: object) -> int:
-        if self.representation != "ordered":
+        if self.partially_symmetrized:
             raise ValueError(
                 "placement_count is only defined for ordered layouts; "
-                "use rank_count for representation-neutral code."
+                "use rank_count for partially symmetrized layouts."
             )
         return self.spec.placement_count(grade)
 
@@ -140,15 +140,15 @@ def _build_active_layout(
     truncation: Bidegree,
     include_scalar: bool,
     coordinates: str,
-    representation: str,
+    partially_symmetrized: bool,
 ) -> BigradedLayout:
-    """Build representation-neutral active metadata around store-owned plans."""
+    """Build active metadata around the store-owned block plans."""
     spec = BigradedSpec(
         *store.dims,
         truncation,
         coordinates=coordinates,
         include_scalar=include_scalar,
-        representation=representation,
+        partially_symmetrized=partially_symmetrized,
     )
     grade_plans = tuple(store.grade_plan(grade) for grade in spec.grades)
 

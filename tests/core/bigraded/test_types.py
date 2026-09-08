@@ -35,19 +35,19 @@ def test_spec_canonical_grade_order_and_indices():
     assert spec.block_width((2, 1)) == 3 * 2**2 * 3
 
 
-def test_spec_representation_defaults_without_changing_positional_construction():
+def test_spec_partial_symmetrization_defaults_without_changing_positional_construction():
     spec = BigradedSpec(2, 3, (2, 1), "shear", False)
 
     assert spec.coordinates == "shear"
     assert spec.include_scalar is False
-    assert spec.representation == "ordered"
+    assert spec.partially_symmetrized is False
     assert spec == BigradedSpec(
         2,
         3,
         (2, 1),
         coordinates="shear",
         include_scalar=False,
-        representation="ordered",
+        partially_symmetrized=False,
     )
 
 
@@ -56,7 +56,7 @@ def test_partially_symmetrized_rank_counts_and_block_widths():
         2,
         3,
         (2, 2),
-        representation="partially_symmetrized",
+        partially_symmetrized=True,
     )
 
     assert spec.rank_count((0, 0)) == 1
@@ -68,27 +68,26 @@ def test_partially_symmetrized_rank_counts_and_block_widths():
     assert spec.placement_count((1, 2)) == 3
 
 
-def test_with_scalar_preserves_coordinates_and_representation():
+def test_with_scalar_preserves_coordinates_and_partial_symmetrization():
     spec = BigradedSpec(
         1,
         2,
         (1, 1),
         coordinates="shear",
-        representation="partially_symmetrized",
+        partially_symmetrized=True,
     )
 
     positive = spec.with_scalar(False)
 
     assert positive.coordinates == "shear"
-    assert positive.representation == "partially_symmetrized"
+    assert positive.partially_symmetrized is True
     assert positive.include_scalar is False
 
 
-def test_spec_rejects_invalid_representation():
-    with pytest.raises(ValueError, match="ordered.*partially_symmetrized"):
-        BigradedSpec(1, 1, (1, 1), representation="other")
-    with pytest.raises(TypeError, match="representation must be a string"):
-        BigradedSpec(1, 1, (1, 1), representation=1)
+@pytest.mark.parametrize("value", ("other", 1))
+def test_spec_rejects_nonboolean_partial_symmetrization(value):
+    with pytest.raises(TypeError, match="partially_symmetrized must be a bool"):
+        BigradedSpec(1, 1, (1, 1), partially_symmetrized=value)
 
 
 def test_spec_without_scalar_is_structurally_distinct():
@@ -143,12 +142,130 @@ def test_tensor_validates_and_supports_true_bidegree_access():
         _ = tensor[0, 2]
 
 
+def test_tensor_prefix_slice_uses_upper_exclusive_bidegree_stops():
+    spec = BigradedSpec(1, 1, (5, 2))
+    tensor = BigradedTensor(
+        tuple(
+            jnp.full((2, spec.block_width(grade)), index, dtype=jnp.float32)
+            for index, grade in enumerate(spec.grades)
+        ),
+        spec,
+    )
+
+    cropped = tensor[:5, :2]
+
+    assert cropped.truncation == (4, 1)
+    assert cropped.grades == BigradedSpec(1, 1, (4, 1)).grades
+    assert cropped.batch_shape == tensor.batch_shape
+    for grade in cropped.grades:
+        assert cropped[grade] is tensor[grade]
+
+
+@pytest.mark.parametrize(
+    ("coordinates", "partially_symmetrized", "include_scalar"),
+    [
+        ("standard", False, True),
+        ("shear", False, False),
+        ("standard", True, False),
+        ("shear", True, True),
+    ],
+)
+def test_tensor_prefix_slice_preserves_static_layout_metadata(
+    coordinates,
+    partially_symmetrized,
+    include_scalar,
+):
+    spec = BigradedSpec(
+        1,
+        2,
+        (3, 2),
+        coordinates=coordinates,
+        include_scalar=include_scalar,
+        partially_symmetrized=partially_symmetrized,
+    )
+    tensor = _tensor(spec, batch_shape=(2, 3))
+
+    cropped = tensor[:3, :2]
+
+    assert cropped.spec.dims == spec.dims
+    assert cropped.spec.truncation == (2, 1)
+    assert cropped.spec.coordinates == coordinates
+    assert cropped.spec.partially_symmetrized is partially_symmetrized
+    assert cropped.spec.include_scalar is include_scalar
+    assert cropped.batch_shape == (2, 3)
+
+
+def test_tensor_full_or_oversized_prefix_slice_returns_same_object():
+    tensor = _tensor(BigradedSpec(1, 1, (2, 3)))
+
+    assert tensor[:, :] is tensor
+    assert tensor[0::1, 0::1] is tensor
+    assert tensor[:100, :100] is tensor
+
+
+def test_tensor_prefix_slice_can_produce_empty_positive_layout():
+    tensor = _tensor(
+        BigradedSpec(1, 1, (2, 2), include_scalar=False),
+        batch_shape=(3,),
+    )
+
+    cropped = tensor[:1, :1]
+
+    assert cropped.truncation == (0, 0)
+    assert cropped.spec.include_scalar is False
+    assert cropped.grades == ()
+    assert cropped.blocks == ()
+
+
+def test_tensor_prefix_slice_is_valid_under_jit():
+    tensor = _tensor(
+        BigradedSpec(
+            1,
+            2,
+            (2, 2),
+            partially_symmetrized=True,
+        )
+    )
+
+    cropped = jax.jit(lambda value: value[:2, :2])(tensor)
+
+    assert isinstance(cropped, BigradedTensor)
+    assert cropped.truncation == (1, 1)
+    assert cropped.spec.partially_symmetrized is True
+
+
+@pytest.mark.parametrize(
+    ("key", "error", "match"),
+    [
+        (slice(None, 2), TypeError, "two prefix slices"),
+        ((slice(None, 2), 1), TypeError, "two prefix slices"),
+        ((slice(1, 2), slice(None, 2)), ValueError, "start at 0"),
+        ((slice(0.0, 2), slice(None, 2)), TypeError, "start"),
+        ((slice(None, 2, 2), slice(None, 2)), ValueError, "step must be 1"),
+        ((slice(None, 2, 1.0), slice(None, 2)), TypeError, "step"),
+        ((slice(None, 0), slice(None, 2)), ValueError, "stop must be positive"),
+        ((slice(None, -1), slice(None, 2)), ValueError, "stop must be positive"),
+        ((slice(None, True), slice(None, 2)), TypeError, "positive integer"),
+        ((slice(None, 1.5), slice(None, 2)), TypeError, "positive integer"),
+    ],
+)
+def test_tensor_prefix_slice_rejects_nonrectangular_or_invalid_keys(
+    key,
+    error,
+    match,
+):
+    tensor = _tensor(BigradedSpec(1, 1, (2, 2)))
+
+    with pytest.raises(error, match=match):
+        _ = tensor[key]
+
+
 def test_tensor_accepts_partially_symmetrized_spec_widths():
     spec = BigradedSpec(
         2,
         2,
         (1, 2),
-        representation="partially_symmetrized",
+        partially_symmetrized=True,
     )
     tensor = _tensor(spec)
 

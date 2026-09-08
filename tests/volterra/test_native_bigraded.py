@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 import tensordev as td
-from tensordev import Jax, bigraded_core
+from tensordev import Jax, make_core
 from tensordev.volterra import (
     FractionalKernel,
     VolterraSignature,
@@ -36,7 +36,7 @@ _X = jnp.concatenate(
 
 @pytest.fixture(scope="module")
 def q1_core():
-    return bigraded_core(
+    return make_core(
         dims=(1, 1),
         max_trunc=_ACTIVE,
         default_trunc=(1, 1),
@@ -184,7 +184,7 @@ def test_adams_validates_step_axis_and_path_width(q1_kernel):
 
 def test_high_level_adams_routes_the_native_core(q1_kernel):
     active = (1, 1)
-    core = bigraded_core(dims=(1, 1), max_trunc=active)
+    core = make_core(dims=(1, 1), max_trunc=active)
     total = vsig(
         _X,
         kernel=q1_kernel,
@@ -209,7 +209,7 @@ def test_quadratic_q2_projection_uses_native_shuffle_plans(
     precompute_shuffle,
 ):
     active = (1, 1)
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=active,
         precompute_shuffle=precompute_shuffle,
@@ -247,7 +247,7 @@ def test_quadratic_q2_projection_uses_native_shuffle_plans(
 
 def test_quadratic_q2_reports_missing_native_shuffle_plans():
     active = (1, 1)
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=active,
         precompute_shuffle=False,
@@ -268,7 +268,7 @@ def test_quadratic_q2_reports_missing_native_shuffle_plans():
         )
 
 
-def test_vsig_uses_explicit_and_background_bigraded_core(q1_core, q1_kernel):
+def test_vsig_uses_explicit_and_background_bidegree_core(q1_core, q1_kernel):
     active = q1_core.default_truncation
     total = vsig(
         _X,
@@ -305,7 +305,7 @@ def test_vsig_uses_explicit_and_background_bigraded_core(q1_core, q1_kernel):
 
 def test_multicomponent_vsig_uses_generator_only_shuffle_plans():
     active = (1, 1)
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=active,
         precompute_shuffle="generator",
@@ -420,7 +420,7 @@ def test_volterra_signature_binds_core_and_uses_its_default_truncation(
         np.testing.assert_allclose(got[grade], expected[grade])
 
 
-def test_vsig_bigraded_core_is_jittable(q1_core, q1_kernel):
+def test_vsig_bidegree_core_is_jittable(q1_core, q1_kernel):
     active = (1, 1)
 
     compiled = jax.jit(
@@ -448,7 +448,7 @@ def test_vsig_bigraded_core_is_jittable(q1_core, q1_kernel):
         np.testing.assert_allclose(got[grade], expected[grade])
 
 
-def test_vsig_bigraded_core_supports_vmap_and_grad(q1_core, q1_kernel):
+def test_vsig_bidegree_core_supports_vmap_and_grad(q1_core, q1_kernel):
     active = (1, 1)
 
     def native(path):

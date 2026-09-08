@@ -112,7 +112,7 @@ class _TensorSliceProxy:
 
 class Universal(Generic[Array]):
     grading = "total_degree"
-    representation = "ordered"
+    partially_symmetrized = False
     coordinates = "standard"
     # Plain ``Jax()`` remains unbounded; configured total-degree cores replace
     # these instance attributes with a finite capacity and active default.
@@ -226,7 +226,7 @@ class Universal(Generic[Array]):
             "generator_action",
             "shuffle",
             "coordinate_conversion",
-            "signature_pairing",
+            "shear_pairing",
         }
         if self.shuffle_plan_store is not None:
             capabilities.add("shuffle_product")
@@ -237,7 +237,7 @@ class Universal(Generic[Array]):
         return capability in self.capabilities
 
     def _validate_graded_element(self, tensor: Any, *, name: str) -> Any:
-        """Representation hook for public PyTree-generic operations."""
+        """Storage hook for public PyTree-generic operations."""
         del name
         return tensor
 
@@ -503,7 +503,7 @@ class Universal(Generic[Array]):
         )
 
     # ------------------------------------------------------------------
-    # Static representation protocol for grading-generic consumers
+    # Static layout protocol for grading-generic consumers
     # ------------------------------------------------------------------
 
     def _validate_alphabet_dim(self, alphabet_dim: int) -> int:
@@ -734,8 +734,15 @@ class Universal(Generic[Array]):
         first = increments[0]
         time_axis = axis if axis >= 0 else first.ndim + axis
         index = tuple(0 if i == time_axis else slice(None) for i in range(first.ndim))
-        zero1 = self.xp.zeros_like(first[index])
-        return self.tensor_exponential((zero1,), trunc=trunc, output_zero_level=True)
+        prototype = first[index]
+        layout = self.resolve_layout(trunc, include_scalar=True)
+        return self._constant_element_for_layout(
+            layout,
+            batch_shape=prototype.shape[:-1],
+            dtype=prototype.dtype,
+            alphabet_dim=prototype.shape[-1],
+            scalar=1.0,
+        )
 
     # ----------------------------------------------------------------------
     # Axes iteration and reduction utilites
@@ -833,7 +840,7 @@ class Universal(Generic[Array]):
             B: DenseElem,
             trunc: Optional[int],
     ) -> GradedSummationSchedule:
-        """Resolve the total-degree tuple representation for addition."""
+        """Resolve the total-degree tuple layout for addition."""
         A, B = tuple(A), tuple(B)
         NA, NB = len(A) - 1, len(B) - 1
         N = self._effective_truncation(trunc, max(NA, NB))
@@ -1069,7 +1076,7 @@ class Universal(Generic[Array]):
             b_first_on: bool,
             first_on_out: bool,
     ) -> GradedConvolutionSchedule:
-        """Resolve the total-degree tuple representation for full shuffle."""
+        """Resolve the total-degree tuple layout for full shuffle."""
         self._require_shuffle()
         return self._product_schedule(
             A,
@@ -1523,23 +1530,23 @@ class Universal(Generic[Array]):
             self._inner_product_schedule(A, B)
         )
 
-    def _native_words_to_representation_standard_block(
+    def _native_words_to_standard_block(
             self,
             words: Array,
             *,
             grade: Any,
     ) -> Array:
-        """Apply the dual coordinate map while preserving representation."""
+        """Apply the dual coordinate map without changing symmetrization."""
         return self._coordinate_forward_transpose_block(words, grade)
 
-    def _native_words_to_representation_standard(
+    def _native_words_to_standard(
             self,
             words: Union[DenseElem, DenseElemFirstOn],
             *,
             trunc: Any,
             first_on: bool,
     ) -> Union[DenseElem, DenseElemFirstOn]:
-        """Apply the dual coordinate map while preserving representation."""
+        """Apply the dual coordinate map without changing symmetrization."""
         return self._coordinate_forward_transpose(
             words,
             trunc=trunc,
@@ -1553,19 +1560,19 @@ class Universal(Generic[Array]):
             *,
             name: str,
     ) -> Array:
-        """Representation hook for one ordered standard signature block."""
+        """Validate one ordered standard-coordinate signature block."""
         del grade, name
         return block
 
     def _prepare_ordered_signature_pairing_operands(
             self,
-            representation_standard_words: Union[DenseElem, DenseElemFirstOn],
+            standard_words: Union[DenseElem, DenseElemFirstOn],
             ordered_standard_signature: Union[DenseElem, DenseElemFirstOn],
             *,
             words_first_on: bool = False,
             standard_first_on: bool = False,
     ) -> tuple[Any, Any]:
-        """Validate operands before the representation-side contraction."""
+        """Validate operands before contraction with an ordered signature."""
         spec = getattr(ordered_standard_signature, "spec", None)
         include_scalar = getattr(spec, "include_scalar", None)
         if include_scalar is not None and standard_first_on == include_scalar:
@@ -1575,16 +1582,16 @@ class Universal(Generic[Array]):
                 f"to {expected} the scalar block."
             )
         del words_first_on
-        return representation_standard_words, ordered_standard_signature
+        return standard_words, ordered_standard_signature
 
-    def _pair_representation_standard_block_with_ordered_signature(
+    def _pair_standard_block_with_ordered_signature(
             self,
-            representation_standard_words: Array,
+            standard_words: Array,
             ordered_standard_signature: Array,
             *,
             grade: Any,
     ) -> Array:
-        """Ordered representation contraction for one explicit grade."""
+        """Contract one explicit grade with an ordered signature block."""
         ordered_standard_signature = (
             self._validate_ordered_signature_pairing_block(
                 ordered_standard_signature,
@@ -1593,62 +1600,105 @@ class Universal(Generic[Array]):
             )
         )
         return self.tensor_inner_product_homogeneous(
-            representation_standard_words,
+            standard_words,
             ordered_standard_signature,
         )
 
-    def _pair_representation_standard_words_with_ordered_signature(
+    def _pair_standard_block_with_standard_tensor(
             self,
-            representation_standard_words: Union[DenseElem, DenseElemFirstOn],
+            standard_words: Array,
+            standard_tensor: Array,
+            *,
+            grade: Any,
+            standard_partially_symmetrized: bool,
+    ) -> Array:
+        """Dispatch one standard-coordinate pairing by symmetrization."""
+        if standard_partially_symmetrized:
+            raise ValueError(
+                "standard_partially_symmetrized=True requires "
+                "a partially symmetrized core."
+            )
+        return self._pair_standard_block_with_ordered_signature(
+            standard_words,
+            standard_tensor,
+            grade=grade,
+        )
+
+    def _pair_standard_words_with_ordered_signature(
+            self,
+            standard_words: Union[DenseElem, DenseElemFirstOn],
             ordered_standard_signature: Union[DenseElem, DenseElemFirstOn],
             *,
             words_first_on: bool,
             standard_first_on: bool,
     ) -> Array:
-        """Ordered representation contraction over all common grades."""
-        representation_standard_words, ordered_standard_signature = (
+        """Contract standard-coordinate words with an ordered signature."""
+        standard_words, ordered_standard_signature = (
             self._prepare_ordered_signature_pairing_operands(
-                representation_standard_words,
+                standard_words,
                 ordered_standard_signature,
                 words_first_on=words_first_on,
                 standard_first_on=standard_first_on,
             )
         )
         return self._standard_tensor_inner_product(
-            representation_standard_words,
+            standard_words,
             ordered_standard_signature,
             a_first_on=words_first_on,
             b_first_on=standard_first_on,
         )
 
+    def _pair_standard_words_with_standard_tensor(
+            self,
+            standard_words: Union[DenseElem, DenseElemFirstOn],
+            standard_tensor: Union[DenseElem, DenseElemFirstOn],
+            *,
+            words_first_on: bool,
+            standard_first_on: bool,
+    ) -> Array:
+        """Pair standard-coordinate words with an ordered tensor."""
+        return self._pair_standard_words_with_ordered_signature(
+            standard_words,
+            standard_tensor,
+            words_first_on=words_first_on,
+            standard_first_on=standard_first_on,
+        )
+
     @dummy_jit(
         static_argnums=0,
-        static_argnames=("grade",),
+        static_argnames=("grade", "standard_partially_symmetrized"),
         dynamic_batch=("words", "standard_tensor"),
     )
-    def tensor_signature_inner_product_homogeneous(
+    def tensor_shear_pairing_homogeneous(
             self,
             words: Array,
             standard_tensor: Array,
             *,
             grade: Any,
+            standard_partially_symmetrized: bool = False,
     ) -> Array:
-        """Pair one native word block with an ordered standard signature block."""
+        """Pair one word block with a standard-coordinate block."""
         if grade is None:
             raise TypeError(
-                "tensor_signature_inner_product_homogeneous requires grade=."
+                "tensor_shear_pairing_homogeneous requires grade=."
+            )
+        if not isinstance(standard_partially_symmetrized, bool):
+            raise TypeError(
+                "standard_partially_symmetrized must be a boolean, got "
+                f"{standard_partially_symmetrized!r}."
             )
         grade = self.normalize_truncation(grade)
-        representation_standard_words = (
-            self._native_words_to_representation_standard_block(
+        standard_words = (
+            self._native_words_to_standard_block(
                 words,
                 grade=grade,
             )
         )
-        return self._pair_representation_standard_block_with_ordered_signature(
-            representation_standard_words,
+        return self._pair_standard_block_with_standard_tensor(
+            standard_words,
             standard_tensor,
             grade=grade,
+            standard_partially_symmetrized=standard_partially_symmetrized,
         )
 
     @dummy_jit(
@@ -1656,7 +1706,7 @@ class Universal(Generic[Array]):
         static_argnames=("words_first_on", "standard_first_on"),
         dynamic_batch=("words", "standard_tensor"),
     )
-    def tensor_signature_inner_product(
+    def tensor_shear_pairing(
             self,
             words: Union[DenseElem, DenseElemFirstOn],
             standard_tensor: Union[DenseElem, DenseElemFirstOn],
@@ -1664,7 +1714,7 @@ class Universal(Generic[Array]):
             words_first_on: bool = False,
             standard_first_on: bool = False,
     ) -> Array:
-        """Pair native-coordinate words with an ordered standard signature."""
+        """Pair words with a compatible standard-coordinate tensor."""
         for name, value in (
             ("words_first_on", words_first_on),
             ("standard_first_on", standard_first_on),
@@ -1675,24 +1725,19 @@ class Universal(Generic[Array]):
             words,
             first_on=words_first_on,
         )
-        representation_standard_words = (
-            self._native_words_to_representation_standard(
+        standard_words = (
+            self._native_words_to_standard(
                 words,
                 trunc=natural,
                 first_on=words_first_on,
             )
         )
-        return self._pair_representation_standard_words_with_ordered_signature(
-            representation_standard_words,
+        return self._pair_standard_words_with_standard_tensor(
+            standard_words,
             standard_tensor,
             words_first_on=words_first_on,
             standard_first_on=standard_first_on,
         )
-
-    tensor_shear_inner_product_homogeneous = (
-        tensor_signature_inner_product_homogeneous
-    )
-    tensor_shear_inner_product = tensor_signature_inner_product
 
     def _standard_adjoint_left_homogeneous(
             self, Ai: Array, Yni: Array
@@ -1791,7 +1836,7 @@ class Universal(Generic[Array]):
             y_first_on: bool,
             first_on_out: bool,
     ) -> GradedContractionSchedule:
-        """Resolve the total-degree tuple representation for an adjoint action."""
+        """Resolve the total-degree tuple layout for an adjoint action."""
         W, Y = tuple(W), tuple(Y)
         if len(W) == 0 or len(Y) == 0:
             if trunc is not None:
@@ -1936,7 +1981,7 @@ class Universal(Generic[Array]):
         - for ``side="left"``, use ``tensor_adjoint_left_homogeneous(W_i, Y_{n+i})``;
         - for ``side="right"``, use ``tensor_adjoint_right_homogeneous(W_i, Y_{n+i})``.
 
-        Input representation
+        Input format
         --------------------
         The inputs may be stored either as dense graded elements or as first-on
         graded elements:
@@ -1949,7 +1994,7 @@ class Universal(Generic[Array]):
         The flags ``w_first_on`` and ``y_first_on`` specify which convention is used
         for ``W`` and ``Y`` respectively.
 
-        Output representation
+        Output format
         ---------------------
         The returned tuple is intended to be either
 
@@ -2145,7 +2190,7 @@ class Universal(Generic[Array]):
 
     # The following aliases are the coordinate-neutral series boundary used
     # after a shear core has transported values to standard coordinates.
-    # Representation specializations with coordinate-tagged containers may
+    # Layout specializations with coordinate-tagged containers may
     # override them without weakening their public native validation.
     def _standard_series_validate_left_factor(self, g):
         return self._series_validate_left_factor(g)
@@ -2556,7 +2601,7 @@ class Universal(Generic[Array]):
     @dummy_jit(static_argnums=0, static_argnames=("start_at_level_one",), dynamic_batch=("levels",))
     def tensor_to_flat(self, levels: DenseElem, *, start_at_level_one: bool = False) -> Array:
         """
-        Concatenate per-degree levels into a single flattened representation.
+        Concatenate per-degree levels into a single flattened array.
 
         Parameters
         ----------

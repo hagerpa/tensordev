@@ -235,7 +235,7 @@ def apply_partially_symmetrized_transform(
 
 
 class PartiallySymmetrizedShearPlanStore:
-    """Shear-coordinate transforms sharing one representation store."""
+    """Shear-coordinate transforms sharing one block-plan store."""
 
     def __init__(
         self,

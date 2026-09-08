@@ -1,4 +1,3 @@
-# universal/annotations.py
 from __future__ import annotations
 from typing import Callable, Iterable, Optional, Any
 
@@ -9,16 +8,15 @@ JIT_KW = "__jit_kwargs__"
 def jit(
         func: Optional[Callable] = None,
         *,
-        # convenience kwargs (typed so IDEs help you)
         static_argnums: Optional[Iterable[int] | int] = None,
         static_argnames: Optional[Iterable[str] | str] = None,
         dynamic_batchtime: Optional[Iterable[str] | str] = None,
         full_dynamic: Optional[Iterable[str] | str] = None,
-        nopython: Optional[bool] = None,  # for numba etc.
-        no_python: Optional[bool] = None,  # alias for convenience
-        **extra: Any,  # anything else gets recorded too
+        nopython: Optional[bool] = None,
+        no_python: Optional[bool] = None,
+        **extra: Any,
 ):
-    """Metadata-only: mark as jittable and stash ALL kwargs exactly as given."""
+    """Record backend compilation metadata on a function."""
 
     def decorate(f: Callable):
         recorded = {}
@@ -28,9 +26,9 @@ def jit(
         if full_dynamic is not None:     recorded["full_dynamic"] = full_dynamic
         if nopython is not None:        recorded["nopython"] = nopython
         if no_python is not None and "nopython" not in recorded:
-            recorded["nopython"] = no_python  # alias
+            recorded["nopython"] = no_python
 
-        recorded.update(extra)  # keep everything else verbatim
+        recorded.update(extra)
 
         setattr(f, JIT_TAG, True)
         setattr(f, JIT_KW, recorded)

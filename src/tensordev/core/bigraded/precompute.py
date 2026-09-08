@@ -501,7 +501,7 @@ class BigradedPlanStore:
                 truncation=truncation,
                 include_scalar=include_scalar,
                 coordinates=coordinates,
-                representation="ordered",
+                partially_symmetrized=False,
             )
             self._active_layouts[key] = layout
             return layout

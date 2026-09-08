@@ -7,7 +7,7 @@ name = "tensordev"
 version = "0.1.0"
 description = "JAX-based tensor algebra for signatures, Volterra signatures, free developments, and signature kernels."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [
@@ -29,15 +29,15 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Mathematics",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "jax>=0.10.0",
-    "jaxlib>=0.10.0",
+    "jax>=0.10.0,<0.12",
+    "jaxlib>=0.10.0,<0.12",
     "numpy>=1.24",
     "numba>=0.58",
 ]
@@ -46,6 +46,9 @@ dependencies = [
 test = [
     "pytest>=7.0",
     "jaxtyping>=0.2",
+]
+rough = [
+    "scipy>=1.11",
 ]
 
 [project.urls]

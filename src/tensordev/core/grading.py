@@ -20,7 +20,7 @@ Block = TypeVar("Block")
 
 @dataclass(frozen=True, slots=True)
 class GradedMapSchedule:
-    """Static representation adapter for a componentwise graded operation."""
+    """Static layout adapter for a componentwise graded operation."""
 
     grades: tuple[Any, ...]
     block: Callable[[Any], Any]
@@ -29,7 +29,7 @@ class GradedMapSchedule:
 
 @dataclass(frozen=True, slots=True)
 class GradedSummationSchedule:
-    """Static representation adapter consumed by ``graded_summation``."""
+    """Static layout adapter consumed by ``graded_summation``."""
 
     grades: tuple[Any, ...]
     left_contains: Callable[[Any], bool]
@@ -45,7 +45,7 @@ class GradedSummationSchedule:
 
 @dataclass(frozen=True, slots=True)
 class GradedConvolutionSchedule:
-    """Static representation adapter consumed by ``graded_convolution``."""
+    """Static layout adapter consumed by ``graded_convolution``."""
 
     grades: tuple[Any, ...]
     splits: Callable[[Any], Iterable[tuple[Any, Any]]]
@@ -60,7 +60,7 @@ class GradedConvolutionSchedule:
 
 @dataclass(frozen=True, slots=True)
 class GradedContractionSchedule:
-    """Static representation adapter consumed by ``graded_contraction``."""
+    """Static layout adapter consumed by ``graded_contraction``."""
 
     grades: tuple[Any, ...]
     pairs: Callable[[Any], Iterable[tuple[Any, Any]]]
@@ -73,7 +73,7 @@ class GradedContractionSchedule:
 
 @dataclass(frozen=True, slots=True)
 class GradedInnerProductSchedule:
-    """Static representation adapter consumed by ``graded_inner_product``."""
+    """Static layout adapter consumed by ``graded_inner_product``."""
 
     grades: tuple[Any, ...]
     left_block: Callable[[Any], Any]
@@ -327,6 +327,144 @@ def graded_inner_product(
     return result
 
 
+def _first_level_generator_map(
+        generator_blocks: Iterable[tuple[Grade, Block]],
+) -> dict[Grade, Block]:
+    generators = tuple(generator_blocks)
+    generator_by_grade = dict(generators)
+    if len(generator_by_grade) != len(generators):
+        raise ValueError("first-level generator grades must be unique")
+    return generator_by_grade
+
+
+def _right_generator_action_block(
+        layout: ResolvedGradingLayout[Grade],
+        output_grade: Grade,
+        *,
+        source_contains: Callable[[Grade], bool],
+        source_block: Callable[[Grade], Block],
+        generator_by_grade: dict[Grade, Block],
+        right_generator_output_block: Callable[..., Block],
+) -> Block:
+    splits = tuple(
+        (source_grade, generator_grade)
+        for source_grade, generator_grade in layout.product_splits(output_grade)
+        if generator_grade in generator_by_grade
+    )
+    if not splits:
+        raise ValueError(
+            "no first-level generator predecessor for output grade "
+            f"{output_grade!r}"
+        )
+    missing = tuple(
+        source_grade
+        for source_grade, _generator_grade in splits
+        if not source_contains(source_grade)
+    )
+    if missing:
+        raise ValueError(
+            f"missing generator predecessors {missing!r} for output grade "
+            f"{output_grade!r}"
+        )
+
+    predecessor_grades = tuple(source for source, _ in splits)
+    generator_grades = tuple(generator for _, generator in splits)
+    return right_generator_output_block(
+        tuple(source_block(grade) for grade in predecessor_grades),
+        tuple(generator_by_grade[grade] for grade in generator_grades),
+        predecessor_grades=predecessor_grades,
+        generator_grades=generator_grades,
+        output_grade=output_grade,
+    )
+
+
+def graded_right_multiply_first_level(
+    layout: ResolvedGradingLayout[Grade],
+    *,
+    source_contains: Callable[[Grade], bool],
+    source_block: Callable[[Grade], Block],
+    generator_blocks: Iterable[tuple[Grade, Block]],
+    right_generator_output_block: Callable[..., Block],
+    assemble: Callable[[tuple[Block, ...]], Element],
+) -> Element:
+    """Right-multiply an element by a first-level generator grade by grade.
+
+    ``layout`` describes the scalar-omitting output.  The numerical action is
+    delegated to the core, so total degree, bidegree, and quotient layouts use
+    one schedule without materializing a padded generator tensor.
+    """
+    if layout.contains(layout.zero_grade):
+        raise ValueError(
+            "a right first-level product requires a scalar-omitting output layout"
+        )
+    generator_by_grade = _first_level_generator_map(generator_blocks)
+    return assemble(
+        tuple(
+            _right_generator_action_block(
+                layout,
+                output_grade,
+                source_contains=source_contains,
+                source_block=source_block,
+                generator_by_grade=generator_by_grade,
+                right_generator_output_block=right_generator_output_block,
+            )
+            for output_grade in layout.grades
+        )
+    )
+
+
+def _graded_horner_first_level(
+    layout: ResolvedGradingLayout[Grade],
+    *,
+    max_order: int,
+    initial_block: Callable[[Grade, Block | None], Block],
+    step_block: Callable[[int, Grade, Block | None], Block],
+    action_scale: Callable[[int], Any | None],
+    generator_blocks: Iterable[tuple[Grade, Block]],
+    right_generator_output_block: Callable[..., Block],
+    assemble: Callable[[tuple[Block, ...]], Element],
+) -> Element:
+    """Run a grade-native Horner recurrence driven by a first-level action."""
+    if max_order < 0:
+        raise ValueError("max_order must be non-negative")
+
+    generator_by_grade = _first_level_generator_map(generator_blocks)
+
+    zero_grade = layout.zero_grade
+    previous: dict[Grade, Block] = {
+        zero_grade: initial_block(zero_grade, None)
+    }
+    if max_order == 0:
+        return assemble((previous[zero_grade],))
+
+    for step in range(1, max_order + 1):
+        active_order = step
+        current: dict[Grade, Block] = {
+            zero_grade: step_block(step, zero_grade, None)
+        }
+        for output_grade in layout.grades:
+            output_order = layout.total_degree(output_grade)
+            if not (1 <= output_order <= active_order):
+                continue
+
+            action = _right_generator_action_block(
+                layout,
+                output_grade,
+                source_contains=previous.__contains__,
+                source_block=previous.__getitem__,
+                generator_by_grade=generator_by_grade,
+                right_generator_output_block=right_generator_output_block,
+            )
+            scale = action_scale(step)
+            scaled_action = action if scale is None else action * scale
+            current[output_grade] = (
+                step_block(step, output_grade, action) + scaled_action
+            )
+        previous = current
+
+    return assemble(tuple(previous[grade] for grade in layout.grades))
+
+
 def graded_horner_first_level(
     layout: ResolvedGradingLayout[Grade],
     *,
@@ -341,7 +479,7 @@ def graded_horner_first_level(
     ``layout`` supplies only static grade structure.  Numerical details of
     right multiplication by the first-level generator are delegated to the
     core hook, so standard/shear and total/bidegree implementations share the
-    recurrence without sharing an unsuitable block representation.
+    recurrence without sharing an unsuitable block layout.
 
     ``base_block(grade, like)`` returns the corresponding block of ``g`` or a
     zero block when it is absent.  ``like`` is ``None`` only for the scalar
@@ -349,70 +487,49 @@ def graded_horner_first_level(
     lets dimension-free total cores infer a missing block's shape without
     padding the input first.
     """
-    if max_order < 0:
-        raise ValueError("max_order must be non-negative")
+    return _graded_horner_first_level(
+        layout,
+        max_order=max_order,
+        initial_block=base_block,
+        step_block=lambda _step, grade, like: base_block(grade, like),
+        action_scale=lambda step: 1.0 / float(max_order - step + 1),
+        generator_blocks=generator_blocks,
+        right_generator_output_block=right_generator_output_block,
+        assemble=assemble,
+    )
 
-    generators = tuple(generator_blocks)
-    generator_by_grade = dict(generators)
-    if len(generator_by_grade) != len(generators):
-        raise ValueError("first-level generator grades must be unique")
 
-    zero_grade = layout.zero_grade
-    previous: dict[Grade, Block] = {
-        zero_grade: base_block(zero_grade, None)
-    }
-    if max_order == 0:
-        return assemble((previous[zero_grade],))
+def graded_polynomial_horner_first_level(
+    layout: ResolvedGradingLayout[Grade],
+    *,
+    max_order: int,
+    coefficient_block: Callable[[int, Grade, Block | None], Block],
+    generator_blocks: Iterable[tuple[Grade, Block]],
+    right_generator_output_block: Callable[..., Block],
+    assemble: Callable[[tuple[Block, ...]], Element],
+) -> Element:
+    """Evaluate a scalar-coefficient polynomial at a first-level tensor.
 
-    for denominator in range(max_order, 0, -1):
-        active_order = max_order - denominator + 1
-        current: dict[Grade, Block] = {
-            zero_grade: base_block(zero_grade, None)
-        }
-        for output_grade in layout.grades:
-            output_order = layout.total_degree(output_grade)
-            if not (1 <= output_order <= active_order):
-                continue
-
-            splits = tuple(
-                (source_grade, generator_grade)
-                for source_grade, generator_grade in layout.product_splits(
-                    output_grade
-                )
-                if generator_grade in generator_by_grade
-            )
-            if not splits:
-                raise ValueError(
-                    "no first-level generator predecessor for output grade "
-                    f"{output_grade!r}"
-                )
-            missing = tuple(
-                source_grade
-                for source_grade, _generator_grade in splits
-                if source_grade not in previous
-            )
-            if missing:
-                raise ValueError(
-                    f"missing Horner predecessors {missing!r} for output grade "
-                    f"{output_grade!r}"
-                )
-
-            predecessor_grades = tuple(source for source, _ in splits)
-            generator_grades = tuple(generator for _, generator in splits)
-            action = right_generator_output_block(
-                tuple(previous[grade] for grade in predecessor_grades),
-                tuple(generator_by_grade[grade] for grade in generator_grades),
-                predecessor_grades=predecessor_grades,
-                generator_grades=generator_grades,
-                output_grade=output_grade,
-            )
-            current[output_grade] = (
-                base_block(output_grade, action)
-                + action * (1.0 / float(denominator))
-            )
-        previous = current
-
-    return assemble(tuple(previous[grade] for grade in layout.grades))
+    ``coefficient_block(index, grade, like)`` supplies the block of the
+    coefficient of ``z**index``.  The callback normally returns the scalar
+    coefficient at the zero grade and a shape-compatible zero elsewhere.
+    The polynomial and exponential Horner algorithms consequently share the
+    same grade schedule and native generator kernels.
+    """
+    return _graded_horner_first_level(
+        layout,
+        max_order=max_order,
+        initial_block=lambda grade, like: coefficient_block(
+            max_order, grade, like
+        ),
+        step_block=lambda step, grade, like: coefficient_block(
+            max_order - step, grade, like
+        ),
+        action_scale=lambda _step: None,
+        generator_blocks=generator_blocks,
+        right_generator_output_block=right_generator_output_block,
+        assemble=assemble,
+    )
 
 
 Element = TypeVar("Element")
@@ -431,7 +548,7 @@ def formal_exponential_series(
 
     ``max_order`` is the nilpotence bound of the resolved layout.  It equals
     the truncation in total degree and ``N + M`` for a rectangular bidegree
-    layout.  The function is intentionally representation-agnostic.
+    layout.  The function is intentionally storage-agnostic.
     """
 
     if max_order < 0:
@@ -475,6 +592,8 @@ __all__ = [
     "graded_contraction",
     "graded_convolution",
     "graded_horner_first_level",
+    "graded_polynomial_horner_first_level",
+    "graded_right_multiply_first_level",
     "graded_inner_product",
     "graded_summation",
     "formal_exponential_series",

@@ -11,6 +11,7 @@ import numpy as np
 from jax import lax
 from jax import numpy as jnp
 
+from tensordev.core.capabilities import _WORDWISE_SIGNATURE_PROTOCOL
 from tensordev.core.utils.annotations import iter_class_jittables
 from .einsum import Einsum
 from .sequential import SequentialCore, DenseElem
@@ -53,6 +54,8 @@ def _compiled_jittables(core_type: type):
 
 
 class Jax(Einsum[jnp.ndarray]):
+
+    _wordwise_signature_protocol = _WORDWISE_SIGNATURE_PROTOCOL
 
     def __init__(
             self,
@@ -178,27 +181,6 @@ class Jax(Einsum[jnp.ndarray]):
             return final, ys_stacked
 
         return scan_fn
-
-
-def total_degree_core(
-        *,
-        d: int,
-        max_trunc: int,
-        default_trunc: int | None = None,
-        precompute_shuffle: bool = False,
-) -> Jax:
-    """Construct a bounded ordinary total-degree JAX core.
-
-    Shuffle plans are optional and live on this same algebra core.  Omitting
-    ``default_trunc`` makes the full capacity active, matching
-    :func:`bigraded_core`.
-    """
-    return Jax(
-        d=d,
-        max_trunc=max_trunc,
-        default_trunc=default_trunc,
-        precompute_shuffle=precompute_shuffle,
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -554,6 +536,7 @@ class JaxTotalDegreeShufflePlanStore(TotalDegreeShufflePlanStore):
 class JaxSequentialCore(SequentialCore[jnp.ndarray]):
     """Sequential core implemented with JAX map and scan primitives."""
 
+    _wordwise_signature_protocol = _WORDWISE_SIGNATURE_PROTOCOL
     capabilities = SequentialCore.capabilities | {"functional_indexed_update"}
 
     def __init__(self, default_time_axis: int = -2):

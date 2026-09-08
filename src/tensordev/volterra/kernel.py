@@ -608,7 +608,7 @@ def _gamma_dot_kappa(
 def _rho_to_static_int(rho: float | Array) -> int:
     """Convert rho to a static integer for FSSK eval_psi.
 
-    For FSSK we set beta = 1, so the deduplicated higher-order basis only
+    For FSSK, beta is one, so the deduplicated higher-order basis only
     produces rho in {0, 1, 2}.
     """
     rho_val = float(jax.device_get(jnp.asarray(rho)))

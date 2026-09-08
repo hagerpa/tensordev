@@ -11,7 +11,7 @@ import jax.random as jr
 import numpy as np
 import pytest
 
-from tensordev import Jax, bigraded_core, path_signature, total_degree_core
+from tensordev import Jax, make_core, path_signature
 from tensordev.core.bigraded import BigradedTensor
 from tensordev.core.bigraded.standard import StandardBigradedCore
 from tensordev.core.universal import Universal
@@ -90,7 +90,7 @@ def test_public_orchestration_is_inherited_from_universal(name):
 
 @pytest.fixture(scope="module")
 def core():
-    return bigraded_core(
+    return make_core(
         dims=(1, 2),
         max_trunc=(2, 2),
         default_trunc=(2, 1),
@@ -179,7 +179,7 @@ def test_adjoint_product_satisfies_the_defining_pairing(core, side):
 @pytest.mark.parametrize("side", ["left", "right"])
 def test_adjoint_product_broadcasts_multiplier_and_target_batches(side):
     active = (1, 1)
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 2),
         max_trunc=active,
         precompute_shuffle=False,
@@ -261,7 +261,7 @@ def test_sum_scaling_and_bidegree_dilations_are_blockwise(core):
 
 def test_first_level_exponential_and_fmexp_match_total_projection():
     active = (2, 2)
-    core = bigraded_core(dims=(1, 1), max_trunc=active)
+    core = make_core(dims=(1, 1), max_trunc=active)
     z = 0.2 * jr.normal(jr.PRNGKey(106), (2, 2), dtype=jnp.float64)
 
     got = core.tensor_exponential((z,), trunc=active, output_zero_level=True)
@@ -322,7 +322,7 @@ def test_general_exponential_and_logarithm_are_inverse(core):
 
 def test_standard_shuffle_matches_total_shuffle_projection():
     active = (2, 1)
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1), max_trunc=active, precompute_shuffle=True
     )
     ka, kb = jr.split(jr.PRNGKey(109))
@@ -330,8 +330,8 @@ def test_standard_shuffle_matches_total_shuffle_projection():
     B = _random_tensor(core, kb, trunc=active)
 
     got = core.tensor_shuffle_product(A, B, trunc=active)
-    total_shuffle = total_degree_core(
-        d=2,
+    total_shuffle = make_core(
+        dims=2,
         max_trunc=sum(active),
         precompute_shuffle=True,
     )
@@ -351,7 +351,7 @@ def test_standard_shuffle_matches_total_shuffle_projection():
 
 def test_full_shuffle_is_associative_and_supports_vmap_and_grad():
     active = (2, 1)
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1), max_trunc=active, precompute_shuffle=True
     )
     ka, kb, kc = jr.split(jr.PRNGKey(144), 3)
@@ -388,7 +388,7 @@ def test_full_shuffle_is_associative_and_supports_vmap_and_grad():
 
 def test_signature_coordinates_satisfy_bigraded_shuffle_identity():
     active = (1, 1)
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1), max_trunc=active, precompute_shuffle=True
     )
     path = jnp.asarray(
@@ -418,7 +418,7 @@ def test_signature_coordinates_satisfy_bigraded_shuffle_identity():
 
 def test_matrix_tensor_product_matches_total_projection():
     active = (1, 1)
-    core = bigraded_core(dims=(1, 1), max_trunc=active)
+    core = make_core(dims=(1, 1), max_trunc=active)
     ka, kb = jr.split(jr.PRNGKey(110))
     A = _random_tensor(core, ka, trunc=active, batch_shape=(2, 3))
     B = _random_tensor(core, kb, trunc=active, batch_shape=(3, 2))
@@ -436,7 +436,7 @@ def test_matrix_tensor_product_matches_total_projection():
 
 def test_adjoint_and_matrix_products_create_no_hidden_host_plan_caches():
     active = (1, 1)
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 2),
         max_trunc=(2, 2),
         default_trunc=active,
@@ -483,7 +483,7 @@ def test_adjoint_and_matrix_products_create_no_hidden_host_plan_caches():
 
 
 def test_active_subtruncation_uses_the_same_capacity_without_padding():
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=(2, 2),
         default_trunc=(2, 2),
@@ -510,7 +510,7 @@ def test_active_subtruncation_uses_the_same_capacity_without_padding():
 
 
 def test_densify_rejects_grades_outside_the_requested_layout():
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=(1, 1),
         precompute_shuffle=False,
@@ -534,7 +534,7 @@ def test_densify_rejects_grades_outside_the_requested_layout():
 
 
 def test_shuffle_vector_accepts_empty_positive_zero_truncation():
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1), max_trunc=(1, 1), precompute_shuffle=True
     )
     empty = BigradedTensor(
@@ -553,7 +553,7 @@ def test_shuffle_vector_accepts_empty_positive_zero_truncation():
 
 def test_disabled_shuffle_fails_without_growing_plan_memory():
     active = (1, 1)
-    core = bigraded_core(dims=(1, 1), max_trunc=active)
+    core = make_core(dims=(1, 1), max_trunc=active)
     A = _random_tensor(core, jr.PRNGKey(145), trunc=active)
     memory_before = core.memory_bytes()
 
@@ -566,7 +566,7 @@ def test_disabled_shuffle_fails_without_growing_plan_memory():
 
 def test_float32_product_and_horner_preserve_dtype_and_projection():
     active = (1, 1)
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=active,
         precompute_shuffle=False,
@@ -588,7 +588,7 @@ def test_float32_product_and_horner_preserve_dtype_and_projection():
 
 def test_bigraded_pytree_composes_with_jit_vmap_and_grad():
     active = (1, 1)
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=(2, 2),
         default_trunc=active,
@@ -635,7 +635,7 @@ def _stablehlo_inventory(lowered):
 
 def test_product_uses_one_placement_scatter_per_output_grade():
     active = (2, 2)
-    core = bigraded_core(dims=(1, 1), max_trunc=active)
+    core = make_core(dims=(1, 1), max_trunc=active)
     ka, kb = jr.split(jr.PRNGKey(148))
     A = _random_tensor(core, ka, trunc=active)
     B = _random_tensor(core, kb, trunc=active)
@@ -654,8 +654,8 @@ def test_product_uses_one_placement_scatter_per_output_grade():
 
 def test_small_active_program_does_not_capture_larger_capacity_plans():
     active = (1, 1)
-    small = bigraded_core(dims=(1, 1), max_trunc=active)
-    large = bigraded_core(dims=(1, 1), max_trunc=(4, 4), default_trunc=active)
+    small = make_core(dims=(1, 1), max_trunc=active)
+    large = make_core(dims=(1, 1), max_trunc=(4, 4), default_trunc=active)
     ka, kb = jr.split(jr.PRNGKey(146))
     A_small = _random_tensor(small, ka, trunc=active)
     B_small = _random_tensor(small, kb, trunc=active)

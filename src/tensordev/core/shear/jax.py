@@ -8,6 +8,7 @@ from typing import Literal
 
 import jax.numpy as jnp
 
+from tensordev.core.capabilities import _WORDWISE_SIGNATURE_PROTOCOL
 from tensordev.core.einsum import Einsum
 from tensordev.core.jax import Jax, _compiled_jittables
 from tensordev.core.grading import GradedConvolutionSchedule
@@ -28,6 +29,7 @@ from tensordev.core.utils.annotations import jit as dummy_jit
 class JaxShearTotal(ShearCoordinateCore, Einsum):
     """Bounded dense total-degree JAX core in ordered shear coordinates."""
 
+    _wordwise_signature_protocol = _WORDWISE_SIGNATURE_PROTOCOL
     grading = "total_degree"
     coordinates = "shear"
     _mapper = Jax._mapper
@@ -114,7 +116,7 @@ class JaxShearTotal(ShearCoordinateCore, Einsum):
             "concatenation",
             "generator_action",
             "coordinate_conversion",
-            "signature_pairing",
+            "shear_pairing",
         }
         if self.shear_plan_store.shuffle_scope != "none":
             capabilities.add("shuffle")
@@ -165,13 +167,13 @@ class JaxShearTotal(ShearCoordinateCore, Einsum):
 
     def _prepare_ordered_signature_pairing_operands(
         self,
-        representation_standard_words,
+        standard_words,
         ordered_standard_signature,
         *,
         words_first_on: bool,
         standard_first_on: bool,
     ):
-        representation_standard_words = tuple(representation_standard_words)
+        standard_words = tuple(standard_words)
         ordered_standard_signature = tuple(
             self._validate_graded_element(
                 ordered_standard_signature, name="standard_tensor"
@@ -186,7 +188,7 @@ class JaxShearTotal(ShearCoordinateCore, Einsum):
             )
 
         del words_first_on
-        return representation_standard_words, ordered_standard_signature
+        return standard_words, ordered_standard_signature
 
     def _apply_coordinate_element(
         self,

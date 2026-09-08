@@ -369,7 +369,7 @@ class TotalDegreeShufflePlanStore:
         return self._plans_view
 
     def memory_bytes_by_category(self) -> dict[str, int]:
-        """Precomputed array payload grouped by representation category."""
+        """Precomputed array payload grouped by storage category."""
         return {
             "axis_permutations": sum(
                 plan.memory_bytes() for plan in self._plans.values()

@@ -30,7 +30,7 @@ def shear_core(
     ``dims=(d_prime, d_doubleprime)`` is required.  Its finite capacity is
     inherited when available; converting an unbounded ``Jax()`` additionally
     requires ``max_trunc``.  A bidegree core already records both pieces and
-    shares every compatible representation-level store with the returned
+    shares every compatible block-plan store with the returned
     shear core.  This applies to ordered and partially symmetrized sources.
 
     Unless explicitly overridden, the ordinary core's shuffle-precomputation
@@ -141,7 +141,7 @@ def _validate_bidegree_source_assertions(
     dims: tuple[int, int] | None,
     max_trunc: int | tuple[int, int] | None,
 ) -> None:
-    """Validate optional assertions shared by both bidegree representations."""
+    """Validate optional assertions shared by both bidegree layouts."""
     if dims is not None:
         normalized_dims = _bidegree(dims, name="dims")
         if normalized_dims != core.dims:

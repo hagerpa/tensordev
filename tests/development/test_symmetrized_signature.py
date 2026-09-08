@@ -6,7 +6,7 @@ from jax import config
 import numpy as np
 import pytest
 
-from tensordev import bigraded_core, shear_core, symmetrized_core
+from tensordev import make_core, shear_core, symmetrize_core
 from tensordev.core.bigraded import BigradedTensor
 from tensordev.development import free_development, path_signature
 
@@ -26,8 +26,8 @@ def _assert_close(actual, expected, *, atol=2e-10, rtol=2e-10):
 def cores():
     kwargs = dict(dims=(1, 2), max_trunc=(2, 2), default_trunc=(2, 1))
     return (
-        bigraded_core(**kwargs),
-        bigraded_core(**kwargs, representation="partially_symmetrized"),
+        make_core(**kwargs),
+        make_core(**kwargs, partially_symmetrized=True),
     )
 
 
@@ -87,7 +87,7 @@ def test_direct_quotient_shear_signature_obeys_both_commuting_routes(
 ):
     ordered_standard, quotient_standard = cores
     ordered_shear = shear_core(ordered_standard)
-    quotient_shear = symmetrized_core(ordered_shear)
+    quotient_shear = symmetrize_core(ordered_shear)
     path = 0.09 * jr.normal(jr.PRNGKey(415 + parallel), (2, 7, 3))
     options = dict(
         trunc=(2, 1),

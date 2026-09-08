@@ -50,8 +50,8 @@ class FSSKSigKernel(BaseKernel):
     static_kernel : StaticKernel, default=LinearKernel(scale=1.0)
         Static kernel used to build the coarse-grid gamma via the discrete
         mixed-derivative formula.  The default ``LinearKernel(scale=1.0)``
-        (i.e. ``k(x,y)=⟨x,y⟩``) is mathematically equivalent to the
-        original increment-based projection.
+        (i.e. ``k(x,y)=⟨x,y⟩``) is mathematically equivalent to a direct
+        increment inner-product projection.
     """
 
     kernel: FSSK
@@ -263,8 +263,8 @@ def fssk_sigkernel(
 
         followed by contraction
         :math:`\\gamma[R,S] = \\sum_{n,p} b_{n,R}\\, G_{n,p}\\, b_{p,S}`.
-        The default ``LinearKernel(scale=1.0)`` is equivalent to the original
-        increment-based projection.
+        The default ``LinearKernel(scale=1.0)`` is equivalent to a direct
+        increment inner-product projection.
 
     Returns
     -------

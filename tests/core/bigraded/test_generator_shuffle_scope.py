@@ -4,10 +4,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from tensordev import make_core
 from tensordev.core.bigraded import (
     BigradedPlanStore,
     BigradedShufflePlanStore,
-    bigraded_core,
 )
 
 
@@ -34,12 +34,12 @@ def test_generator_core_matches_full_core_vector_action(generator_part):
     dims = (1, 2)
     capacity = (2, 2)
     input_grade = (1, 1)
-    generator = bigraded_core(
+    generator = make_core(
         dims=dims,
         max_trunc=capacity,
         precompute_shuffle="generator",
     )
-    full = bigraded_core(
+    full = make_core(
         dims=dims,
         max_trunc=capacity,
         precompute_shuffle=True,
@@ -65,7 +65,7 @@ def test_generator_core_matches_full_core_vector_action(generator_part):
 
 
 def test_generator_core_exposes_only_generator_shuffle_capability():
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=(2, 2),
         precompute_shuffle="generator",

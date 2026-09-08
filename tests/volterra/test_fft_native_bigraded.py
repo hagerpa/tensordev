@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 import tensordev as td
-from tensordev import Jax, bigraded_core
+from tensordev import Jax, make_core
 from tensordev.volterra import FractionalKernel
 from tensordev.volterra.algebra import resolve_volterra_algebra
 from tensordev.volterra.iteration_fft import (
@@ -53,7 +53,7 @@ def _assert_projection(got, total, core, trunc, *, atol=2e-10):
 def test_scalar_fft_is_native_rectangular_projection(order, return_trajectory):
     active = (2, 1)
     kernel = _kernel(1)
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=active,
         precompute_shuffle=False,
@@ -85,7 +85,7 @@ def test_multicomponent_fft_is_native_rectangular_projection(
 ):
     active = (2, 1)
     kernel = _kernel(2)
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=active,
         precompute_shuffle=precompute_shuffle,
@@ -111,7 +111,7 @@ def test_multicomponent_fft_is_native_rectangular_projection(
 
 def test_fft_bidegree_source_group_fuses_multiple_grade_splits():
     active = (2, 1)
-    core = bigraded_core(dims=(1, 1), max_trunc=active)
+    core = make_core(dims=(1, 1), max_trunc=active)
     algebra = resolve_volterra_algebra(core, active, 2)
     history_workset = algebra.diagonal(1)
     local_workset = algebra.diagonal(2)
@@ -170,7 +170,7 @@ def test_fft_bidegree_source_group_fuses_multiple_grade_splits():
 def test_multicomponent_fft_projects_to_one_sided_rectangle():
     active = (0, 2)
     kernel = _kernel(2)
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=active,
         precompute_shuffle=True,
@@ -197,7 +197,7 @@ def test_multicomponent_fft_projects_to_one_sided_rectangle():
 def test_multicomponent_depth_one_does_not_require_shuffle_plans():
     active = (1, 0)
     kernel = _kernel(2)
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=active,
         precompute_shuffle=False,
@@ -220,7 +220,7 @@ def test_multicomponent_depth_one_does_not_require_shuffle_plans():
 
 
 def test_multicomponent_positive_depth_requires_shuffle_capability():
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=(1, 1),
         precompute_shuffle=False,
@@ -238,7 +238,7 @@ def test_multicomponent_positive_depth_requires_shuffle_capability():
 def test_high_level_fft_routes_the_native_core():
     active = (1, 1)
     kernel = _kernel(1)
-    core = bigraded_core(dims=(1, 1), max_trunc=active)
+    core = make_core(dims=(1, 1), max_trunc=active)
     path = jnp.concatenate(
         (jnp.zeros((1, 2), dtype=_DX.dtype), jnp.cumsum(_DX, axis=0)),
         axis=0,
@@ -264,7 +264,7 @@ def test_high_level_fft_routes_the_native_core():
 
 def test_pair_and_larger_lag_tables_are_reused_across_active_rectangles():
     kernel = _kernel(1)
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=(2, 1),
         default_trunc=(1, 1),
@@ -306,7 +306,7 @@ def test_pair_and_larger_lag_tables_are_reused_across_active_rectangles():
 
 def test_integer_lag_precomputation_ignores_bigraded_background_core():
     kernel = _kernel(1)
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=(1, 1),
         default_trunc=(1, 1),

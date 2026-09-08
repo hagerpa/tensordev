@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 import tensordev as td
-from tensordev import Jax, JaxSequentialCore, bigraded_core
+from tensordev import Jax, JaxSequentialCore, make_core
 from tensordev.development import free_development, path_signature
 
 
@@ -57,7 +57,7 @@ def _slice_block_axis(tensor, index):
 
 @pytest.fixture(scope="module")
 def core():
-    return bigraded_core(
+    return make_core(
         dims=(1, 2),
         max_trunc=(2, 2),
         default_trunc=(2, 1),
@@ -330,7 +330,7 @@ def test_nonaccumulating_bigraded_blocks_seed_each_block_exactly_once(core):
     _assert_tensor_allclose(_slice_block_axis(emitted, 0), starting_point)
 
 
-def test_signature_class_binds_a_bigraded_core(core):
+def test_signature_class_binds_a_bidegree_core(core):
     path = _random_path(
         jr.PRNGKey(207),
         steps=6,
@@ -353,7 +353,7 @@ def test_signature_class_binds_a_bigraded_core(core):
 
 def test_package_default_drives_operations_and_signatures_then_resets():
     initial_core, initial_seq = td.get_default_core_pair()
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=(2, 2),
         default_trunc=(1, 1),

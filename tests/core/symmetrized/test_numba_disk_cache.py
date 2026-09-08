@@ -15,6 +15,7 @@ from tensordev.core.bigraded.symmetrized._compiled_generator import (
 )
 from tensordev.core.bigraded.symmetrized._compiled_plans import (
     compile_concatenation_targets,
+    compile_doubleprime_generator_destination,
     compile_doubleprime_generator_targets,
 )
 from tensordev.core.bigraded.symmetrized._compiled_gamma import (
@@ -44,6 +45,15 @@ compile_doubleprime_generator_targets(
     base.grade_plan((2, 1)).placements,
     rank_table,
     output_rank_count=output.rank_count,
+    compiled=True,
+)
+compile_doubleprime_generator_destination(
+    output.placements,
+    rank_table,
+    source_rank_count=base.grade_plan((2, 1)).rank_count,
+    doubleprime_rank_count=(
+        output.rank_count - base.grade_plan((1, 2)).rank_count
+    ),
     compiled=True,
 )
 compile_partially_symmetrized_shear_shuffle_support(
@@ -88,6 +98,7 @@ def test_quotient_emitters_load_their_numba_disk_cache(tmp_path):
     log = second.stdout + second.stderr
     emitter_names = (
         "_emit_concatenation_targets",
+        "_emit_doubleprime_generator_destination",
         "_emit_doubleprime_generator_targets",
         "_emit_target_maps",
         "_emit_prime_generator_support",

@@ -148,7 +148,7 @@ class BaseKernel(ABC):
         """
         Normalize a public input into the subclass-specific batched sample format.
 
-        Returns a batched representation with the empirical sample axis on axis ``0``.
+        Returns a batched result with the empirical sample axis on axis ``0``.
         """
         raise NotImplementedError
 
@@ -369,4 +369,3 @@ class BaseKernel(ABC):
         Kxx = self.compute_Gram(X, X, sym=True, max_batch=max_batch, increment_input=increment_input)
         Kxy = self.compute_Gram(X, Y, sym=False, max_batch=max_batch, increment_input=increment_input)
         return self._off_diagonal_mean(Kxx) - 2.0 * jnp.mean(Kxy)
-

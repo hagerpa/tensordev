@@ -187,18 +187,48 @@ def test_public_full_series_quotient_shuffle_laws(coordinates):
         trunc=trunc,
     )
     lhs = (
-        core.tensor_signature_inner_product(
+        core.tensor_shear_pairing(
             character_left, ordered_signature
         )
-        * core.tensor_signature_inner_product(
+        * core.tensor_shear_pairing(
             character_right, ordered_signature
         )
     )
-    rhs = core.tensor_signature_inner_product(
+    rhs = core.tensor_shear_pairing(
         character_product,
         ordered_signature,
     )
     np.testing.assert_allclose(rhs, lhs, atol=ATOL, rtol=RTOL)
+
+
+def test_compact_shear_pairing_obeys_notebook_square_identity():
+    trunc = (2, 2)
+    standard = JaxPartiallySymmetrizedBigraded(
+        dims=(1, 2),
+        max_trunc=trunc,
+    )
+    shear = JaxPartiallySymmetrizedShearBigraded(
+        plan_store=standard.plan_store,
+        bridge_plan_store=standard.bridge_plan_store,
+        precompute_shuffle=True,
+    )
+    path = jnp.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [0.2, -0.1, 0.05],
+            [-0.1, 0.25, 0.15],
+            [0.15, 0.3, -0.2],
+        ],
+        dtype=jnp.float64,
+    )
+    signature = path_signature(path, trunc=trunc, core=standard)
+    ell = shear.tensor_from_standard_coordinates(signature[:2, :2])
+    square = shear.tensor_shuffle_product(ell, ell, trunc=trunc)
+
+    factor = shear.tensor_shear_pairing(ell, signature)
+    product = shear.tensor_shear_pairing(square, signature)
+
+    np.testing.assert_allclose(product, factor**2, atol=ATOL, rtol=RTOL)
 
 
 def _plan_snapshot(core):

@@ -77,7 +77,7 @@ def _prime_placement_matrix(
                 "rank order."
             )
     # Normalize compact caller dtypes once so all vectorized index arithmetic
-    # has one signed, fixed-width representation.
+    # has one signed, fixed-width encoding.
     return np.array(placements, dtype=np.int64, order="C", copy=True)
 
 

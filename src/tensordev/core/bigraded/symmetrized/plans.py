@@ -1,4 +1,4 @@
-"""Host plans for the partially symmetrized bigraded representation."""
+"""Host plans for partially symmetrized bigraded blocks."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from tensordev.core.bigraded.layout import _build_active_layout
 from tensordev.core.bigraded.symmetrized._compiled import _binomial_table
 from tensordev.core.bigraded.symmetrized._compiled_plans import (
     compile_concatenation_targets,
+    compile_doubleprime_generator_destination,
     compile_doubleprime_generator_targets,
     compile_placement_array,
 )
@@ -22,7 +23,11 @@ from tensordev.core.bigraded.symmetrized.combinatorics import (
 )
 from tensordev.core.bigraded.types import Bidegree, BigradedSpec, _bidegree
 from tensordev.core.utils.precompute import _readonly, _unsigned_index_dtype
-from tensordev.core.utils.segmented import SegmentedRankPlan
+from tensordev.core.utils.segmented import (
+    DestinationRankPlan,
+    SegmentedRankPlan,
+    apply_destination_rank_plan,
+)
 
 
 _MEMORY_CATEGORIES = (
@@ -35,6 +40,9 @@ _MEMORY_CATEGORIES = (
 
 
 _COMPILED_PLAN_ENTRY_THRESHOLD = 100_000
+# Small actions compile faster as one direct scatter.  Above this scalar-work
+# count the destination plan reduces the update set enough to repay its gather.
+_DESTINATION_GENERATOR_WORK_THRESHOLD = 128
 
 
 def _index_dtype(maximum: int):
@@ -47,6 +55,76 @@ def _index_dtype(maximum: int):
 
 def _index_itemsize(maximum: int) -> int:
     return np.dtype(_index_dtype(maximum)).itemsize
+
+
+def _doubleprime_generator_counts(
+    d_doubleprime: int,
+    output_grade: Bidegree,
+) -> tuple[int, int, int, int]:
+    """Return output, source, double-prime-prefix, and edge counts."""
+    n, m = output_grade
+    if m <= 0:
+        raise ValueError("a double-prime generator output must have m > 0")
+    output_rank_count = multiset_placement_count(
+        d_doubleprime,
+        output_grade,
+    )
+    source_rank_count = multiset_placement_count(
+        d_doubleprime,
+        (n, m - 1),
+    )
+    prime_rank_count = (
+        multiset_placement_count(d_doubleprime, (n - 1, m))
+        if n > 0
+        else 0
+    )
+    doubleprime_rank_count = output_rank_count - prime_rank_count
+    edge_count = d_doubleprime * source_rank_count
+    if not source_rank_count <= doubleprime_rank_count <= edge_count:
+        raise AssertionError("invalid double-prime generator rank counts")
+    return (
+        output_rank_count,
+        source_rank_count,
+        doubleprime_rank_count,
+        edge_count,
+    )
+
+
+def _destination_generator_memory_bytes(
+    *,
+    source_rank_count: int,
+    doubleprime_rank_count: int,
+    edge_count: int,
+) -> int:
+    selected_count = edge_count - source_rank_count
+    collision_count = edge_count - doubleprime_rank_count
+    return int(
+        selected_count * _index_itemsize(edge_count - 1)
+        + collision_count * _index_itemsize(doubleprime_rank_count - 1)
+    )
+
+
+def _use_destination_generator_plan(
+    d_doubleprime: int,
+    *,
+    output_rank_count: int,
+    source_rank_count: int,
+    doubleprime_rank_count: int,
+    edge_count: int,
+    dense_prime_width: int,
+) -> bool:
+    """Choose destination execution where it is structurally favorable."""
+    destination_bytes = _destination_generator_memory_bytes(
+        source_rank_count=source_rank_count,
+        doubleprime_rank_count=doubleprime_rank_count,
+        edge_count=edge_count,
+    )
+    forward_bytes = edge_count * _index_itemsize(output_rank_count - 1)
+    return d_doubleprime == 1 or (
+        edge_count * dense_prime_width
+        >= _DESTINATION_GENERATOR_WORK_THRESHOLD
+        and destination_bytes <= forward_bytes
+    )
 
 
 def _validated_capacity(
@@ -63,7 +141,7 @@ def _validated_capacity(
     spec = BigradedSpec(
         *normalized_dims,
         normalized_truncation,
-        representation="partially_symmetrized",
+        partially_symmetrized=True,
     )
     return normalized_dims, normalized_truncation, spec
 
@@ -79,7 +157,7 @@ def _expected_plan_memory_bytes_by_category(
         max_truncation,
     )
     del normalized_truncation
-    _, d_doubleprime = normalized_dims
+    d_prime, d_doubleprime = normalized_dims
     memory = {name: 0 for name in _MEMORY_CATEGORIES}
 
     rank_counts = {}
@@ -93,15 +171,33 @@ def _expected_plan_memory_bytes_by_category(
             * _index_itemsize(m)
         )
         if m > 0:
-            source_count = multiset_placement_count(
+            (
+                output_count,
+                source_count,
+                doubleprime_count,
+                edge_count,
+            ) = _doubleprime_generator_counts(
                 d_doubleprime,
-                (n, m - 1),
+                (n, m),
             )
-            memory["shared_doubleprime_generator_maps"] += (
-                d_doubleprime
-                * source_count
-                * _index_itemsize(rank_count - 1)
-            )
+            if _use_destination_generator_plan(
+                d_doubleprime,
+                output_rank_count=output_count,
+                source_rank_count=source_count,
+                doubleprime_rank_count=doubleprime_count,
+                edge_count=edge_count,
+                dense_prime_width=d_prime**n,
+            ):
+                generator_bytes = _destination_generator_memory_bytes(
+                    source_rank_count=source_count,
+                    doubleprime_rank_count=doubleprime_count,
+                    edge_count=edge_count,
+                )
+            else:
+                generator_bytes = edge_count * _index_itemsize(
+                    output_count - 1
+                )
+            memory["shared_doubleprime_generator_maps"] += generator_bytes
 
     N, M = spec.truncation
     grades = tuple(spec.grades)
@@ -179,25 +275,57 @@ class DoublePrimeGeneratorPlan:
 
     output_grade: Bidegree
     source_grade: Bidegree
-    target_ranks: np.ndarray
+    target_ranks: np.ndarray | None
+    destination_plan: DestinationRankPlan | None
     source_rank_count: int
     output_rank_count: int
+    doubleprime_rank_count: int
     d_doubleprime: int
     dense_prime_width: int
 
     def __post_init__(self) -> None:
-        expected = (self.d_doubleprime, self.source_rank_count)
-        if self.target_ranks.shape != expected:
+        if (self.target_ranks is None) == (self.destination_plan is None):
             raise ValueError(
-                f"target_ranks has shape {self.target_ranks.shape}, expected "
-                f"{expected}."
+                "exactly one generator execution plan must be supplied"
             )
+        if not 0 < self.doubleprime_rank_count <= self.output_rank_count:
+            raise ValueError("invalid double-prime output prefix")
+        if self.target_ranks is not None:
+            expected = (self.d_doubleprime, self.source_rank_count)
+            if self.target_ranks.shape != expected:
+                raise ValueError(
+                    f"target_ranks has shape {self.target_ranks.shape}, "
+                    f"expected {expected}."
+                )
+            if self.target_ranks.size:
+                if int(self.target_ranks.max()) >= self.doubleprime_rank_count:
+                    raise ValueError(
+                        "generator targets must lie in the double-prime prefix"
+                    )
+        else:
+            destination = self.destination_plan
+            if destination is None:
+                raise AssertionError("missing destination plan")
+            if destination.edge_count != (
+                self.d_doubleprime * self.source_rank_count
+            ):
+                raise ValueError("destination edge count is inconsistent")
+            if destination.output_rank_count != self.doubleprime_rank_count:
+                raise ValueError("destination output count is inconsistent")
+
+    @property
+    def uses_destination_order(self) -> bool:
+        return self.destination_plan is not None
 
     def memory_bytes(self) -> int:
+        if self.destination_plan is not None:
+            return self.destination_plan.memory_bytes()
+        if self.target_ranks is None:
+            raise AssertionError("missing generator plan")
         return int(self.target_ranks.nbytes)
 
 
-def apply_doubleprime_generator_block(
+def apply_doubleprime_generator_prefix(
     xp: Any,
     block,
     generator,
@@ -205,7 +333,7 @@ def apply_doubleprime_generator_block(
     *,
     scatter_add,
 ):
-    """Apply the shared double-prime generator contribution."""
+    """Apply the double-prime contribution in its compact rank prefix."""
 
     source_width = plan.source_rank_count * plan.dense_prime_width
     if block.ndim == 0 or block.shape[-1] != source_width:
@@ -229,19 +357,69 @@ def apply_doubleprime_generator_block(
         generator,
         batch + (plan.d_doubleprime,),
     )
-    output = xp.zeros(
-        batch + (plan.output_rank_count, plan.dense_prime_width),
-        dtype=xp.result_type(block.dtype, generator.dtype),
+    values = (
+        source[..., None, :, :]
+        * generator[..., :, None, None]
+    ).reshape(
+        batch
+        + (
+            plan.d_doubleprime * plan.source_rank_count,
+            plan.dense_prime_width,
+        )
     )
-    for letter in range(plan.d_doubleprime):
-        values = source * generator[..., letter, None, None]
+    if plan.destination_plan is not None:
+        output = apply_destination_rank_plan(
+            xp,
+            values,
+            plan.destination_plan,
+            scatter_add=scatter_add,
+        )
+    else:
+        if plan.target_ranks is None:
+            raise AssertionError("missing generator target map")
+        output = xp.zeros(
+            batch
+            + (plan.doubleprime_rank_count, plan.dense_prime_width),
+            dtype=xp.result_type(block.dtype, generator.dtype),
+        )
         output = scatter_add(
             output,
-            xp.asarray(plan.target_ranks[letter]),
+            xp.asarray(plan.target_ranks).reshape(-1),
             values,
         )
     return output.reshape(
-        batch + (plan.output_rank_count * plan.dense_prime_width,)
+        batch + (plan.doubleprime_rank_count * plan.dense_prime_width,)
+    )
+
+
+def apply_doubleprime_generator_block(
+    xp: Any,
+    block,
+    generator,
+    plan: DoublePrimeGeneratorPlan,
+    *,
+    scatter_add,
+):
+    """Apply the double-prime contribution in the full output layout."""
+    output = apply_doubleprime_generator_prefix(
+        xp,
+        block,
+        generator,
+        plan,
+        scatter_add=scatter_add,
+    )
+    if plan.doubleprime_rank_count == plan.output_rank_count:
+        return output
+    batch = output.shape[:-1]
+    padding_width = (
+        plan.output_rank_count - plan.doubleprime_rank_count
+    ) * plan.dense_prime_width
+    return xp.concatenate(
+        (
+            output,
+            xp.zeros(batch + (padding_width,), dtype=output.dtype),
+        ),
+        axis=-1,
     )
 
 
@@ -443,25 +621,62 @@ class PartiallySymmetrizedPlanStore:
                 continue
             source_grade = n, m - 1
             source_plan = self._grade_plans[source_grade]
-            targets = compile_doubleprime_generator_targets(
-                source_plan.placements,
-                binomial,
-                output_rank_count=output_plan.rank_count,
-                compiled=self._use_compiled_plan_builder,
+            (
+                output_rank_count,
+                source_rank_count,
+                doubleprime_rank_count,
+                edge_count,
+            ) = _doubleprime_generator_counts(
+                d_doubleprime,
+                output_grade,
             )
-            for letter_targets in targets:
-                if np.unique(letter_targets).size != letter_targets.size:
-                    raise AssertionError(
-                        "double-prime generator targets must be injective for "
-                        f"each fixed letter at output grade {output_grade}."
+            if output_plan.rank_count != output_rank_count:
+                raise AssertionError("inconsistent output rank count")
+            if source_plan.rank_count != source_rank_count:
+                raise AssertionError("inconsistent source rank count")
+
+            use_destination = _use_destination_generator_plan(
+                d_doubleprime,
+                output_rank_count=output_rank_count,
+                source_rank_count=source_rank_count,
+                doubleprime_rank_count=doubleprime_rank_count,
+                edge_count=edge_count,
+                dense_prime_width=d_prime**n,
+            )
+            if use_destination:
+                targets = None
+                destination_plan = (
+                    compile_doubleprime_generator_destination(
+                        output_plan.placements,
+                        binomial,
+                        source_rank_count=source_rank_count,
+                        doubleprime_rank_count=doubleprime_rank_count,
+                        compiled=self._use_compiled_plan_builder,
                     )
+                )
+            else:
+                targets = compile_doubleprime_generator_targets(
+                    source_plan.placements,
+                    binomial,
+                    output_rank_count=output_rank_count,
+                    compiled=self._use_compiled_plan_builder,
+                )
+                destination_plan = None
+                for letter_targets in targets:
+                    if np.unique(letter_targets).size != letter_targets.size:
+                        raise AssertionError(
+                            "double-prime generator targets must be injective "
+                            f"at output grade {output_grade}."
+                        )
             self._doubleprime_generator_plans[output_grade] = (
                 DoublePrimeGeneratorPlan(
                     output_grade=output_grade,
                     source_grade=source_grade,
                     target_ranks=targets,
+                    destination_plan=destination_plan,
                     source_rank_count=source_plan.rank_count,
                     output_rank_count=output_plan.rank_count,
+                    doubleprime_rank_count=doubleprime_rank_count,
                     d_doubleprime=d_doubleprime,
                     dense_prime_width=d_prime**n,
                 )
@@ -545,7 +760,7 @@ class PartiallySymmetrizedPlanStore:
                 truncation=truncation,
                 include_scalar=include_scalar,
                 coordinates=coordinates,
-                representation="partially_symmetrized",
+                partially_symmetrized=True,
             )
             self._active_layouts[key] = layout
             return layout
@@ -564,7 +779,7 @@ class PartiallySymmetrizedPlanStore:
                 "segment_metadata"
             ]
         memory["shared_doubleprime_generator_maps"] = sum(
-            plan.target_ranks.nbytes
+            plan.memory_bytes()
             for plan in self._doubleprime_generator_plans.values()
         )
         return {name: int(memory[name]) for name in _MEMORY_CATEGORIES}
@@ -598,4 +813,5 @@ __all__ = [
     "PartiallySymmetrizedGradePlan",
     "PartiallySymmetrizedPlanStore",
     "apply_doubleprime_generator_block",
+    "apply_doubleprime_generator_prefix",
 ]

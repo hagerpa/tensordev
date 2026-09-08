@@ -1,4 +1,4 @@
-"""Conversion from partially symmetrized to ordered representation."""
+"""Conversion from partially symmetrized to ordered coordinates."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from tensordev.core.bigraded import BigradedTensor
 
 
 def _cores(coordinates):
-    ordered_standard = td.bigraded_core(
+    ordered_standard = td.make_core(
         dims=(1, 2),
         max_trunc=(1, 2),
     )
@@ -22,7 +22,7 @@ def _cores(coordinates):
         if coordinates == "standard"
         else td.shear_core(ordered_standard)
     )
-    return ordered, td.symmetrized_core(ordered)
+    return ordered, td.symmetrize_core(ordered)
 
 
 def _random_tensor(core, key, *, trunc, batch, include_scalar=True):
@@ -66,7 +66,7 @@ def test_tensor_to_ordered_is_jittable_and_preserves_tensor_metadata(
     assert ordered.truncation == (1, 1)
     assert ordered.spec.include_scalar is False
     assert ordered.spec.coordinates == coordinates
-    assert ordered.spec.representation == "ordered"
+    assert ordered.spec.partially_symmetrized is False
     assert ordered.batch_shape == words.batch_shape
     assert ordered.dtype == words.dtype
     for grade in ordered.grades:

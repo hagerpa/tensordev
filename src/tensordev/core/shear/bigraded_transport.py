@@ -1,4 +1,4 @@
-"""Representation-neutral coordinate transport for bidegree shear cores."""
+"""Coordinate transport shared by bidegree shear cores."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ from tensordev.core.utils.annotations import jit as dummy_jit
 
 
 class BigradedShearCoordinateCore(ShearCoordinateCore):
-    """Bidegree-shaped drivers shared by shear representations.
+    """Bidegree-shaped drivers shared by shear cores.
 
     Concrete cores provide the four coordinate block actions and the standard
-    representation algebra hooks.  This layer only transports those hooks and
-    assembles representation-preserving ``BigradedTensor`` elements.
+    block-algebra hooks.  This layer only transports those hooks and assembles
+    ``BigradedTensor`` elements without changing partial symmetrization.
     """
 
     def _coordinate_element(
@@ -116,7 +116,8 @@ class BigradedShearCoordinateCore(ShearCoordinateCore):
             and A.spec.include_scalar
             and B.spec.include_scalar
         )
-        layout = self.resolve_layout(trunc, include_scalar=include_scalar)
+        active = self._effective_product_truncation(A, B, trunc)
+        layout = self.resolve_layout(active, include_scalar=include_scalar)
         batch = self._result_batch(A, B)
         dtype = self._result_dtype(A, B)
 
@@ -143,7 +144,7 @@ class BigradedShearCoordinateCore(ShearCoordinateCore):
         right_grade,
         output_grade,
     ):
-        """Apply the representation's native shear shuffle."""
+        """Apply the core's native shear shuffle."""
         return self._gamma_shuffle_block(
             left,
             right,

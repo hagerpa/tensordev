@@ -51,37 +51,41 @@ def _assert_tensors_close(actual, expected, *, atol=2e-6, rtol=2e-6):
 
 
 @pytest.mark.parametrize(
-    ("representation", "expected_type"),
+    ("partially_symmetrized", "expected_type"),
     (
-        ("ordered", JaxBigraded),
-        ("partially_symmetrized", JaxPartiallySymmetrizedBigraded),
+        (False, JaxBigraded),
+        (True, JaxPartiallySymmetrizedBigraded),
     ),
 )
-def test_bigraded_core_selects_the_public_representation(
-    representation,
+def test_make_core_selects_partial_symmetrization(
+    partially_symmetrized,
     expected_type,
 ):
-    core = td.bigraded_core(
+    core = td.make_core(
         dims=(1, 1),
         max_trunc=(1, 1),
         default_trunc=(1, 0),
-        representation=representation,
+        partially_symmetrized=partially_symmetrized,
         precompute_shuffle="generator",
     )
 
     assert isinstance(core, expected_type)
-    assert core.representation == representation
+    assert core.partially_symmetrized is partially_symmetrized
     assert core.coordinates == "standard"
     assert core.default_truncation == (1, 0)
     assert _shuffle_scope(core) == "generator"
 
 
-def test_bigraded_core_rejects_an_unknown_representation():
-    with pytest.raises(ValueError, match="partially_symmetrized"):
-        td.bigraded_core(
+@pytest.mark.parametrize("value", ("quotient", 1))
+def test_make_core_rejects_nonboolean_partial_symmetrization(value):
+    with pytest.raises(
+        TypeError,
+        match="partially_symmetrized must be a bool",
+    ):
+        td.make_core(
             dims=(1, 1),
             max_trunc=(1, 1),
-            representation="quotient",
+            partially_symmetrized=value,
         )
 
 
@@ -135,21 +139,21 @@ def test_set_default_core_constructs_and_directly_rebinds_quotient_cores(
         dims=(1, 1),
         max_trunc=(1, 1),
         default_trunc=(1, 1),
-        representation="partially_symmetrized",
+        partially_symmetrized=True,
         coordinates=coordinates,
         precompute_shuffle="generator",
     )
 
     assert isinstance(core, expected_type)
     assert core is td.get_default_core()
-    assert core.representation == "partially_symmetrized"
+    assert core.partially_symmetrized is True
     assert core.coordinates == coordinates
     assert _shuffle_scope(core) == "generator"
     assert previous_product is not td.tensor_product
     for name in (
         "tensor_product",
         "tensor_exponential",
-        "tensor_signature_inner_product",
+        "tensor_shear_pairing",
         "tensor_partially_symmetrize",
         "tensor_to_ordered",
         "tensor_from_standard_coordinates",
@@ -157,25 +161,22 @@ def test_set_default_core_constructs_and_directly_rebinds_quotient_cores(
     ):
         assert getattr(td, name).__self__ is core
     assert hasattr(core.tensor_adjoint_product.__func__, "lower")
-    assert (
-        td.tensor_signature_inner_product.__func__
-        is td.tensor_shear_inner_product.__func__
-    )
+    assert td.tensor_shear_pairing.__self__ is core
 
     generator = jnp.asarray([0.2, -0.3], dtype=jnp.float32)
     result = td.tensor_exponential((generator,), trunc=(1, 1))
-    assert result.spec.representation == "partially_symmetrized"
+    assert result.spec.partially_symmetrized is True
     assert result.spec.coordinates == coordinates
     ordered = td.tensor_to_ordered(result)
-    assert ordered.spec.representation == "ordered"
+    assert ordered.spec.partially_symmetrized is False
     assert ordered.spec.coordinates == coordinates
 
 
 @pytest.mark.parametrize("coordinates", ("standard", "shear"))
-def test_symmetrized_core_inherits_source_metadata_and_shuffle_scope(
+def test_symmetrize_core_inherits_source_metadata_and_shuffle_scope(
     coordinates,
 ):
-    ordered_standard = td.bigraded_core(
+    ordered_standard = td.make_core(
         dims=(1, 1),
         max_trunc=(2, 1),
         default_trunc=(1, 1),
@@ -187,7 +188,7 @@ def test_symmetrized_core_inherits_source_metadata_and_shuffle_scope(
         else td.shear_core(ordered_standard)
     )
 
-    core = td.symmetrized_core(source)
+    core = td.symmetrize_core(source)
 
     expected_type = (
         JaxPartiallySymmetrizedBigraded
@@ -199,7 +200,7 @@ def test_symmetrized_core_inherits_source_metadata_and_shuffle_scope(
     assert core.max_truncation == source.max_truncation
     assert core.default_truncation == source.default_truncation
     assert core.coordinates == source.coordinates
-    assert core.representation == "partially_symmetrized"
+    assert core.partially_symmetrized is True
     assert _shuffle_scope(core) == "generator"
 
 
@@ -207,17 +208,17 @@ def test_symmetrized_core_inherits_source_metadata_and_shuffle_scope(
     ("override", "expected_scope"),
     ((False, "none"), ("generator", "generator"), (True, "full")),
 )
-def test_symmetrized_core_allows_an_explicit_shuffle_override(
+def test_symmetrize_core_allows_an_explicit_shuffle_override(
     override,
     expected_scope,
 ):
-    source = td.bigraded_core(
+    source = td.make_core(
         dims=(1, 1),
         max_trunc=(1, 1),
         precompute_shuffle="generator",
     )
 
-    core = td.symmetrized_core(
+    core = td.symmetrize_core(
         source,
         precompute_shuffle=override,
     )
@@ -225,40 +226,40 @@ def test_symmetrized_core_allows_an_explicit_shuffle_override(
     assert _shuffle_scope(core) == expected_scope
 
 
-def test_symmetrized_core_rejects_incompatible_sources_and_bad_overrides():
-    ordered = td.bigraded_core(dims=(1, 1), max_trunc=(1, 1))
-    quotient = td.symmetrized_core(ordered)
+def test_symmetrize_core_rejects_incompatible_sources_and_bad_overrides():
+    ordered = td.make_core(dims=(1, 1), max_trunc=(1, 1))
+    quotient = td.symmetrize_core(ordered)
     quotient_shear = td.shear_core(quotient)
 
     for source in (quotient, quotient_shear):
         with pytest.raises(TypeError, match="already partially symmetrized"):
-            td.symmetrized_core(source)
+            td.symmetrize_core(source)
 
-    total = td.total_degree_core(d=2, max_trunc=1)
+    total = td.make_core(dims=2, max_trunc=1)
     total_shear = td.shear_core(total, dims=(1, 1))
     for source in (total, total_shear):
         with pytest.raises(TypeError, match="bidegree source core"):
-            td.symmetrized_core(source)
+            td.symmetrize_core(source)
 
     with pytest.raises(TypeError, match="supports built-in"):
-        td.symmetrized_core(object())
+        td.symmetrize_core(object())
     with pytest.raises(TypeError, match="precompute_shuffle"):
-        td.symmetrized_core(ordered, precompute_shuffle=1)
+        td.symmetrize_core(ordered, precompute_shuffle=1)
 
 
-def test_shear_core_preserves_quotient_representation_and_reuses_stores():
-    standard = td.bigraded_core(
+def test_shear_core_preserves_partial_symmetrization_and_reuses_stores():
+    standard = td.make_core(
         dims=(1, 1),
         max_trunc=(2, 1),
         default_trunc=(1, 1),
-        representation="partially_symmetrized",
+        partially_symmetrized=True,
         precompute_shuffle="generator",
     )
 
     shear = td.shear_core(standard)
 
     assert isinstance(shear, JaxPartiallySymmetrizedShearBigraded)
-    assert shear.representation == standard.representation
+    assert shear.partially_symmetrized is standard.partially_symmetrized
     assert shear.coordinates == "shear"
     assert shear.dims == standard.dims
     assert shear.max_truncation == standard.max_truncation
@@ -290,15 +291,15 @@ def test_shear_core_preserves_quotient_representation_and_reuses_stores():
 
 
 def test_standard_shear_and_symmetrization_construction_square_commutes():
-    ordered_standard = td.bigraded_core(
+    ordered_standard = td.make_core(
         dims=(1, 1),
         max_trunc=(2, 2),
         default_trunc=(2, 2),
     )
-    quotient_standard = td.symmetrized_core(ordered_standard)
+    quotient_standard = td.symmetrize_core(ordered_standard)
     quotient_then_shear = td.shear_core(quotient_standard)
     ordered_shear = td.shear_core(ordered_standard)
-    shear_then_quotient = td.symmetrized_core(ordered_shear)
+    shear_then_quotient = td.symmetrize_core(ordered_shear)
 
     generator = jnp.asarray([0.2, -0.3], dtype=jnp.float32)
     ordered_value = ordered_standard.tensor_exponential(
@@ -352,7 +353,7 @@ def test_total_partially_symmetrized_default_failure_is_atomic(kwargs):
     with pytest.raises(ValueError, match="requires bidegree truncation"):
         td.set_default_core(
             **kwargs,
-            representation="partially_symmetrized",
+            partially_symmetrized=True,
         )
 
     assert td.get_default_core_pair() is initial_pair
@@ -364,9 +365,9 @@ def test_partially_symmetrized_factories_classes_and_operations_are_exported():
     expected_root_exports = {
         "JaxPartiallySymmetrizedBigraded",
         "JaxPartiallySymmetrizedShearBigraded",
-        "bigraded_core",
+        "make_core",
         "shear_core",
-        "symmetrized_core",
+        "symmetrize_core",
         "tensor_partially_symmetrize",
         "tensor_partially_symmetrize_homogeneous",
         "tensor_to_ordered",
@@ -375,7 +376,7 @@ def test_partially_symmetrized_factories_classes_and_operations_are_exported():
     assert {
         "JaxPartiallySymmetrizedBigraded",
         "JaxPartiallySymmetrizedShearBigraded",
-        "symmetrized_core",
+        "symmetrize_core",
     } <= set(core_api.__all__)
     assert (
         td.JaxPartiallySymmetrizedBigraded
@@ -387,6 +388,13 @@ def test_partially_symmetrized_factories_classes_and_operations_are_exported():
         is core_api.JaxPartiallySymmetrizedShearBigraded
         is JaxPartiallySymmetrizedShearBigraded
     )
-    assert td.bigraded_core is core_api.bigraded_core
+    assert td.make_core is core_api.make_core
     assert td.shear_core is core_api.shear_core
-    assert td.symmetrized_core is core_api.symmetrized_core
+    assert td.symmetrize_core is core_api.symmetrize_core
+    for removed in (
+        "total_degree_core",
+        "bigraded_core",
+        "symmetrized_core",
+    ):
+        assert not hasattr(td, removed)
+        assert not hasattr(core_api, removed)

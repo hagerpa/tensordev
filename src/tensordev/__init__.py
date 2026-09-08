@@ -10,10 +10,9 @@ from .core import (
     JaxPartiallySymmetrizedBigraded,
     JaxPartiallySymmetrizedShearBigraded,
     JaxSequentialCore,
-    bigraded_core,
+    make_core,
     shear_core,
-    symmetrized_core,
-    total_degree_core,
+    symmetrize_core,
 )
 from .development import FreeDevelopment, free_development, Signature, path_signature
 from ._backend import (
@@ -30,6 +29,7 @@ from ._backend import (
 from .volterra import (
     vsig,
     VolterraSignature,
+    ConvolutionKernel,
     FractionalKernel,
     GammaKernel,
     FSSKConvolutionKernel,
@@ -61,21 +61,18 @@ def core_expected_memory(
     *,
     dims: int | tuple[int, int],
     max_trunc: int | tuple[int, int],
-    representation: Literal[
-        "ordered", "partially_symmetrized"
-    ] = "ordered",
+    partially_symmetrized: bool = False,
     coordinates: Literal["standard", "shear"] = "standard",
     unit: str = "MiB",
     precompute_shuffle: bool | Literal["generator"] = False,
     breakdown: bool = False,
 ) -> float | dict[str, float]:
-    """Estimate exact eager plan-buffer payload for the public core factories.
+    """Estimate exact eager plan-buffer payload for :func:`make_core`.
 
-    Dispatch matches :func:`set_default_core`: standard coordinates use an
+    Dispatch matches :func:`make_core`: standard coordinates use an
     integer/integer total configuration or pair/pair bidegree configuration.
-    Bidegree cores accept ``representation="ordered"`` or
-    ``"partially_symmetrized"``.  Shear coordinates require pair-valued
-    ``dims`` and use the shape of
+    Bidegree cores may use ``partially_symmetrized=True``. Shear coordinates
+    require pair-valued ``dims`` and use the shape of
     ``max_trunc`` to select total degree or bidegree.  Results default to
     ``"MiB"``; ``unit`` may instead be ``"bytes"``, ``"KiB"``, or ``"GiB"``.
     Set ``breakdown=True`` to return the category mapping including ``total``.
@@ -103,7 +100,7 @@ def core_expected_memory(
     configuration = _resolve_core_configuration(
         dims=dims,
         max_trunc=max_trunc,
-        representation=representation,
+        partially_symmetrized=partially_symmetrized,
         coordinates=coordinates,
         precompute_shuffle=precompute_shuffle,
     )
@@ -129,10 +126,9 @@ __all__ = [
     "JaxPartiallySymmetrizedShearBigraded",
     "BigradedSpec",
     "BigradedTensor",
-    "total_degree_core",
-    "bigraded_core",
+    "make_core",
     "shear_core",
-    "symmetrized_core",
+    "symmetrize_core",
     "core_expected_memory",
     "get_default_core",
     "get_default_core_pair",
@@ -154,10 +150,8 @@ __all__ = [
     "tensor_fmexp",
     "tensor_inner_product",
     "tensor_inner_product_homogeneous",
-    "tensor_signature_inner_product",
-    "tensor_signature_inner_product_homogeneous",
-    "tensor_shear_inner_product",
-    "tensor_shear_inner_product_homogeneous",
+    "tensor_shear_pairing",
+    "tensor_shear_pairing_homogeneous",
     "tensor_adjoint_product",
     "tensor_adjoint_left_homogeneous",
     "tensor_adjoint_right_homogeneous",
@@ -172,7 +166,6 @@ __all__ = [
     "tensor_densify",
     "tensor_from_flat",
     "tensor_to_flat",
-    "tensor_flatten",
     "tensor_slice",
     "tensor_from_standard_coordinates",
     "tensor_to_standard_coordinates",
@@ -187,6 +180,7 @@ __all__ = [
     # volterra
     "vsig",
     "VolterraSignature",
+    "ConvolutionKernel",
     "FractionalKernel",
     "GammaKernel",
     "FSSKConvolutionKernel",
@@ -227,10 +221,8 @@ _CORE_METHOD_EXPORTS = (
     # inner product / adjoint
     "tensor_inner_product",
     "tensor_inner_product_homogeneous",
-    "tensor_signature_inner_product",
-    "tensor_signature_inner_product_homogeneous",
-    "tensor_shear_inner_product",
-    "tensor_shear_inner_product_homogeneous",
+    "tensor_shear_pairing",
+    "tensor_shear_pairing_homogeneous",
     "tensor_adjoint_product",
     "tensor_adjoint_left_homogeneous",
     "tensor_adjoint_right_homogeneous",

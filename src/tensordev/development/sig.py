@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from tensordev.core.bigraded.types import BigradedTensor
 from tensordev.core.sequential import DenseElem, SequentialCore
 from tensordev.core.universal import _Array
 from tensordev._backend import (
@@ -10,7 +11,12 @@ from tensordev._backend import (
     get_default_core,
     get_default_core_pair,
 )
-from .free import free_development
+from .free import (
+    _execute_portable_free_development_call,
+    _finalize_free_development_call,
+    _prepare_free_development_call,
+    free_development,
+)
 
 
 def path_signature(
@@ -18,7 +24,7 @@ def path_signature(
         *,
         trunc: Any = None,
         increment_input: bool = False,
-        starting_point: Optional[DenseElem] = None,
+        starting_point: Optional[DenseElem | BigradedTensor] = None,
         axis: Optional[int] = None,
         block_size: Optional[int] = None,
         output_starting_point: bool = False,
@@ -28,7 +34,7 @@ def path_signature(
         parallel: bool = False,
         core: Any = None,
         seq_core: SequentialCore = None
-) -> DenseElem:
+) -> DenseElem | BigradedTensor:
     """
     Truncated signature of a scalar path.
 
@@ -45,8 +51,10 @@ def path_signature(
         a bidegree core accepts ``(N, M)`` and may supply a default.
     increment_input : bool, default False
         If True, ``x`` is already in increment form; skip differencing.
-    starting_point : DenseElem, optional
-        Left seed ``g``; the output is ``g ⊗ Sig(x)``.  Defaults to the identity.
+    starting_point : DenseElem or BigradedTensor, optional
+        Left seed ``g`` in the selected core's native tensor format; the
+        output is ``g ⊗ Sig(x)``.  Defaults to the identity of the selected
+        core.
     axis : int, optional
         Step axis of ``x``.  Defaults to ``seq_core.default_time_axis``.
     block_size : int, optional
@@ -60,7 +68,8 @@ def path_signature(
     parallel : bool, default False
         If True, pre-compute all per-step exponentials and combine with an
         associative tree scan (higher parallelism, higher memory).
-        If False, stream via sequential ``tensor_fmexp`` (lower memory, sequential depth).
+        If False, stream via sequential ``tensor_fmexp`` (lower memory,
+        sequential depth).
     core :
         Tensor algebra backend.
     seq_core : SequentialCore
@@ -68,14 +77,43 @@ def path_signature(
 
     Returns
     -------
-    DenseElem
-        Terminal signature when no blocking is requested, or packed levels
-        with a block axis at ``axis`` otherwise.
+    DenseElem or BigradedTensor
+        Tensor element in the selected core's native format.  With blocking,
+        its arrays carry a block axis at ``axis``.
     """
-    return free_development((x,), increment_input=increment_input, seq_core=seq_core, trunc=trunc, axis=axis,
-                            block_size=block_size, accumulate=accumulate, starting_point=starting_point,
-                            output_starting_point=output_starting_point, parallel=parallel,
-                            accumulate_in_tree=accumulate_in_tree, core=core)
+    call = _prepare_free_development_call(
+        (x,),
+        increment_input=increment_input,
+        seq_core=seq_core,
+        trunc=trunc,
+        axis=axis,
+        block_size=block_size,
+        accumulate=accumulate,
+        starting_point=starting_point,
+        output_starting_point=output_starting_point,
+        parallel=parallel,
+        accumulate_in_tree=accumulate_in_tree,
+        core=core,
+        colocate_with_input=True,
+    )
+
+    # Check concrete device placement before importing an executor or
+    # constructing a wordwise plan.
+    from tensordev._wordwise.dispatch import ordinary_wordwise_device_eligible
+
+    if not ordinary_wordwise_device_eligible(call):
+        return _execute_portable_free_development_call(call)
+    from tensordev._wordwise.ordinary import try_ordinary_wordwise
+
+    result = try_ordinary_wordwise(call)
+    if result is None:
+        return _execute_portable_free_development_call(call)
+    return _finalize_free_development_call(
+        call,
+        result,
+        runner_applied_seed=False,
+        runner_emitted_starting_point=False,
+    )
 
 
 @dataclass(frozen=True)
@@ -92,8 +130,9 @@ class Signature:
     trunc : int or pair of int, optional
         Active truncation. May be omitted when the bound core supplies a default.
     core : optional
-        Tensor algebra backend.  Defaults to the backend selected by the
-        ``TENSORDEV_BACKEND`` environment variable (default: ``"jax"``).
+        Tensor algebra core. Defaults to the active core configured by
+        :func:`tensordev.set_default_core` or, initially, by the
+        ``TENSORDEV_BACKEND`` environment variable.
     seq_core : SequentialCore, optional
         Sequential operations backend.  Defaults to the same backend as ``core``.
     """
@@ -125,21 +164,31 @@ class Signature:
             axis: Optional[int] = None,
             block_size: Optional[int] = None,
             accumulate: bool = True,
-            starting_point: Optional[DenseElem] = None,
+            starting_point: Optional[DenseElem | BigradedTensor] = None,
             output_starting_point: bool = False,
             parallel: bool = False,
             accumulate_in_tree: bool = False,
             increment_input: bool = False,
-    ) -> DenseElem:
+    ) -> DenseElem | BigradedTensor:
         """Compute the signature of ``x``.
 
         Forwards all arguments to :func:`path_signature` with the bound
         ``core``, ``seq_core``, and ``trunc``.
         """
-        return path_signature(x, increment_input=increment_input, accumulate=accumulate, trunc=self.trunc, axis=axis,
-                              block_size=block_size, accumulate_in_tree=accumulate_in_tree,
-                              starting_point=starting_point, output_starting_point=output_starting_point,
-                              parallel=parallel, core=self.core, seq_core=self.seq_core)
+        return path_signature(
+            x,
+            increment_input=increment_input,
+            accumulate=accumulate,
+            trunc=self.trunc,
+            axis=axis,
+            block_size=block_size,
+            accumulate_in_tree=accumulate_in_tree,
+            starting_point=starting_point,
+            output_starting_point=output_starting_point,
+            parallel=parallel,
+            core=self.core,
+            seq_core=self.seq_core,
+        )
 
 
 __all__ = ["path_signature", "Signature"]

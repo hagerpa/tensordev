@@ -6,11 +6,12 @@ import numpy as np
 import pytest
 
 import tensordev as td
-from tensordev import Jax, bigraded_core
+from tensordev import Jax, make_core
 from tensordev.core.bigraded import BigradedTensor
 from tensordev.core.jax import JaxSequentialCore
 from tensordev.core.sequential import SequentialCore
 from tensordev.core.universal import Universal
+from tensordev.sss import FSSK
 from tensordev.volterra.algebra import (
     GradeWorkset,
     resolve_volterra_algebra,
@@ -247,8 +248,8 @@ def test_total_shared_product_driver_matches_reference_lowering_and_order():
 
 
 def test_bidegree_metadata_is_active_layout_only_and_capacity_independent():
-    small = bigraded_core(dims=(1, 2), max_trunc=(2, 1))
-    large = bigraded_core(dims=(1, 2), max_trunc=(3, 3))
+    small = make_core(dims=(1, 2), max_trunc=(2, 1))
+    large = make_core(dims=(1, 2), max_trunc=(3, 3))
     algebra = resolve_volterra_algebra(small, (2, 1), 3)
     other = resolve_volterra_algebra(large, (2, 1), 3)
 
@@ -284,7 +285,7 @@ def test_bidegree_metadata_is_active_layout_only_and_capacity_independent():
 
 
 def test_bidegree_diagonal_pack_split_and_positive_embedding():
-    core = bigraded_core(dims=(1, 2), max_trunc=(2, 1))
+    core = make_core(dims=(1, 2), max_trunc=(2, 1))
     algebra = resolve_volterra_algebra(core, (2, 1), 3)
     workset = algebra.diagonal(2)
     values = (
@@ -317,7 +318,7 @@ def test_bidegree_diagonal_pack_split_and_positive_embedding():
 
 @pytest.mark.parametrize("action", ["right", "shuffle"])
 def test_bidegree_fused_generator_actions_match_native_block_kernels(action):
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 2), max_trunc=(2, 1), precompute_shuffle=True
     )
     algebra = resolve_volterra_algebra(core, (2, 1), 3)
@@ -375,7 +376,7 @@ def test_bidegree_fused_generator_actions_match_native_block_kernels(action):
 
 
 def test_one_sided_active_rectangle_filters_generator_schedule():
-    core = bigraded_core(dims=(1, 2), max_trunc=(2, 2))
+    core = make_core(dims=(1, 2), max_trunc=(2, 2))
     algebra = resolve_volterra_algebra(core, (0, 2), 3)
     z = jnp.array([[10.0, 1.0, 2.0]])
 
@@ -412,7 +413,7 @@ def test_resolution_rejects_wrong_backend_dimension_and_empty_positive_layout():
     with pytest.raises(TypeError, match="requires a JAX tensor core"):
         resolve_volterra_algebra(Universal(np), 2, 2)
 
-    core = bigraded_core(dims=(1, 2), max_trunc=(2, 1))
+    core = make_core(dims=(1, 2), max_trunc=(2, 1))
     with pytest.raises(ValueError, match="does not match bidegree dimensions"):
         resolve_volterra_algebra(core, (2, 1), 4)
     with pytest.raises(ValueError, match="at least one positive grade"):
@@ -420,7 +421,7 @@ def test_resolution_rejects_wrong_backend_dimension_and_empty_positive_layout():
 
 
 def test_shuffle_capability_is_explicit():
-    core = bigraded_core(dims=(1, 1), max_trunc=(1, 1))
+    core = make_core(dims=(1, 1), max_trunc=(1, 1))
     algebra = resolve_volterra_algebra(core, (1, 1), 2)
 
     assert not algebra.supports("shuffle")
@@ -434,7 +435,7 @@ def test_shuffle_capability_is_explicit():
 
 
 def test_volterra_shuffle_configuration_error_is_coordinate_neutral():
-    core = bigraded_core(dims=(1, 1), max_trunc=(2, 1))
+    core = make_core(dims=(1, 1), max_trunc=(2, 1))
     algebra = resolve_volterra_algebra(core, (2, 1), 2)
 
     with pytest.raises(RuntimeError, match="configure the selected core") as error:
@@ -443,7 +444,7 @@ def test_volterra_shuffle_configuration_error_is_coordinate_neutral():
 
 
 def test_core_pair_resolution_preserves_explicit_pair_and_checks_backends():
-    core = bigraded_core(dims=(1, 1), max_trunc=(1, 1))
+    core = make_core(dims=(1, 1), max_trunc=(1, 1))
     seq_core = JaxSequentialCore()
 
     assert resolve_volterra_core_pair(core, seq_core) == (core, seq_core)
@@ -468,14 +469,6 @@ def test_core_pair_resolution_preserves_explicit_pair_and_checks_backends():
                 log_degree=(1, 1),
             ),
         ),
-        (
-            "fssk_state",
-            lambda path: td.fssk_state(path, kernel=None, dt=1.0, trunc=1),
-        ),
-        (
-            "fssk_vsig",
-            lambda path: td.fssk_vsig(path, kernel=None, dt=1.0, trunc=1),
-        ),
     ),
 )
 def test_standard_specific_consumers_reject_total_degree_shear_default(
@@ -488,5 +481,28 @@ def test_standard_specific_consumers_reject_total_degree_shear_default(
                 match=rf"{feature} requires standard coordinates",
         ):
             call(jnp.zeros((3, 2)))
+    finally:
+        td.reset_default_core()
+
+
+@pytest.mark.parametrize("feature", ("fssk_state", "fssk_vsig"))
+def test_nonscalar_fssk_rejects_total_degree_shear_default(feature):
+    kernel = FSSK.from_matrix(
+        Lambda=jnp.eye(2),
+        A=jnp.stack((jnp.eye(2), jnp.eye(2))),
+        b=jnp.ones((2, 2)),
+    )
+    td.set_default_core(_ShearMarkerCore())
+    try:
+        with pytest.raises(
+                RuntimeError,
+                match=rf"{feature} supports non-standard cores only for scalar",
+        ):
+            getattr(td, feature)(
+                jnp.zeros((3, 2)),
+                kernel=kernel,
+                dt=1.0,
+                trunc=1,
+            )
     finally:
         td.reset_default_core()

@@ -40,13 +40,13 @@ _KERNEL = td.FractionalKernel(
 
 @pytest.fixture(scope="module")
 def capacity_cores():
-    small = td.bigraded_core(
+    small = td.make_core(
         dims=_DIMS,
         max_trunc=_ACTIVE,
         default_trunc=_ACTIVE,
         precompute_shuffle=False,
     )
-    large = td.bigraded_core(
+    large = td.make_core(
         dims=_DIMS,
         max_trunc=(3, 2),
         default_trunc=_ACTIVE,

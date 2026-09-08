@@ -137,7 +137,7 @@ class ShearTransformSupport:
 
     Arrays are read-only.  The table is independent of alphabet dimensions
     and numerical backends, so total-degree and bidegree plan builders can
-    adapt the same representation.
+    adapt the same array layout.
     """
 
     prime_count: int

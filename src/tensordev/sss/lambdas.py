@@ -13,7 +13,7 @@ common interface for
 Conventions
 -----------
 - Public API accepts scalar ``dt`` or rank-1 batched ``dt``.
-- Internal batched keranels use ``dt.shape == (m,)``.
+- Internal batched kernels use ``dt.shape == (m,)``.
 - For paired batched actions, the operand leading axis must match ``dt.shape[0]``.
 """
 
@@ -516,8 +516,8 @@ class DenseLambda(Lambda):
         object.__setattr__(self, "_V_inv", V_inv)
         object.__setattr__(self, "_use_eigen", use_eigen)
 
-    # -- pytree: matrix is the single source of truth; eigen arrays travel
-    #    alongside it so that JIT does not need to recompute them. ----------
+    # Matrix and cached eigen arrays remain PyTree leaves to avoid
+    # eigendecomposition under JIT.
 
     def tree_flatten(self):
         has_expm = self._expm_mat is not None
@@ -943,7 +943,7 @@ def _shifted_coeffs(rate: Array, nmax: int, zeta: Array, dt: Array, dtype: jnp.d
 
 @jax.jit
 def _complex_to_real2x2(z: Array) -> Array:
-    """Map complex scalars to their real ``2 x 2`` representation."""
+    """Map complex scalars to their real ``2 x 2`` matrix form."""
     re, im = z.real, z.imag
     return jnp.stack(
         [jnp.stack([re, -im], axis=-1), jnp.stack([im, re], axis=-1)],

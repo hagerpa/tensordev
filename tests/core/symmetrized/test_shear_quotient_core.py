@@ -53,6 +53,22 @@ def _assert_blocks_close(actual, expected, *, atol=1e-11, rtol=1e-11):
         )
 
 
+def _random_tensor(core, key, *, trunc, batch=(), include_scalar=True):
+    layout = core.resolve_layout(trunc, include_scalar=include_scalar)
+    keys = jr.split(key, len(layout.grades))
+    return BigradedTensor(
+        tuple(
+            jr.normal(
+                block_key,
+                batch + (layout.block_width(grade),),
+                dtype=jnp.float64,
+            )
+            for block_key, grade in zip(keys, layout.grades)
+        ),
+        layout.spec,
+    )
+
+
 def _quotient_doubleprime_generator(core, generator):
     plan = core.plan_store.doubleprime_generator_plan((0, 1))
     targets = jnp.asarray(plan.target_ranks[:, 0])
@@ -147,7 +163,7 @@ def test_quotient_shear_core_shares_every_capacity_store_and_active_view():
     assert core.generator_plan_store is generators
     assert core.shuffle_plan_store is shuffle
     assert core.coordinates == "shear"
-    assert core.representation == "partially_symmetrized"
+    assert core.partially_symmetrized is True
     assert {"coordinate_conversion", "generator_action", "shuffle"} <= (
         core.capabilities
     )
@@ -488,6 +504,45 @@ def test_gamma_character_law_and_homogeneous_jax_paths():
 @pytest.mark.parametrize(
     "core_type",
     (
+        JaxBigraded,
+        JaxPartiallySymmetrizedBigraded,
+        JaxShearBigraded,
+        JaxPartiallySymmetrizedShearBigraded,
+    ),
+)
+@pytest.mark.parametrize("operation", ("tensor_product", "tensor_shuffle_product"))
+def test_products_do_not_pad_beyond_the_operands_natural_rectangle(
+    core_type,
+    operation,
+):
+    core = core_type(
+        dims=(1, 1),
+        max_trunc=(2, 2),
+        precompute_shuffle=True,
+    )
+    first_level = jnp.asarray([[2.0], [3.0]], dtype=jnp.float64)
+    short = core.tensor_densify(
+        {
+            (0, 0): jnp.ones((2, 1), dtype=jnp.float64),
+            (1, 0): first_level,
+        },
+        trunc=(1, 0),
+    )
+
+    result = getattr(core, operation)(short, short, trunc=(2, 2))
+
+    assert result.truncation == (2, 0)
+    assert result.batch_shape == (2,)
+    np.testing.assert_allclose(result[(1, 0)], 2.0 * first_level)
+    degree_two_factor = 1.0 if operation == "tensor_product" else 2.0
+    np.testing.assert_allclose(
+        result[(2, 0)], degree_two_factor * first_level**2
+    )
+
+
+@pytest.mark.parametrize(
+    "core_type",
+    (
         JaxPartiallySymmetrizedBigraded,
         JaxPartiallySymmetrizedShearBigraded,
     ),
@@ -587,7 +642,7 @@ def test_hat_psi_commutes_with_q_in_both_directions():
     )
 
 
-def test_directional_signature_pairing_matches_ordered_standard_oracle():
+def test_directional_shear_pairing_matches_ordered_standard_oracle():
     dims = (1, 2)
     capacity = (2, 2)
     base = PartiallySymmetrizedPlanStore(dims, capacity)
@@ -617,7 +672,7 @@ def test_directional_signature_pairing_matches_ordered_standard_oracle():
         layout.spec,
     )
 
-    actual = core.tensor_signature_inner_product(words, signature)
+    actual = core.tensor_shear_pairing(words, signature)
     standard_words = core._coordinate_forward_transpose(words)
     lifted_words = quotient_standard._lift_partially_symmetrized(
         standard_words
@@ -625,14 +680,14 @@ def test_directional_signature_pairing_matches_ordered_standard_oracle():
     expected = ordered.tensor_inner_product(lifted_words, signature)
     np.testing.assert_allclose(actual, expected, atol=2e-11, rtol=2e-11)
     np.testing.assert_allclose(
-        jax.jit(core.tensor_signature_inner_product)(words, signature),
+        jax.jit(core.tensor_shear_pairing)(words, signature),
         expected,
         atol=2e-11,
         rtol=2e-11,
     )
 
     grade = (2, 1)
-    homogeneous = core.tensor_signature_inner_product_homogeneous(
+    homogeneous = core.tensor_shear_pairing_homogeneous(
         words[grade],
         signature[grade],
         grade=grade,
@@ -647,3 +702,239 @@ def test_directional_signature_pairing_matches_ordered_standard_oracle():
         atol=2e-11,
         rtol=2e-11,
     )
+
+
+@pytest.mark.parametrize("coordinates", ("standard", "shear"))
+def test_pairing_accepts_compact_standard_tensor_and_preserves_ordered_path(
+    coordinates,
+):
+    dims = (1, 2)
+    capacity = (2, 2)
+    ordered = JaxBigraded(dims=dims, max_trunc=capacity)
+    standard = JaxPartiallySymmetrizedBigraded(
+        dims=dims,
+        max_trunc=capacity,
+    )
+    core = (
+        standard
+        if coordinates == "standard"
+        else JaxPartiallySymmetrizedShearBigraded(
+            plan_store=standard.plan_store,
+            bridge_plan_store=standard.bridge_plan_store,
+        )
+    )
+    words = _random_tensor(
+        core,
+        jr.PRNGKey(930),
+        trunc=capacity,
+        batch=(2, 1),
+    )
+    ordered_tensor = _random_tensor(
+        ordered,
+        jr.PRNGKey(931),
+        trunc=capacity,
+        batch=(1, 3),
+    )
+    compact_tensor = standard.tensor_partially_symmetrize(ordered_tensor)
+    standard_words = (
+        words
+        if coordinates == "standard"
+        else core._coordinate_forward_transpose(words)
+    )
+
+    compact = core.tensor_shear_pairing(words, compact_tensor)
+    ordered_result = core.tensor_shear_pairing(words, ordered_tensor)
+    oracle = standard.tensor_inner_product(standard_words, compact_tensor)
+
+    assert compact.shape == (2, 3)
+    np.testing.assert_allclose(compact, oracle, atol=2e-11, rtol=2e-11)
+    np.testing.assert_allclose(
+        compact,
+        ordered_result,
+        atol=2e-11,
+        rtol=2e-11,
+    )
+    np.testing.assert_allclose(
+        jax.jit(core.tensor_shear_pairing)(words, compact_tensor),
+        compact,
+        atol=2e-11,
+        rtol=2e-11,
+    )
+
+
+def test_homogeneous_pairing_flag_resolves_equal_width_permuted_layout():
+    core = JaxPartiallySymmetrizedBigraded(
+        dims=(1, 2),
+        max_trunc=(0, 1),
+    )
+    grade = (0, 1)
+    plan = core.bridge_plan_store.grade_plan(grade)
+    assert plan.ordered_block_width == plan.quotient_block_width == 2
+    assert not np.array_equal(plan.target_ranks, np.arange(plan.source_count))
+
+    words = jnp.asarray([2.0, 5.0], dtype=jnp.float64)
+    ordered_tensor = jnp.asarray([7.0, 11.0], dtype=jnp.float64)
+    compact_tensor = core.tensor_partially_symmetrize_homogeneous(
+        ordered_tensor,
+        grade=grade,
+    )
+
+    ordered_result = core.tensor_shear_pairing_homogeneous(
+        words,
+        ordered_tensor,
+        grade=grade,
+        standard_partially_symmetrized=False,
+    )
+    compact_result = core.tensor_shear_pairing_homogeneous(
+        words,
+        compact_tensor,
+        grade=grade,
+        standard_partially_symmetrized=True,
+    )
+    np.testing.assert_allclose(ordered_result, compact_result)
+    np.testing.assert_allclose(
+        core.tensor_shear_pairing_homogeneous(
+            words,
+            compact_tensor,
+            grade=grade,
+            standard_partially_symmetrized=False,
+        ),
+        jnp.sum(words * ordered_tensor),
+    )
+    assert not np.allclose(
+        core.tensor_shear_pairing_homogeneous(
+            words,
+            compact_tensor,
+            grade=grade,
+            standard_partially_symmetrized=False,
+        ),
+        compact_result,
+    )
+
+
+def test_compact_pairing_is_vmappable_and_differentiable():
+    capacity = (1, 2)
+    standard = JaxPartiallySymmetrizedBigraded(
+        dims=(1, 2),
+        max_trunc=capacity,
+    )
+    core = JaxPartiallySymmetrizedShearBigraded(
+        plan_store=standard.plan_store,
+        bridge_plan_store=standard.bridge_plan_store,
+    )
+    words = _random_tensor(
+        core,
+        jr.PRNGKey(932),
+        trunc=capacity,
+        batch=(3,),
+    )
+    standard_tensor = _random_tensor(
+        standard,
+        jr.PRNGKey(933),
+        trunc=capacity,
+        batch=(3,),
+    )
+
+    eager = core.tensor_shear_pairing(words, standard_tensor)
+    mapped = jax.vmap(
+        lambda left, right: core.tensor_shear_pairing(left, right)
+    )(words, standard_tensor)
+    gradient = jax.jit(
+        jax.grad(
+            lambda left: jnp.sum(
+                core.tensor_shear_pairing(left, standard_tensor)
+            )
+        )
+    )(words)
+
+    np.testing.assert_allclose(mapped, eager, atol=2e-11, rtol=2e-11)
+    for block in gradient.blocks:
+        assert jnp.all(jnp.isfinite(block))
+
+
+def test_compact_pairing_capacity_and_validation_contracts():
+    dims = (1, 2)
+    core = JaxPartiallySymmetrizedShearBigraded(
+        dims=dims,
+        max_trunc=(1, 2),
+    )
+    words = _random_tensor(core, jr.PRNGKey(934), trunc=(1, 2))
+    large_standard = JaxPartiallySymmetrizedBigraded(
+        dims=dims,
+        max_trunc=(2, 3),
+    )
+    large_tensor = _random_tensor(
+        large_standard,
+        jr.PRNGKey(935),
+        trunc=(2, 3),
+    )
+    standard_words = core._coordinate_forward_transpose(words)
+    expected = sum(
+        jnp.sum(standard_words[grade] * large_tensor[grade], axis=-1)
+        for grade in standard_words.grades
+    )
+    np.testing.assert_allclose(
+        core.tensor_shear_pairing(words, large_tensor),
+        expected,
+        atol=2e-11,
+        rtol=2e-11,
+    )
+
+    wrong_coordinates = core.tensor_from_standard_coordinates(
+        large_tensor[:2, :3]
+    )
+    with pytest.raises(ValueError, match="expected 'standard'"):
+        core.tensor_shear_pairing(words, wrong_coordinates)
+
+    wrong_dims_core = JaxPartiallySymmetrizedBigraded(
+        dims=(1, 1),
+        max_trunc=(1, 1),
+    )
+    wrong_dims = _random_tensor(
+        wrong_dims_core,
+        jr.PRNGKey(936),
+        trunc=(1, 1),
+    )
+    with pytest.raises(ValueError, match="alphabet dimensions"):
+        core.tensor_shear_pairing(words, wrong_dims)
+    with pytest.raises(TypeError, match="BigradedTensor"):
+        core.tensor_shear_pairing(words, tuple(large_tensor.blocks))
+
+    positive_spec = large_tensor.spec.with_scalar(False)
+    positive_tensor = BigradedTensor(
+        tuple(large_tensor[grade] for grade in positive_spec.grades),
+        positive_spec,
+    )
+    with pytest.raises(ValueError, match="standard_first_on"):
+        core.tensor_shear_pairing(words, positive_tensor)
+
+    grade = (1, 2)
+    with pytest.raises(
+        TypeError,
+        match="standard_partially_symmetrized must be a boolean",
+    ):
+        core.tensor_shear_pairing_homogeneous(
+            words[grade],
+            large_tensor[grade],
+            grade=grade,
+            standard_partially_symmetrized="compact",
+        )
+    with pytest.raises(ValueError, match="partially symmetrized standard block"):
+        core.tensor_shear_pairing_homogeneous(
+            words[grade],
+            jnp.zeros((1,), dtype=jnp.float64),
+            grade=grade,
+            standard_partially_symmetrized=True,
+        )
+
+    ordered_core = JaxShearBigraded(dims=dims, max_trunc=(1, 2))
+    ordered_words = _random_tensor(
+        ordered_core,
+        jr.PRNGKey(937),
+        trunc=(1, 2),
+    )
+    with pytest.raises(
+        ValueError,
+        match="partially_symmetrized.*expected False",
+    ):
+        ordered_core.tensor_shear_pairing(ordered_words, large_tensor)

@@ -6,6 +6,7 @@ from typing import Literal
 
 import jax.numpy as jnp
 
+from tensordev.core.capabilities import _WORDWISE_SIGNATURE_PROTOCOL
 from tensordev.core.bigraded.jax_backend import (
     _JaxPartiallySymmetrizedBigradedBackend,
 )
@@ -32,7 +33,9 @@ class JaxPartiallySymmetrizedBigraded(
     _JaxPartiallySymmetrizedBigradedBackend,
     PartiallySymmetrizedBigradedCore,
 ):
-    """JAX core for a partially symmetrized bidegree representation."""
+    """JAX core for partially symmetrized bidegree tensors."""
+
+    _wordwise_signature_protocol = _WORDWISE_SIGNATURE_PROTOCOL
 
     def __init__(
         self,

@@ -16,6 +16,11 @@ pip-wheel-metadata/
 # Local Jupyter/kernel config
 .jupyter_kernel_singlethread/
 start_jupyter_singlethread.sh
+.ipynb_checkpoints/
+/notebooks/play.ipynb
+/notebooks/free_kernel/output.png
+**/validation_outputs/*
+!**/validation_outputs/.empty
 
 # Test / coverage caches
 .pytest_cache/
@@ -39,6 +44,16 @@ tdvenv/
 tmp/
 temp/
 *.log
+
+# Local build products for the implementation note
+/academia/bidegree/main.aux
+/academia/bidegree/main.bbl
+/academia/bidegree/main.blg
+/academia/bidegree/main.fdb_latexmk
+/academia/bidegree/main.fls
+/academia/bidegree/main.pdf
+/academia/bidegree/main.synctex.gz
+/academia/bidegree/main.toc
 
 # Recycle bin
 recycle_bin/

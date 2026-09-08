@@ -170,7 +170,7 @@ def test_q_transpose_and_fused_pairing_are_exact_transposes(cores):
     words = jr.normal(jr.PRNGKey(340), (2, quotient_width), dtype=jnp.float64)
     signature = jr.normal(jr.PRNGKey(341), (1, ordered_width), dtype=jnp.float64)
 
-    fused = core._pair_representation_standard_block_with_ordered_signature(
+    fused = core._pair_standard_block_with_ordered_signature(
         words, signature, grade=grade
     )
     lifted = core._lift_partially_symmetrized_block(words, grade)
@@ -183,7 +183,7 @@ def test_q_transpose_and_fused_pairing_are_exact_transposes(cores):
     )
 
 
-def test_canonical_signature_pairing_fuses_q_transpose(cores):
+def test_canonical_shear_pairing_fuses_q_transpose(cores):
     ordered, core = cores
     quotient_words = _random_tensor(
         core, jr.PRNGKey(345), trunc=(1, 2), batch=(2, 1)
@@ -192,7 +192,7 @@ def test_canonical_signature_pairing_fuses_q_transpose(cores):
         ordered, jr.PRNGKey(346), trunc=(2, 2), batch=(1, 3)
     )
 
-    got = core.tensor_signature_inner_product(
+    got = core.tensor_shear_pairing(
         quotient_words,
         ordered_signature,
     )
@@ -208,7 +208,7 @@ def test_canonical_signature_pairing_fuses_q_transpose(cores):
     np.testing.assert_allclose(got, expected, atol=1e-11, rtol=1e-11)
 
 
-def test_signature_pairing_accepts_an_ordered_signature_beyond_word_capacity():
+def test_shear_pairing_accepts_an_ordered_signature_beyond_word_capacity():
     core = JaxPartiallySymmetrizedBigraded(
         dims=(1, 2), max_trunc=(1, 1)
     )
@@ -216,7 +216,7 @@ def test_signature_pairing_accepts_an_ordered_signature_beyond_word_capacity():
     words = _random_tensor(core, jr.PRNGKey(347), trunc=(1, 1))
     signature = _random_tensor(ordered, jr.PRNGKey(348), trunc=(2, 2))
 
-    got = core.tensor_signature_inner_product(words, signature)
+    got = core.tensor_shear_pairing(words, signature)
     lifted = core._lift_partially_symmetrized(words)
     restricted_signature = BigradedTensor(
         tuple(signature[grade] for grade in lifted.grades), lifted.spec

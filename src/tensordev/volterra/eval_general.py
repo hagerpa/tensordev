@@ -34,9 +34,9 @@ def eval_e(
     r"""Evaluate the packed multi-index local Volterra increment ``E``.
 
     The returned native graded element has a zero degree-zero block.  This
-    evaluator implements the general ``n >= 1`` packed multi-index recursion
+    evaluator implements the general ``q >= 1`` packed multi-index recursion
     under the coefficient symmetry hypothesis.  In the outer algorithm it is
-    used for ``n > 1``; ``n == 1`` has a cheaper scalar fast path in
+    used for ``q > 1``; ``q == 1`` has a cheaper scalar fast path in
     :mod:`tensordev.volterra.eval_scalar`.
     """
     resolved = _resolve_evaluator_algebra(
@@ -65,7 +65,7 @@ def eval_vte(
     history = _normalize_history_element(v, resolved)
     # Keep E positive-only through the history product.  This avoids an
     # artificial scalar contribution and preserves the core's native
-    # first-on representation.
+    # first-on layout.
     e_positive = _eval_e_first_on(y, coef, algebra=resolved)
     out_positive = resolved.core.tensor_product(
         history,

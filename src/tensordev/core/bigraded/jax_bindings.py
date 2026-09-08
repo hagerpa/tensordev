@@ -1,4 +1,4 @@
-"""Shared JAX bindings for standard-coordinate bidegree representations."""
+"""Shared JAX bindings for standard-coordinate bidegree layouts."""
 
 from __future__ import annotations
 

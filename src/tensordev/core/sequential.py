@@ -388,31 +388,42 @@ class SequentialCore(Generic[Array]):
         q, r = divmod(S, B)
         if r:
             raise ValueError(f"tensor_abra: block_size={B} must divide S={S}.")
-        X_blocks = self._tree_map(
-            lambda L: L.reshape(q, B, *L.shape[1:]),
-            X,
-        )
 
         if first_apply_all:
             lift = lambda step: reduce_op(neutral, step)
             lifted_reducer = self._reducer(
                 acc_op, neutral=neutral, seed=neutral, in_tree=reduce_in_tree
             )
-            block_reducer = self._mapper(lambda block: lifted_reducer(self._mapper(lift)(block)))
-        else:
-            block_reducer = self._mapper(
-                self._reducer(
-                    reduce_op, neutral=neutral, seed=neutral, in_tree=reduce_in_tree
-                )
+            reduce_block = lambda block: lifted_reducer(
+                self._mapper(lift)(block)
             )
-        blocks = block_reducer(X_blocks)
+        else:
+            reduce_block = self._reducer(
+                reduce_op,
+                neutral=neutral,
+                seed=neutral,
+                in_tree=reduce_in_tree,
+            )
+
+        if q == 1:
+            result = reduce_block(X)
+            if accumulate and seed is not None:
+                result = acc_op(seed_, result)
+            if output_starting_point:
+                result = self._stack([seed_, result], axis=0)
+                return self._moveaxis(result, source=0, destination=axis)
+            return result
+
+        X_blocks = self._tree_map(
+            lambda L: L.reshape(q, B, *L.shape[1:]),
+            X,
+        )
+        blocks = self._mapper(reduce_block)(X_blocks)
 
         if not accumulate:
             if output_starting_point:
                 blocks = self._moveaxis(blocks, source=0, destination=axis)
                 return self._prepend(seed_, blocks, axis=axis)
-            if q == 1:
-                return self._index(blocks, 0)
             return self._moveaxis(blocks, source=0, destination=axis)
 
         stacked = self._stack(
@@ -430,7 +441,5 @@ class SequentialCore(Generic[Array]):
         )
         _, zs = accumulator(stacked)
         if not output_starting_point:
-            if q == 1:
-                return self._index(zs, 1)
             zs = self._index(zs, slice(1, None))
         return self._moveaxis(zs, source=0, destination=axis)

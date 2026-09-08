@@ -116,11 +116,11 @@ def test_native_quotient_signature_and_free_development_jax_transforms(
     monkeypatch,
     coordinates,
 ):
-    standard = td.bigraded_core(
+    standard = td.make_core(
         dims=(1, 2),
         max_trunc=TRUNCATION,
         default_trunc=TRUNCATION,
-        representation="partially_symmetrized",
+        partially_symmetrized=True,
     )
     core = standard if coordinates == "standard" else td.shear_core(standard)
     starting_point = _higher_grade_seed(core)

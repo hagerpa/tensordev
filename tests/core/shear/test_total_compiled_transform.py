@@ -55,7 +55,7 @@ def test_compiled_total_transform_exactly_matches_symbolic_plan(
 
     _assert_exact_structure(compiled, symbolic)
     assert compiled.memory_bytes_by_category() == (
-        builder.expected_transform_memory(degree, inverse=inverse)
+        builder._expected_transform_memory(degree, inverse=inverse)
     )
 
 
@@ -71,7 +71,7 @@ def test_total_transform_and_memory_estimator_do_not_expand_symbolic_support(
 
     for inverse in (False, True):
         plan = builder.transform(7, inverse=inverse)
-        expected = builder.expected_transform_memory(7, inverse=inverse)
+        expected = builder._expected_transform_memory(7, inverse=inverse)
         assert plan.memory_bytes_by_category() == expected
 
 
@@ -127,7 +127,7 @@ def test_empty_record_plan_retains_the_empty_orientation_contract():
         np.zeros_like(source),
     )
     assert plan.memory_bytes_by_category() == (
-        builder.expected_memory_bytes_by_category(
+        builder._expected_memory_bytes_by_category(
             degree=1,
             records=(),
             source_domains=("full",),
@@ -146,7 +146,7 @@ def test_total_transform_rejects_unrepresentable_mask_degree_before_expansion(
     monkeypatch.setattr(total_module, "psi_inverse_support", forbidden)
     builder = TotalShearPlanBuilder((1, 1))
 
-    for method in (builder.transform, builder.expected_transform_memory):
+    for method in (builder.transform, builder._expected_transform_memory):
         with pytest.raises(ValueError, match=r"degree must be <= 64, got 65"):
             method(65, inverse=False)
 
@@ -158,5 +158,5 @@ def test_vectorized_transform_memory_is_exact_at_degree_nine(dims, inverse):
     plan = builder.transform(9, inverse=inverse)
 
     assert plan.memory_bytes_by_category() == (
-        builder.expected_transform_memory(9, inverse=inverse)
+        builder._expected_transform_memory(9, inverse=inverse)
     )

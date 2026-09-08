@@ -123,7 +123,7 @@ def test_compiled_primitive_support_exactly_matches_symbolic_encounter_order(
 
 @pytest.mark.parametrize(
     ("left_grade", "right_grade"),
-    (
+    tuple(
         ((n1, m1), (n2, total - n1 - m1 - n2))
         for total in range(6)
         for n1 in range(total + 1)

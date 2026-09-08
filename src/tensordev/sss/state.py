@@ -2,13 +2,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 
-from tensordev.core.universal import DenseElem, DenseElemFirstOn
 from tensordev.sss.kernel import FSSK
-from tensordev.sss.state_update import fssk_readout, fssk_state
+from tensordev.sss.state_update import (
+    _maximum_order,
+    _resolve_fssk_core_pair,
+    _validate_fssk_core,
+    _validate_state,
+    _zero_state,
+    fssk_readout,
+    fssk_state,
+    fssk_vsig,
+)
 
 Array = jax.Array
 
@@ -17,60 +26,70 @@ Array = jax.Array
 @dataclass(frozen=True, slots=True)
 class StateSpaceSignature:
     """
-    Thin wrapper around :class:`FSSK` that adds a truncation level and an
-    optional hidden recursion state.
+    Thin wrapper around :class:`FSSK` that binds a truncation, algebra core,
+    sequential core, and optional hidden recursion state.
 
     Parameters
     ----------
     kernel:
         The underlying finite-state-space Volterra kernel.
     trunc:
-        Tensor truncation level. Required. Static (changes cause retracing).
+        Positive total-degree level or nonzero bidegree rectangle. Static
+        changes cause retracing.
     state:
-        Hidden recursion seed in **first-on format**: ``trunc`` levels where
-        level ``r`` carries degree ``r+1`` and has trailing shape
-        ``(n, 1, R, m**(r+1))``. Type: :data:`DenseElemFirstOn`.
-        Defaults to ``None``, in which case a zero state is created.
+        Hidden recursion seed in first-on format. A total-degree core uses a
+        tuple without degree zero; a bidegree core uses a scalar-omitting
+        :class:`~tensordev.core.BigradedTensor`. Defaults to ``None``, in
+        which case a zero state is created.
+    core, seq_core:
+        Algebra and sequential cores. Both default to the configured core
+        pair and remain bound to the returned object.
     """
 
     kernel: FSSK
-    trunc: int = field(metadata={"static": True})
-    state: DenseElemFirstOn | None = field(default=None)
+    trunc: Any = field(metadata={"static": True})
+    state: Any = field(default=None)
+    core: Any = field(default=None, metadata={"static": True})
+    seq_core: Any = field(default=None, repr=False, metadata={"static": True})
 
     def __post_init__(self) -> None:
-        if self.trunc < 0:
-            raise ValueError(f"trunc must be non-negative, got {self.trunc}.")
+        core, seq_core = _resolve_fssk_core_pair(self.core, self.seq_core)
+        trunc = core.normalize_truncation(self.trunc)
+        _validate_fssk_core(
+            core,
+            q=self.kernel.q,
+            m=self.kernel.m,
+            feature="StateSpaceSignature",
+        )
+        if _maximum_order(trunc) <= 0:
+            raise ValueError(f"trunc must be positive, got {trunc}.")
+        object.__setattr__(self, "core", core)
+        object.__setattr__(self, "seq_core", seq_core)
+        object.__setattr__(self, "trunc", trunc)
 
         if self.state is None:
-            # Auto-initialise zero state from kernel dimensions.
-            q, m, R = self.kernel.q, self.kernel.m, self.kernel.state_dim
-            dtype = self.kernel.b.dtype
-            zero_state: DenseElemFirstOn = tuple(
-                jnp.zeros((q, 1, R, m ** (r + 1)), dtype=dtype)
-                for r in range(self.trunc)
+            object.__setattr__(
+                self,
+                "state",
+                _zero_state(
+                    core=core,
+                    trunc=trunc,
+                    q=self.kernel.q,
+                    R=self.kernel.state_dim,
+                    m=self.kernel.m,
+                    dtype=self.kernel.b.dtype,
+                ),
             )
-            object.__setattr__(self, "state", zero_state)
         else:
-            # Validate an explicitly supplied state.
-            levels = tuple(self.state)
-            if not levels and self.trunc > 0:
-                raise ValueError("state must not be empty when trunc > 0.")
-            if len(levels) != self.trunc:
-                raise ValueError(
-                    f"state must have exactly trunc={self.trunc} levels; "
-                    f"got {len(levels)}."
-                )
-
-            q = self.kernel.q
-            R = self.kernel.state_dim
-            m = self.kernel.m
-            for r, z in enumerate(levels):
-                expected_tail = (q, 1, R, m ** (r + 1))
-                if z.shape[-4:] != expected_tail:
-                    raise ValueError(
-                        f"state[{r}] has incompatible trailing shape: "
-                        f"expected {expected_tail}, got {z.shape[-4:]}."
-                    )
+            _validate_state(
+                self.state,
+                core=core,
+                trunc=trunc,
+                q=self.kernel.q,
+                R=self.kernel.state_dim,
+                m=self.kernel.m,
+                name="state",
+            )
 
     # ------------------------------------------------------------------
     # Convenience constructors — thin wrappers around FSSK factories.
@@ -80,8 +99,10 @@ class StateSpaceSignature:
     def from_matrix(
             cls,
             *,
-            trunc: int,
-            state: DenseElemFirstOn | None = None,
+            trunc: Any,
+            state: Any = None,
+            core: Any = None,
+            seq_core: Any = None,
             **kwargs,
     ) -> StateSpaceSignature:
         """Construct from a dense Lambda matrix. Forwards all kwargs to :meth:`FSSK.from_matrix`."""
@@ -89,14 +110,18 @@ class StateSpaceSignature:
             kernel=FSSK.from_matrix(**kwargs),
             trunc=trunc,
             state=state,
+            core=core,
+            seq_core=seq_core,
         )
 
     @classmethod
     def from_jordan(
             cls,
             *,
-            trunc: int,
-            state: DenseElemFirstOn | None = None,
+            trunc: Any,
+            state: Any = None,
+            core: Any = None,
+            seq_core: Any = None,
             **kwargs,
     ) -> StateSpaceSignature:
         """Construct from Jordan block data. Forwards all kwargs to :meth:`FSSK.from_jordan`."""
@@ -104,14 +129,18 @@ class StateSpaceSignature:
             kernel=FSSK.from_jordan(**kwargs),
             trunc=trunc,
             state=state,
+            core=core,
+            seq_core=seq_core,
         )
 
     @classmethod
     def from_prony(
             cls,
             *,
-            trunc: int,
-            state: DenseElemFirstOn | None = None,
+            trunc: Any,
+            state: Any = None,
+            core: Any = None,
+            seq_core: Any = None,
             **kwargs,
     ) -> StateSpaceSignature:
         """Construct from Prony coefficients. Forwards all kwargs to :meth:`FSSK.from_prony`."""
@@ -119,6 +148,8 @@ class StateSpaceSignature:
             kernel=FSSK.from_prony(**kwargs),
             trunc=trunc,
             state=state,
+            core=core,
+            seq_core=seq_core,
         )
 
     # ------------------------------------------------------------------
@@ -137,8 +168,7 @@ class StateSpaceSignature:
 
         Takes the current ``state`` as the seed, runs the FSSK recursion over
         all steps of ``X``, and stores the resulting terminal state in the
-        returned instance. All other kernel parameters (``kernel``, ``trunc``
-        are preserved unchanged.
+        returned instance. The kernel, truncation, and cores are preserved.
 
         Parameters
         ----------
@@ -172,6 +202,8 @@ class StateSpaceSignature:
             initial_state=self.state,
             output_starting_state=False,
             increment_input=increment_input,
+            core=self.core,
+            seq_core=self.seq_core,
         )
         return replace(self, state=terminal)
 
@@ -212,7 +244,7 @@ class StateSpaceSignature:
     # Readout
     # ------------------------------------------------------------------
 
-    def readout(self, *, tau_dt: Array | float = 0.0) -> DenseElem:
+    def readout(self, *, tau_dt: Array | float = 0.0) -> Any:
         """Read out the truncated Volterra signature from the current hidden state.
 
         Evaluates the linear readout
@@ -229,14 +261,19 @@ class StateSpaceSignature:
 
         Returns
         -------
-        DenseElem
-            Truncated Volterra signature. Level ``r`` has trailing shape
-            ``(m**r,)``; level 0 is always the scalar unit ``1``.
+        tuple or BigradedTensor
+            Truncated Volterra signature in the bound core's native layout and
+            coordinates. The scalar block is the unit ``1``.
         """
 
-        return fssk_readout(self.state, kernel=self.kernel, tau_dt=tau_dt)
+        return fssk_readout(
+            self.state,
+            kernel=self.kernel,
+            tau_dt=tau_dt,
+            core=self.core,
+        )
 
-    def reset(self, new_state: DenseElemFirstOn | None = None) -> StateSpaceSignature:
+    def reset(self, new_state: Any = None) -> StateSpaceSignature:
         """Return a copy with the hidden state reset.
 
         Parameters
@@ -264,10 +301,10 @@ class StateSpaceSignature:
             axis: int = -2,
             block_size: int | None = None,
             accumulate: bool = True,
-            initial_state: DenseElemFirstOn | None = None,
+            initial_state: Any = None,
             output_starting_state: bool = True,
             increment_input: bool = False,
-    ) -> DenseElemFirstOn:
+    ) -> Any:
         """Return the hidden-state trajectory over ``X``.
 
         A thin, read-only wrapper around :func:`fssk_state`. ``self.state`` is
@@ -295,9 +332,9 @@ class StateSpaceSignature:
 
         Returns
         -------
-        DenseElemFirstOn
-            State trajectory with a time axis of size ``n_blocks`` (or
-            ``n_blocks + 1`` when ``output_starting_state=True``) at ``axis``.
+        tuple or BigradedTensor
+            First-on state trajectory in the bound core's native layout and
+            coordinates, with the emitted block axis placed at ``axis``.
         """
         return fssk_state(
             X,
@@ -310,6 +347,8 @@ class StateSpaceSignature:
             initial_state=self.state if initial_state is None else initial_state,
             output_starting_state=output_starting_state,
             increment_input=increment_input,
+            core=self.core,
+            seq_core=self.seq_core,
         )
 
     def vsig(
@@ -320,11 +359,11 @@ class StateSpaceSignature:
             axis: int = -2,
             block_size: int | None = None,
             accumulate: bool = True,
-            initial_state: DenseElemFirstOn | None = None,
+            initial_state: Any = None,
             output_starting_state: bool = False,
             tau_dt: Array | float = 0.0,
             increment_input: bool = False,
-    ) -> DenseElem:
+    ) -> Any:
         """Compute the Volterra signature of ``X``.
 
         Runs the FSSK recursion and applies the linear readout. ``self.state``
@@ -358,12 +397,12 @@ class StateSpaceSignature:
 
         Returns
         -------
-        DenseElem
-            Volterra signature. Without blocking, level ``r`` has trailing
-            shape ``(m**r,)``. With blocking, an extra block/time axis
-            appears at ``axis``.
+        tuple or BigradedTensor
+            Volterra signature in the bound core's native layout and
+            coordinates. With blocking, an emitted block axis appears at
+            ``axis``.
         """
-        hidden = fssk_state(
+        return fssk_vsig(
             X,
             kernel=self.kernel,
             dt=dt,
@@ -373,9 +412,11 @@ class StateSpaceSignature:
             accumulate=accumulate,
             initial_state=self.state if initial_state is None else initial_state,
             output_starting_state=output_starting_state,
+            tau_dt=tau_dt,
             increment_input=increment_input,
+            core=self.core,
+            seq_core=self.seq_core,
         )
-        return fssk_readout(hidden, kernel=self.kernel, tau_dt=tau_dt)
 
 
 __all__ = ["StateSpaceSignature"]

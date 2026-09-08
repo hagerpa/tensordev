@@ -1,10 +1,10 @@
-"""Shared JAX backend hooks for bidegree representations."""
+"""Shared JAX backend hooks for bidegree layouts."""
 
 from __future__ import annotations
 
 
 class _JaxBigradedBackend:
-    """JAX array updates shared by both bidegree representations."""
+    """JAX array updates shared by both bidegree layouts."""
 
     def _placement_scatter(self, output, target_ranks, values):
         return output.at[..., target_ranks, :, :].set(values)
@@ -27,6 +27,16 @@ class _JaxBigradedBackend:
 
 class _JaxPartiallySymmetrizedBigradedBackend(_JaxBigradedBackend):
     """Rank-axis updates required by partial symmetrization."""
+
+    def _fmexp_first_level(self, g, z, *, trunc):
+        from tensordev.core.bigraded.symmetrized._cpu_horner import (
+            try_fused_horner,
+        )
+
+        fused = try_fused_horner(self, g, z, trunc)
+        if fused is not None:
+            return fused
+        return super()._fmexp_first_level(g, z, trunc=trunc)
 
     def _rank_scatter(self, output, target_ranks, values):
         return output.at[..., target_ranks, :].set(values)

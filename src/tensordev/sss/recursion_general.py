@@ -65,8 +65,8 @@ def eval_fg(
     Parameters
     ----------
     y:
-        Projected increment with trailing shape ``(n, m)``. For the n=1 sanity
-        path, trailing shape ``(m,)`` is also accepted and normalized to
+        Projected increment with trailing shape ``(n, m)``. For a single
+        component, trailing shape ``(m,)`` is also accepted and normalized to
         ``(1, m)`` internally.
     coef:
         Step-local FSSK coefficients. ``coef.layout`` must be the packed
@@ -86,18 +86,16 @@ def eval_fg(
 
     Notes
     -----
-    **Batched multi-index recursion** (compilation-cost reduction)
+    **Batched multi-index recursion**
 
-    The inner loop over multi-indices (whose count grows as C(N+n-2,n)) is
-    replaced by a single batched operation per ``(degree, r)`` pair.  Instead
-    of one ``DenseElem`` per multi-index, we keep one ``DenseElem`` per degree
-    where the multi-index axis is a leading batch dimension:
+    Multi-indices of each degree form one leading batch axis, with one
+    ``DenseElem`` per degree:
 
     * ``F_stack[n]``: level ``k`` has shape ``batch + (num_n, 1, R, m**k)``
     * ``G_stack[n]``: level ``k`` has shape ``batch + (num_n, n, R, R, m**k)``
 
-    All gather / scale / shuffle / summation operations act on these batched
-    tensors, reducing the number of XLA ops from O(n·C(N+n-2,n)) to O(N·n).
+    Gather, scale, shuffle, and summation operations act on these batched
+    tensors with O(N·n) XLA operations.
     """
     y = _normalize_y(y, coef)
 

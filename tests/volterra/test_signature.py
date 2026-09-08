@@ -9,7 +9,7 @@ import numpy as np
 
 import pytest
 
-from tensordev import total_degree_core
+from tensordev import make_core
 from tensordev.core.jax import Jax
 from tensordev.development import path_signature
 from tensordev.volterra import (
@@ -126,7 +126,7 @@ def test_volterra_vsig_beta_one_q_one_recovers_classical_signature():
 
 
 def test_bounded_total_core_supplies_default_volterra_truncation():
-    core = total_degree_core(d=2, max_trunc=4, default_trunc=2)
+    core = make_core(dims=2, max_trunc=4, default_trunc=2)
     X = jnp.array(
         [[0.0, 0.0], [0.2, -0.1], [0.4, 0.3]],
         dtype=jnp.float64,

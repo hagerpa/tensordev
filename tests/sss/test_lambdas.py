@@ -318,7 +318,7 @@ def test_jordan_lambda_phi2_real_pade_vs_dense(dt_val, size, rate):
 
 
 # ---------------------------------------------------------------------------
-# Small |dt*rate| regime — the exact bug domain (previously untested)
+# Small |dt*rate| regime.
 # ---------------------------------------------------------------------------
 
 
@@ -326,7 +326,7 @@ def test_jordan_lambda_phi2_real_pade_vs_dense(dt_val, size, rate):
 @pytest.mark.parametrize("size", [2, 3, 4])
 @pytest.mark.parametrize("dt_val", [0.001, 0.01, 0.04])
 def test_jordan_lambda_phi1_small_dt_rate_vs_dense(dt_val, size, rate):
-    """phi1 in small |dt*rate| regime (was buggy) now matches DenseLambda."""
+    """phi1 matches DenseLambda in the small |dt*rate| regime."""
     lam = JordanLambda(
         real_rates=jnp.asarray([rate]),
         real_sizes=jnp.asarray([size]),
@@ -421,7 +421,7 @@ def test_jordan_lambda_phi2_oscillatory_vs_dense(dt_val, osc_size):
 
 
 # ---------------------------------------------------------------------------
-# phi2 was never tested for the mixed real+osc sample — add it
+# Mixed real and oscillatory blocks
 # ---------------------------------------------------------------------------
 
 

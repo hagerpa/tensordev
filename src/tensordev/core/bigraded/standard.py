@@ -37,7 +37,7 @@ class StandardBigradedCore(Universal):
     """
 
     grading = "bidegree"
-    representation = "ordered"
+    partially_symmetrized = False
     coordinates = "standard"
 
     @property
@@ -46,7 +46,7 @@ class StandardBigradedCore(Universal):
             "concatenation",
             "generator_action",
             "coordinate_conversion",
-            "signature_pairing",
+            "shear_pairing",
         }
         if self.shuffle_plan_store is not None:
             capabilities.add("shuffle")
@@ -140,6 +140,23 @@ class StandardBigradedCore(Universal):
     def normalize_truncation(self, trunc: object | None) -> Bidegree:
         """Public protocol hook used by developments and signatures."""
         return self._normalize_truncation(trunc)
+
+    def _effective_product_truncation(
+        self,
+        A: BigradedTensor,
+        B: BigradedTensor,
+        trunc: object | None,
+    ) -> Bidegree:
+        """Cap a requested rectangle by the grades supplied by the operands."""
+        requested = self._normalize_truncation(trunc)
+        natural = (
+            A.truncation[0] + B.truncation[0],
+            A.truncation[1] + B.truncation[1],
+        )
+        return (
+            min(requested[0], natural[0]),
+            min(requested[1], natural[1]),
+        )
 
     def prepare_development_input(
         self,
@@ -346,10 +363,11 @@ class StandardBigradedCore(Universal):
             raise ValueError(
                 f"{name} uses coordinates {tensor.spec.coordinates!r}, expected {coordinates!r}."
             )
-        if tensor.spec.representation != self.representation:
+        if tensor.spec.partially_symmetrized != self.partially_symmetrized:
             raise ValueError(
-                f"{name} uses representation {tensor.spec.representation!r}, "
-                f"expected {self.representation!r}."
+                f"{name}.spec.partially_symmetrized is "
+                f"{tensor.spec.partially_symmetrized!r}, expected "
+                f"{self.partially_symmetrized!r}."
             )
         self._normalize_truncation(tensor.truncation)
         return tensor
@@ -824,8 +842,9 @@ class StandardBigradedCore(Universal):
             and A.spec.include_scalar
             and B.spec.include_scalar
         )
+        active = self._effective_product_truncation(A, B, trunc)
         layout = self._resolve_layout_coordinates(
-            trunc,
+            active,
             include_scalar=include_scalar,
             coordinates="standard",
         )
@@ -1149,8 +1168,8 @@ class StandardBigradedCore(Universal):
     ):
         """Validate and canonicalize the two bidegree generator splits.
 
-        This is representation-neutral orchestration.  Ordered and partially
-        symmetrized cores differ only in how the two resolved contributions
+        This orchestration is shared by ordered and partially symmetrized
+        cores, which differ only in how the two resolved contributions
         are written into the output block.
         """
         predecessor_blocks, generator_blocks = self._validate_generator_action_inputs(
@@ -1614,7 +1633,7 @@ class StandardBigradedCore(Universal):
         )
 
     # ------------------------------------------------------------------
-    # Packing and conversion to the dense total-degree representation
+    # Packing and conversion to the dense total-degree layout
     # ------------------------------------------------------------------
 
     @dummy_jit(

@@ -10,6 +10,7 @@ from typing import Any, Literal, Mapping
 import jax.numpy as jnp
 import numpy as np
 
+from tensordev.core.capabilities import _WORDWISE_SIGNATURE_PROTOCOL
 from tensordev.core.bigraded.jax_backend import (
     _JaxPartiallySymmetrizedBigradedBackend,
 )
@@ -34,7 +35,7 @@ from tensordev.core.bigraded.symmetrized.gamma import (
 from tensordev.core.bigraded.symmetrized.plans import (
     PartiallySymmetrizedPlanStore,
     _validated_capacity,
-    apply_doubleprime_generator_block,
+    apply_doubleprime_generator_prefix,
 )
 from tensordev.core.bigraded.symmetrized.transforms import (
     PartiallySymmetrizedShearPlanStore,
@@ -393,7 +394,7 @@ class PartiallySymmetrizedShearBigradedCore(
         )
         return (
             f"{type(self).__name__}(dims={self.dims}, "
-            "representation='partially_symmetrized', coordinates='shear', "
+            "partially_symmetrized=True, coordinates='shear', "
             f"max_trunc={self.max_truncation}, "
             f"default_trunc={self.default_truncation}, "
             "precompute_shuffle="
@@ -516,11 +517,14 @@ class PartiallySymmetrizedShearBigradedCore(
         )
         n, m = output_grade
         output_meta = self.plan_store.grade_plan(output_grade)
-        output = None
+        doubleprime = None
         if m > 0:
             source, generator = supplied[((n, m - 1), (0, 1))]
             source_meta = self.plan_store.grade_plan((n, m - 1))
-            doubleprime = apply_doubleprime_generator_block(
+            generator_plan = self.plan_store.doubleprime_generator_plan(
+                output_grade
+            )
+            doubleprime = apply_doubleprime_generator_prefix(
                 self.xp,
                 self.xp.broadcast_to(
                     source,
@@ -530,10 +534,17 @@ class PartiallySymmetrizedShearBigradedCore(
                     generator,
                     batch + (self.dims[1],),
                 ),
-                self.plan_store.doubleprime_generator_plan(output_grade),
+                generator_plan,
                 scatter_add=self._rank_scatter_add,
-            ).reshape(batch + output_meta.dense_shape)
-            output = doubleprime.astype(dtype)
+            ).reshape(
+                batch
+                + (
+                    generator_plan.doubleprime_rank_count,
+                    output_meta.dense_shape[1],
+                )
+            )
+            doubleprime = doubleprime.astype(dtype)
+        prime = None
         if n > 0:
             source, generator = supplied[((n - 1, m), (1, 0))]
             source_meta = self.plan_store.grade_plan((n - 1, m))
@@ -550,10 +561,22 @@ class PartiallySymmetrizedShearBigradedCore(
                 self.generator_plan_store.generator_plan(output_grade),
             ).reshape(batch + output_meta.dense_shape)
             prime = prime.astype(dtype)
-            output = prime if output is None else output + prime
-        if output is None:
+        if doubleprime is None and prime is None:
             raise AssertionError(
                 "a non-scalar generator output needs a predecessor."
+            )
+        if doubleprime is None:
+            output = prime
+        elif prime is None:
+            output = doubleprime
+        else:
+            doubleprime_rank_count = doubleprime.shape[-2]
+            output = self.xp.concatenate(
+                (
+                    prime[..., :doubleprime_rank_count, :] + doubleprime,
+                    prime[..., doubleprime_rank_count:, :],
+                ),
+                axis=-2,
             )
         return output.reshape(batch + (output_meta.block_width,))
 
@@ -562,6 +585,8 @@ class JaxPartiallySymmetrizedShearBigraded(
     PartiallySymmetrizedShearBigradedCore
 ):
     """JAX partially symmetrized bidegree core in shear coordinates."""
+
+    _wordwise_signature_protocol = _WORDWISE_SIGNATURE_PROTOCOL
 
     def __init__(
         self,

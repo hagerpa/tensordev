@@ -1,12 +1,9 @@
 """
 Sharding must agree with direct evaluation for every batch size.
 
-The interesting cases are the small ones. `pmap_batch` pads the batch up to a
-multiple of the device count, and the padding used to be taken as `x[:pad]`,
-which supplies only `min(pad, batch)` rows — so any batch smaller than its own
-pad (a single item on four devices, say) produced a short array and a reshape
-error. Batches of one arise naturally: a law-law kernel block has exactly one
-pair.
+The small-batch cases exercise padding to a multiple of the device count,
+including batches shorter than the required padding. Batches of one arise
+naturally when a law-law kernel block contains exactly one pair.
 
 Device count is a process-wide property fixed before JAX initialises, so the
 multi-device cases run in a subprocess with `XLA_FLAGS` set. The in-process
@@ -19,6 +16,7 @@ config.update("jax_enable_x64", True)
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import jax
 import numpy as np
@@ -27,6 +25,7 @@ import pytest
 from tensordev.kernel.parallel import pmap_batch
 
 BATCHES = (1, 2, 3, 4, 5, 7, 8)
+SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src"
 
 _SUBPROCESS = textwrap.dedent(
     """
@@ -79,6 +78,7 @@ def _run_with_devices(devices: int) -> None:
         text=True,
         env={
             "PATH": "/usr/bin:/bin",
+            "PYTHONPATH": str(SOURCE_ROOT),
             "XLA_FLAGS": f"--xla_force_host_platform_device_count={devices}",
             "JAX_LOGGING_LEVEL": "ERROR",
         },

@@ -108,7 +108,7 @@ def test_full_quotient_estimator_matches_constructed_core(
     public_breakdown = td.core_expected_memory(
         dims=(1, 2),
         max_trunc=(2, 2),
-        representation="partially_symmetrized",
+        partially_symmetrized=True,
         coordinates=coordinates,
         precompute_shuffle=precompute_shuffle,
         unit="bytes",
@@ -181,7 +181,7 @@ def test_full_quotient_estimator_does_not_construct_cores_or_stores(
             assert td.core_expected_memory(
                 dims=(1, 2),
                 max_trunc=(2, 2),
-                representation="partially_symmetrized",
+                partially_symmetrized=True,
                 coordinates=coordinates,
                 precompute_shuffle=precompute_shuffle,
                 unit="bytes",

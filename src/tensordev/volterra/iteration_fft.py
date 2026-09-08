@@ -219,7 +219,7 @@ def fft_iteration(
     r"""Volterra signature via FFT convolution on a uniform grid.
 
     ``dX`` must already contain increments on the final grid. The returned
-    tensor uses the representation native to the resolved algebra core.
+    tensor uses the native format of the resolved algebra core.
     ``trunc`` may therefore be an integer for total degree or a bidegree pair
     for a standard bidegree core; a bounded core may supply its default when
     ``trunc`` is omitted.

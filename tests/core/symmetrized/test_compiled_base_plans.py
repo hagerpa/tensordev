@@ -14,6 +14,7 @@ import tensordev.core.bigraded.symmetrized.plans as plans_module
 from tensordev.core.bigraded.symmetrized._compiled import _binomial_table
 from tensordev.core.bigraded.symmetrized._compiled_plans import (
     compile_concatenation_targets,
+    compile_doubleprime_generator_destination,
     compile_doubleprime_generator_targets,
     compile_placement_array,
 )
@@ -47,6 +48,51 @@ def _rank_table(d_doubleprime, output_grade):
 
 def _normal_form(row):
     return tuple(tuple(map(int, block)) for block in row)
+
+
+def _doubleprime_target_oracle(d_doubleprime, output_grade):
+    n, m = output_grade
+    source = _placements(d_doubleprime, (n, m - 1))
+    expected = np.empty((d_doubleprime, source.shape[0]), dtype=np.int64)
+    for letter in range(d_doubleprime):
+        for source_rank, source_row in enumerate(source):
+            blocks = [list(block) for block in _normal_form(source_row)]
+            blocks[-1][letter] += 1
+            expected[letter, source_rank] = _rank_normalized_blocks(
+                tuple(tuple(block) for block in blocks)
+            )
+    return expected
+
+
+def _targets_from_destination(plan, source_rank_count, d_doubleprime):
+    result = np.full(
+        (d_doubleprime, source_rank_count),
+        -1,
+        dtype=np.int64,
+    )
+
+    def install(edge_id, target_rank):
+        letter, source_rank = divmod(int(edge_id), source_rank_count)
+        assert result[letter, source_rank] == -1
+        result[letter, source_rank] = int(target_rank)
+
+    for target_rank, edge_id in enumerate(
+        range(
+            plan.primary_head_start,
+            plan.primary_head_start + plan.primary_head_count,
+        )
+    ):
+        install(edge_id, target_rank)
+    selected = np.asarray(plan.selected_edge_ids)
+    for offset, edge_id in enumerate(selected[: plan.tail_primary_count]):
+        install(edge_id, plan.primary_head_count + offset)
+    for edge_id, target_rank in zip(
+        selected[plan.tail_primary_count :],
+        plan.collision_target_ranks,
+    ):
+        install(edge_id, target_rank)
+    assert np.all(result >= 0)
+    return result
 
 
 @pytest.mark.parametrize(
@@ -134,24 +180,75 @@ def test_doubleprime_generator_targets_match_normal_form_oracle(
         output_rank_count=output.shape[0],
         compiled=compiled,
     )
-    expected = []
-    for letter in range(d_doubleprime):
-        row = []
-        for source_row in source:
-            blocks = [list(block) for block in _normal_form(source_row)]
-            blocks[-1][letter] += 1
-            row.append(
-                _rank_normalized_blocks(
-                    tuple(tuple(block) for block in blocks)
-                )
-            )
-        expected.append(row)
+    expected = _doubleprime_target_oracle(d_doubleprime, output_grade)
 
     np.testing.assert_array_equal(actual, expected)
     assert actual.dtype == np.dtype(
         _unsigned_index_dtype(output.shape[0] - 1)
     )
     assert not actual.flags.writeable
+
+
+@pytest.mark.parametrize("compiled", (False, True))
+@pytest.mark.parametrize(
+    ("d_doubleprime", "output_grade"),
+    (
+        (1, (2, 3)),
+        (2, (2, 3)),
+        (3, (2, 3)),
+        (4, (1, 3)),
+    ),
+)
+def test_doubleprime_destination_plan_matches_normal_form_oracle(
+    compiled,
+    d_doubleprime,
+    output_grade,
+):
+    n, m = output_grade
+    source_rank_count = _placements(
+        d_doubleprime,
+        (n, m - 1),
+    ).shape[0]
+    output = _placements(d_doubleprime, output_grade)
+    prime_rank_count = (
+        _placements(d_doubleprime, (n - 1, m)).shape[0]
+        if n > 0
+        else 0
+    )
+    doubleprime_rank_count = output.shape[0] - prime_rank_count
+    actual = compile_doubleprime_generator_destination(
+        output,
+        _rank_table(d_doubleprime, output_grade),
+        source_rank_count=source_rank_count,
+        doubleprime_rank_count=doubleprime_rank_count,
+        compiled=compiled,
+    )
+
+    np.testing.assert_array_equal(
+        _targets_from_destination(
+            actual,
+            source_rank_count,
+            d_doubleprime,
+        ),
+        _doubleprime_target_oracle(d_doubleprime, output_grade),
+    )
+    edge_count = d_doubleprime * source_rank_count
+    head_edges = np.arange(
+        actual.primary_head_start,
+        actual.primary_head_start + actual.primary_head_count,
+    )
+    np.testing.assert_array_equal(
+        np.sort(np.concatenate((head_edges, actual.selected_edge_ids))),
+        np.arange(edge_count),
+    )
+    assert actual.selected_edge_ids.dtype == np.dtype(
+        _unsigned_index_dtype(edge_count - 1)
+    )
+    assert actual.collision_target_ranks.dtype == np.dtype(
+        _unsigned_index_dtype(doubleprime_rank_count - 1)
+    )
+    assert not actual.selected_edge_ids.flags.writeable
+    assert not actual.collision_target_ranks.flags.writeable
 
 
 @pytest.mark.parametrize("builder", ("concatenation", "generator"))
@@ -222,9 +319,56 @@ def test_compiled_and_python_stores_have_identical_payloads(monkeypatch):
         assert not actual.rank_plan.target_ranks.flags.writeable
     for grade, expected in python.doubleprime_generator_plans.items():
         actual = compiled.doubleprime_generator_plan(grade)
-        np.testing.assert_array_equal(actual.target_ranks, expected.target_ranks)
-        assert actual.target_ranks.dtype == expected.target_ranks.dtype
-        assert not actual.target_ranks.flags.writeable
+        assert actual.uses_destination_order is expected.uses_destination_order
+        if expected.target_ranks is not None:
+            assert actual.target_ranks is not None
+            np.testing.assert_array_equal(
+                actual.target_ranks,
+                expected.target_ranks,
+            )
+            assert actual.target_ranks.dtype == expected.target_ranks.dtype
+            assert not actual.target_ranks.flags.writeable
+            continue
+
+        assert actual.destination_plan is not None
+        assert expected.destination_plan is not None
+        actual_destination = actual.destination_plan
+        expected_destination = expected.destination_plan
+        assert actual_destination.edge_count == expected_destination.edge_count
+        assert (
+            actual_destination.output_rank_count
+            == expected_destination.output_rank_count
+        )
+        assert (
+            actual_destination.primary_head_start
+            == expected_destination.primary_head_start
+        )
+        assert (
+            actual_destination.primary_head_count
+            == expected_destination.primary_head_count
+        )
+        assert (
+            actual_destination.tail_primary_count
+            == expected_destination.tail_primary_count
+        )
+        np.testing.assert_array_equal(
+            actual_destination.selected_edge_ids,
+            expected_destination.selected_edge_ids,
+        )
+        np.testing.assert_array_equal(
+            actual_destination.collision_target_ranks,
+            expected_destination.collision_target_ranks,
+        )
+        assert (
+            actual_destination.selected_edge_ids.dtype
+            == expected_destination.selected_edge_ids.dtype
+        )
+        assert (
+            actual_destination.collision_target_ranks.dtype
+            == expected_destination.collision_target_ranks.dtype
+        )
+        assert not actual_destination.selected_edge_ids.flags.writeable
+        assert not actual_destination.collision_target_ranks.flags.writeable
 
 
 @pytest.mark.parametrize("compiled", (False, True))
@@ -258,6 +402,7 @@ from tensordev.core.bigraded.symmetrized._compiled import _rank_blocks
 from tensordev.core.bigraded.symmetrized._compiled_plans import (
     _build_placement_array,
     _emit_concatenation_targets,
+    _emit_doubleprime_generator_destination,
     _emit_doubleprime_generator_targets,
 )
 from tensordev.core.bigraded.symmetrized.plans import (
@@ -267,6 +412,7 @@ dispatchers = (
     _rank_blocks,
     _build_placement_array,
     _emit_concatenation_targets,
+    _emit_doubleprime_generator_destination,
     _emit_doubleprime_generator_targets,
 )
 assert all(not dispatcher.signatures for dispatcher in dispatchers)

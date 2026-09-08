@@ -8,6 +8,11 @@ import jax.random as jr
 
 from tensordev import Jax, FreeDevelopment
 from tensordev.development import free_development
+from tensordev.development.free import (
+    _finalize_free_development_call,
+    _prepare_free_development_call,
+    _run_portable_free_development,
+)
 from tensordev.core.jax import JaxSequentialCore
 
 from tensordev.util.random_paths import (
@@ -436,6 +441,68 @@ def test_nonaccumulating_blocks_broadcast_starting_point_exactly_once():
     _assert_dense_allclose(
         emitted_seed, expected_seed, atol=1e-12, rtol=1e-12
     )
+
+
+@pytest.mark.parametrize(
+    ("accumulate", "block_size"),
+    [(True, None), (True, 2), (False, None), (False, 2)],
+)
+def test_shared_finalizer_completes_a_unit_seeded_runner(
+    accumulate, block_size
+):
+    dim, trunc, steps = 2, 3, 8
+    path_key, seed_key = jr.split(jr.PRNGKey(117_000 + int(accumulate)))
+    path = _random_level_one_path(
+        "trig", path_key, batch=2, steps=steps, dim=dim
+    )
+    X = (jnp.asarray(path),)
+    seed_increment = 0.15 * jr.normal(
+        seed_key, (dim,), dtype=jnp.float64
+    )
+    starting_point = CORE.tensor_exponential(
+        (seed_increment,), trunc=trunc, output_zero_level=True
+    )
+
+    unit_call = _prepare_free_development_call(
+        X,
+        seq_core=SEQ,
+        trunc=trunc,
+        axis=-2,
+        block_size=block_size,
+        accumulate=accumulate,
+        core=CORE,
+    )
+    unit_result = _run_portable_free_development(unit_call)
+    seeded_call = _prepare_free_development_call(
+        X,
+        seq_core=SEQ,
+        trunc=trunc,
+        axis=-2,
+        block_size=block_size,
+        accumulate=accumulate,
+        starting_point=starting_point,
+        output_starting_point=True,
+        core=CORE,
+    )
+    got = _finalize_free_development_call(
+        seeded_call,
+        unit_result,
+        runner_applied_seed=False,
+        runner_emitted_starting_point=False,
+    )
+    expected = free_development(
+        X,
+        seq_core=SEQ,
+        trunc=trunc,
+        axis=-2,
+        block_size=block_size,
+        accumulate=accumulate,
+        starting_point=starting_point,
+        output_starting_point=True,
+        core=CORE,
+    )
+
+    _assert_dense_allclose(got, expected, atol=1e-10, rtol=1e-10)
 
 
 # ---------------------------------------------------------------------------

@@ -79,17 +79,16 @@ def _assert_all_finite(tree):
         JaxPartiallySymmetrizedShearBigraded,
     ),
 )
-def test_shear_pairing_names_are_exact_canonical_aliases(core_type):
-    assert (
-        core_type.tensor_shear_inner_product
-        is core_type.tensor_signature_inner_product
-    )
-    assert (
-        core_type.tensor_shear_inner_product_homogeneous
-        is core_type.tensor_signature_inner_product_homogeneous
-    )
-    assert is_jittable(core_type.tensor_signature_inner_product)
-    assert is_jittable(core_type.tensor_signature_inner_product_homogeneous)
+def test_shear_pairing_names_are_canonical_and_jittable(core_type):
+    assert is_jittable(core_type.tensor_shear_pairing)
+    assert is_jittable(core_type.tensor_shear_pairing_homogeneous)
+    for removed in (
+        "tensor_signature_inner_product",
+        "tensor_signature_inner_product_homogeneous",
+        "tensor_shear_inner_product",
+        "tensor_shear_inner_product_homogeneous",
+    ):
+        assert not hasattr(core_type, removed)
 
 
 @pytest.mark.parametrize(
@@ -107,17 +106,13 @@ def test_shear_pairing_names_are_exact_canonical_aliases(core_type):
         ),
     ),
 )
-def test_jax_pairing_aliases_share_one_compiled_wrapper(factory):
+def test_jax_pairing_methods_use_compiled_wrappers(factory):
     core = factory()
 
-    assert (
-        core.tensor_shear_inner_product.__func__
-        is core.tensor_signature_inner_product.__func__
-    )
-    assert (
-        core.tensor_shear_inner_product_homogeneous.__func__
-        is core.tensor_signature_inner_product_homogeneous.__func__
-    )
+    assert hasattr(core.tensor_shear_pairing, "lower")
+    assert hasattr(core.tensor_shear_pairing_homogeneous, "lower")
+    assert core.supports("shear_pairing")
+    assert not core.supports("signature_pairing")
 
 
 @pytest.mark.parametrize("family", ("total", "bigraded"))
@@ -149,15 +144,15 @@ def test_standard_coordinate_pairing_matches_native_inner_product(family):
         words_block = words[grade]
         signature_block = ordered_standard_signature[grade]
 
-    canonical = core.tensor_signature_inner_product(
+    canonical = core.tensor_shear_pairing(
         words,
         ordered_standard_signature,
     )
-    canonical_keyword = core.tensor_signature_inner_product(
+    canonical_keyword = core.tensor_shear_pairing(
         words,
         standard_tensor=ordered_standard_signature,
     )
-    homogeneous = core.tensor_signature_inner_product_homogeneous(
+    homogeneous = core.tensor_shear_pairing_homogeneous(
         words_block,
         signature_block,
         grade=grade,
@@ -182,7 +177,7 @@ def test_standard_coordinate_pairing_matches_native_inner_product(family):
         rtol=RTOL,
     )
     np.testing.assert_allclose(
-        core.tensor_shear_inner_product(
+        core.tensor_shear_pairing(
             words,
             standard_tensor=ordered_standard_signature,
         ),
@@ -192,18 +187,18 @@ def test_standard_coordinate_pairing_matches_native_inner_product(family):
     )
 
 
-def test_signature_pairing_is_bilinear_without_complex_conjugation():
+def test_shear_pairing_is_bilinear_without_complex_conjugation():
     core = Jax(d=1, max_trunc=1)
     words = jnp.asarray([1.0 + 2.0j], dtype=jnp.complex64)
     standard_tensor = jnp.asarray([3.0 + 4.0j], dtype=jnp.complex64)
     expected = jnp.sum(words * standard_tensor)
 
-    homogeneous = core.tensor_signature_inner_product_homogeneous(
+    homogeneous = core.tensor_shear_pairing_homogeneous(
         words,
         standard_tensor,
         grade=1,
     )
-    full = core.tensor_signature_inner_product(
+    full = core.tensor_shear_pairing(
         (words,),
         (standard_tensor,),
         words_first_on=True,
@@ -232,10 +227,7 @@ def test_total_pairing_matches_forward_transpose_and_converted_signature():
         path, trunc=trunc, core=standard_core
     )
 
-    got = shear_core.tensor_shear_inner_product(words, standard_signature)
-    canonical = shear_core.tensor_signature_inner_product(
-        words, standard_signature
-    )
+    got = shear_core.tensor_shear_pairing(words, standard_signature)
     forward_transpose = shear_core._coordinate_forward_transpose(
         words, trunc=trunc, first_on=False
     )
@@ -251,10 +243,9 @@ def test_total_pairing_matches_forward_transpose_and_converted_signature():
 
     np.testing.assert_allclose(got, expected_from_transpose, atol=ATOL, rtol=RTOL)
     np.testing.assert_allclose(got, expected_from_conversion, atol=ATOL, rtol=RTOL)
-    np.testing.assert_allclose(got, canonical, atol=ATOL, rtol=RTOL)
     assert shear_core.shear_plan_store.shuffle_scope == "none"
 
-    positive = shear_core.tensor_shear_inner_product(
+    positive = shear_core.tensor_shear_pairing(
         words[1:], standard_signature, words_first_on=True
     )
     positive_transpose = shear_core._coordinate_forward_transpose(
@@ -270,7 +261,7 @@ def test_total_pairing_matches_forward_transpose_and_converted_signature():
     )
     np.testing.assert_allclose(
         positive,
-        shear_core.tensor_shear_inner_product(
+        shear_core.tensor_shear_pairing(
             words[1:],
             standard_signature[1:],
             words_first_on=True,
@@ -284,24 +275,19 @@ def test_total_pairing_matches_forward_transpose_and_converted_signature():
         jnp.ones((1,), dtype=jnp.float32) for _ in range(trunc + 1)
     )
     with pytest.raises(ValueError, match="standard_tensor.*width"):
-        shear_core.tensor_shear_inner_product(words, wrong_dimension)
+        shear_core.tensor_shear_pairing(words, wrong_dimension)
     with pytest.raises(TypeError, match="words_first_on.*boolean"):
-        shear_core.tensor_shear_inner_product(
+        shear_core.tensor_shear_pairing(
             words, standard_signature, words_first_on=0
         )
     with pytest.raises(TypeError, match="standard_first_on.*boolean"):
-        shear_core.tensor_shear_inner_product(
+        shear_core.tensor_shear_pairing(
             words, standard_signature, standard_first_on=0
         )
 
     grade = 2
-    homogeneous = shear_core.tensor_shear_inner_product_homogeneous(
+    homogeneous = shear_core.tensor_shear_pairing_homogeneous(
         words[grade], standard_signature[grade], grade=grade
-    )
-    canonical_homogeneous = (
-        shear_core.tensor_signature_inner_product_homogeneous(
-            words[grade], standard_signature[grade], grade=grade
-        )
     )
     expected_homogeneous = standard_core.tensor_inner_product_homogeneous(
         shear_core._coordinate_forward_transpose_block(words[grade], grade),
@@ -310,19 +296,16 @@ def test_total_pairing_matches_forward_transpose_and_converted_signature():
     np.testing.assert_allclose(
         homogeneous, expected_homogeneous, atol=ATOL, rtol=RTOL
     )
-    np.testing.assert_allclose(
-        homogeneous, canonical_homogeneous, atol=ATOL, rtol=RTOL
-    )
     with pytest.raises(TypeError):
-        shear_core.tensor_shear_inner_product_homogeneous(
+        shear_core.tensor_shear_pairing_homogeneous(
             words[grade], standard_signature[grade]
         )
     with pytest.raises(TypeError, match="requires grade"):
-        shear_core.tensor_shear_inner_product_homogeneous(
+        shear_core.tensor_shear_pairing_homogeneous(
             words[grade], standard_signature[grade], grade=None
         )
     with pytest.raises(ValueError, match="standard_tensor.*width"):
-        shear_core.tensor_shear_inner_product_homogeneous(
+        shear_core.tensor_shear_pairing_homogeneous(
             words[grade], jnp.ones((1,), dtype=jnp.float32), grade=grade
         )
 
@@ -332,7 +315,7 @@ def test_total_empty_grade_overlap_preserves_broadcast_batch():
     positive_words = (jnp.ones((3, 1, 2), dtype=jnp.float32),)
     scalar_signature = (jnp.ones((1, 4, 1), dtype=jnp.float32),)
 
-    result = core.tensor_shear_inner_product(
+    result = core.tensor_shear_pairing(
         positive_words,
         scalar_signature,
         words_first_on=True,
@@ -352,7 +335,7 @@ def test_total_empty_operand_pairing_uses_available_batch(empty_side):
     words = tuple() if empty_side == "words" else batched_scalar
     standard_tensor = tuple() if empty_side == "standard" else batched_scalar
 
-    result = core.tensor_shear_inner_product(words, standard_tensor)
+    result = core.tensor_shear_pairing(words, standard_tensor)
     reference = core.tensor_inner_product_homogeneous(
         jnp.zeros((1,), dtype=jnp.int8),
         jnp.zeros((1,), dtype=jnp.int8),
@@ -385,10 +368,7 @@ def test_bigraded_pairing_matches_forward_transpose_and_converted_signature():
         path, trunc=trunc, core=standard_core
     )
 
-    got = shear_core.tensor_shear_inner_product(words, standard_signature)
-    canonical = shear_core.tensor_signature_inner_product(
-        words, standard_signature
-    )
+    got = shear_core.tensor_shear_pairing(words, standard_signature)
     forward_transpose = shear_core._coordinate_forward_transpose(
         words, trunc=trunc, first_on=False
     )
@@ -410,7 +390,6 @@ def test_bigraded_pairing_matches_forward_transpose_and_converted_signature():
         atol=ATOL,
         rtol=RTOL,
     )
-    np.testing.assert_allclose(got, canonical, atol=ATOL, rtol=RTOL)
     assert shear_core.shuffle_plan_store is None
 
     positive_word_spec = words.spec.with_scalar(False)
@@ -426,14 +405,14 @@ def test_bigraded_pairing_matches_forward_transpose_and_converted_signature():
         ),
         positive_standard_spec,
     )
-    positive = shear_core.tensor_shear_inner_product(
+    positive = shear_core.tensor_shear_pairing(
         positive_words,
         standard_signature,
         words_first_on=True,
     )
     np.testing.assert_allclose(
         positive,
-        shear_core.tensor_shear_inner_product(
+        shear_core.tensor_shear_pairing(
             positive_words,
             positive_standard,
             words_first_on=True,
@@ -443,20 +422,15 @@ def test_bigraded_pairing_matches_forward_transpose_and_converted_signature():
         rtol=RTOL,
     )
     with pytest.raises(ValueError, match="standard_first_on"):
-        shear_core.tensor_shear_inner_product(
+        shear_core.tensor_shear_pairing(
             positive_words,
             positive_standard,
             words_first_on=True,
         )
 
     grade = (1, 1)
-    homogeneous = shear_core.tensor_shear_inner_product_homogeneous(
+    homogeneous = shear_core.tensor_shear_pairing_homogeneous(
         words[grade], standard_signature[grade], grade=grade
-    )
-    canonical_homogeneous = (
-        shear_core.tensor_signature_inner_product_homogeneous(
-            words[grade], standard_signature[grade], grade=grade
-        )
     )
     expected_homogeneous = standard_core.tensor_inner_product_homogeneous(
         shear_core._coordinate_forward_transpose_block(words[grade], grade),
@@ -465,28 +439,25 @@ def test_bigraded_pairing_matches_forward_transpose_and_converted_signature():
     np.testing.assert_allclose(
         homogeneous, expected_homogeneous, atol=ATOL, rtol=RTOL
     )
-    np.testing.assert_allclose(
-        homogeneous, canonical_homogeneous, atol=ATOL, rtol=RTOL
-    )
     with pytest.raises(TypeError):
-        shear_core.tensor_shear_inner_product_homogeneous(
+        shear_core.tensor_shear_pairing_homogeneous(
             words[grade], standard_signature[grade]
         )
     with pytest.raises(TypeError, match="requires grade"):
-        shear_core.tensor_shear_inner_product_homogeneous(
+        shear_core.tensor_shear_pairing_homogeneous(
             words[grade], standard_signature[grade], grade=None
         )
     with pytest.raises(ValueError, match="standard_tensor.*width"):
-        shear_core.tensor_shear_inner_product_homogeneous(
+        shear_core.tensor_shear_pairing_homogeneous(
             words[grade], jnp.ones((1,), dtype=jnp.float32), grade=grade
         )
 
     with pytest.raises(ValueError, match="expected 'shear'"):
-        shear_core.tensor_shear_inner_product(
+        shear_core.tensor_shear_pairing(
             standard_signature, standard_signature
         )
     with pytest.raises(ValueError, match="expected 'standard'"):
-        shear_core.tensor_shear_inner_product(words, converted_signature)
+        shear_core.tensor_shear_pairing(words, converted_signature)
 
 
 def test_bigraded_empty_grade_overlap_preserves_broadcast_batch():
@@ -503,7 +474,7 @@ def test_bigraded_empty_grade_overlap_preserves_broadcast_batch():
         include_scalar=False,
     )
 
-    result = shear_core.tensor_shear_inner_product(
+    result = shear_core.tensor_shear_pairing(
         positive_words,
         positive_standard,
         words_first_on=True,
@@ -538,7 +509,7 @@ def test_empty_grade_overlap_uses_homogeneous_reduction_dtype(family):
             include_scalar=False,
         )
 
-    result = core.tensor_shear_inner_product(
+    result = core.tensor_shear_pairing(
         words,
         standard_tensor,
         words_first_on=True,
@@ -582,21 +553,19 @@ def test_pairing_is_jittable_vmappable_and_differentiable(family):
             coordinates="standard",
         )
 
-    eager = core.tensor_signature_inner_product(words, standard_signature)
-    alias_result = core.tensor_shear_inner_product(words, standard_signature)
+    eager = core.tensor_shear_pairing(words, standard_signature)
     compiled = jax.jit(
-        lambda left, right: core.tensor_signature_inner_product(left, right)
+        lambda left, right: core.tensor_shear_pairing(left, right)
     )(words, standard_signature)
     mapped = jax.vmap(
-        lambda left, right: core.tensor_signature_inner_product(left, right)
+        lambda left, right: core.tensor_shear_pairing(left, right)
     )(words, standard_signature)
     gradient = jax.grad(
         lambda left: jnp.sum(
-            core.tensor_signature_inner_product(left, standard_signature)
+            core.tensor_shear_pairing(left, standard_signature)
         )
     )(words)
 
-    np.testing.assert_allclose(alias_result, eager, atol=ATOL, rtol=RTOL)
     np.testing.assert_allclose(compiled, eager, atol=ATOL, rtol=RTOL)
     np.testing.assert_allclose(mapped, eager, atol=ATOL, rtol=RTOL)
     assert jnp.shape(eager) == batch_shape
@@ -628,10 +597,10 @@ def test_total_gamma_character_identity_pairs_with_standard_signature():
     )
     product = core.tensor_shuffle_product(left, right, trunc=trunc)
 
-    lhs = core.tensor_shear_inner_product(
+    lhs = core.tensor_shear_pairing(
         left, standard_signature
-    ) * core.tensor_shear_inner_product(right, standard_signature)
-    rhs = core.tensor_shear_inner_product(product, standard_signature)
+    ) * core.tensor_shear_pairing(right, standard_signature)
+    rhs = core.tensor_shear_pairing(product, standard_signature)
     np.testing.assert_allclose(lhs, rhs, atol=ATOL, rtol=RTOL)
 
 
@@ -660,8 +629,8 @@ def test_bigraded_gamma_character_identity_pairs_with_standard_signature():
     )
     product = core.tensor_shuffle_product(left, right, trunc=trunc)
 
-    lhs = core.tensor_shear_inner_product(
+    lhs = core.tensor_shear_pairing(
         left, standard_signature
-    ) * core.tensor_shear_inner_product(right, standard_signature)
-    rhs = core.tensor_shear_inner_product(product, standard_signature)
+    ) * core.tensor_shear_pairing(right, standard_signature)
+    rhs = core.tensor_shear_pairing(product, standard_signature)
     np.testing.assert_allclose(lhs, rhs, atol=ATOL, rtol=RTOL)

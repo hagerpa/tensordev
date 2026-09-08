@@ -1,4 +1,4 @@
-"""Public full-series Gamma contracts for both shear representations."""
+"""Public full-series Gamma contracts for both shear gradings."""
 
 from __future__ import annotations
 

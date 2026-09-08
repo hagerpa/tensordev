@@ -407,7 +407,7 @@ def test_fssk_scan_vs_wavefront_nonlinear_static_kernel(dim, dyadic_order, stati
 @pytest.mark.parametrize("dyadic_order", [0, 1])
 @pytest.mark.parametrize("static_kernel", _NONLINEAR_STATIC_KERNELS)
 def test_fssk_dense_vs_jordan_nonlinear_static_kernel(dim, dyadic_order, static_kernel):
-    """Dense and Jordan Lambda representations must agree with a nonlinear static kernel.
+    """Dense and Jordan Lambda forms must agree with a nonlinear static kernel.
 
     The static kernel enters only through G_ij and is independent of the
     Lambda/FSSK ODE structure — Dense and Jordan must therefore produce

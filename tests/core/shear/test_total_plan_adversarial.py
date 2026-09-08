@@ -56,10 +56,10 @@ def _representative_plans(builder):
 
 def _representative_memory(builder):
     return {
-        "F": builder.expected_transform_memory(4, inverse=False),
-        "G": builder.expected_transform_memory(4, inverse=True),
-        "generator": builder.expected_generator_memory(4),
-        "shuffle": builder.expected_shuffle_memory(2, 2),
+        "F": builder._expected_transform_memory(4, inverse=False),
+        "G": builder._expected_transform_memory(4, inverse=True),
+        "generator": builder._expected_generator_memory(4),
+        "shuffle": builder._expected_shuffle_memory(2, 2),
     }
 
 

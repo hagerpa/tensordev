@@ -241,7 +241,7 @@ class SymmetrizationBridgePlanStore:
     """Self-contained fixed-capacity bridge plans.
 
     Only dimensions and truncation metadata are copied at construction.  No
-    ordered or partially symmetrized representation store is retained.
+    ordered or partially symmetrized block-plan store is retained.
     """
 
     def __init__(

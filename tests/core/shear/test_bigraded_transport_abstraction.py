@@ -1,4 +1,4 @@
-"""Ownership contracts for representation-neutral bidegree shear transport."""
+"""Ownership contracts for shared bidegree shear transport."""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ def test_ordered_bidegree_shear_inherits_one_transport_implementation():
         assert getattr(ShearBigradedCore, name) is ShearCoordinateCore.__dict__[name]
 
 
-def test_representation_specific_coordinate_kernels_stay_on_ordered_core():
+def test_ordered_coordinate_kernels_stay_on_ordered_core():
     for name in (
         "_coordinate_forward_block",
         "_coordinate_inverse_block",

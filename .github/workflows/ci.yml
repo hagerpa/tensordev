@@ -1,0 +1,236 @@
+name: Test TensorDev
+
+on:
+  push:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Python ${{ matrix.python }} / JAX ${{ matrix.jax }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      JAX_PLATFORMS: cpu
+      XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.11"
+            jax: "0.10.0"
+          - python: "3.12"
+            jax: "0.10.0"
+          - python: "3.13"
+            jax: "0.11.1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install test environment
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "jax==${{ matrix.jax }}" \
+            "jaxlib==${{ matrix.jax }}" \
+            ".[test,rough]"
+
+      # Keep each logical subsystem in a fresh Python process.  In particular,
+      # this prevents compiled JAX executables from accumulating across the
+      # complete suite on memory-constrained runners.
+      - name: Test default configuration and utilities
+        run: python -m pytest -q tests/test_*.py tests/util
+
+      - name: Test common tensor-core behavior
+        run: python -m pytest -q tests/core/test_*.py
+
+      - name: Test ordered bidegree cores
+        run: python -m pytest -q tests/core/bigraded
+
+      - name: Test shear cores
+        run: python -m pytest -q tests/core/shear
+
+      - name: Test partially symmetrized cores
+        run: python -m pytest -q tests/core/symmetrized
+
+      - name: Test signature development
+        run: python -m pytest -q tests/development
+
+      - name: Test sequential signature state spaces
+        run: python -m pytest -q tests/sss
+
+      - name: Test Volterra signatures
+        run: python -m pytest -q tests/volterra
+
+      - name: Test signature kernels
+        run: python -m pytest -q tests/kernel
+
+      - name: Test wordwise execution
+        run: python -m pytest -q tests/wordwise
+
+  heavy-tests:
+    name: Heavy regression tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      JAX_PLATFORMS: cpu
+      XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install test environment
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "jax==0.10.0" \
+            "jaxlib==0.10.0" \
+            ".[test,rough]"
+
+      - name: Run heavy tests
+        run: python -m pytest -q --heavy -m heavy
+
+  distributions:
+    name: Build and install distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Build and check distributions
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+          python -m build
+          python -m twine check dist/*
+
+      - name: Smoke-test the wheel in a clean environment
+        run: |
+          python -m venv "$RUNNER_TEMP/tensordev-wheel-smoke"
+          "$RUNNER_TEMP/tensordev-wheel-smoke/bin/python" -m pip install \
+            dist/tensordev-*.whl
+          "$RUNNER_TEMP/tensordev-wheel-smoke/bin/python" - <<'PY'
+          import pathlib
+
+          import jax
+          import jax.numpy as jnp
+          import numpy as np
+          import tensordev as td
+
+          assert "site-packages" in pathlib.Path(td.__file__).parts
+          path = jnp.asarray(
+              [[0.0, 0.0], [0.2, -0.1], [-0.1, 0.25], [0.15, 0.3]],
+              dtype=jnp.float32,
+          )
+          ordered = td.make_core(dims=(1, 1), max_trunc=(3, 2))
+          standard = td.symmetrize_core(ordered)
+          standard_signature = td.path_signature(
+              path,
+              trunc=(3, 2),
+              core=standard,
+          )
+          core = td.shear_core(
+              standard,
+              precompute_shuffle=True,
+          )
+          trunc = (1, 1)
+          left = core.tensor_densify(
+              {(1, 0): jnp.asarray([0.4], dtype=jnp.float32)},
+              trunc=trunc,
+              include_scalar=True,
+          )
+          right = core.tensor_densify(
+              {(0, 1): jnp.asarray([-0.3], dtype=jnp.float32)},
+              trunc=trunc,
+              include_scalar=True,
+          )
+          product = core.tensor_shuffle_product(left, right, trunc=trunc)
+          product_pairing = core.tensor_shear_pairing(
+              product,
+              standard_signature,
+          )
+          factor_pairing = (
+              core.tensor_shear_pairing(left, standard_signature)
+              * core.tensor_shear_pairing(
+                  right,
+                  standard_signature,
+              )
+          )
+          jax.block_until_ready(product_pairing)
+          np.testing.assert_allclose(
+              product_pairing,
+              factor_pairing,
+              atol=2e-5,
+              rtol=2e-5,
+          )
+          PY
+
+  native:
+    name: Native / ${{ matrix.os }} / JAX ${{ matrix.jax }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      JAX_PLATFORMS: cpu
+      XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+        jax: ["0.10.0", "0.11.1"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build and test environment
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            build \
+            twine \
+            "jax==${{ matrix.jax }}" \
+            "jaxlib==${{ matrix.jax }}" \
+            ".[test,rough]"
+
+      - name: Build and check native distributions
+        run: |
+          python -m build --outdir native-dist native
+          python -m twine check native-dist/*
+          python -m pip install --force-reinstall --no-deps \
+            native-dist/tensordev_native_cpu-*.whl
+
+      - name: Verify macOS deployment tag
+        if: runner.os == 'macOS'
+        run: ls native-dist/*macosx_11_0*.whl
+
+      - name: Test native loader
+        run: python -m pytest -q native/tests
+
+      - name: Test native integration
+        run: >-
+          python -m pytest -q
+          tests/core/symmetrized/test_optional_cpu_horner.py

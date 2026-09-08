@@ -14,7 +14,7 @@ The implemented JAX components are end-to-end differentiable — from elementary
 
 ## Requirements
 
-`tensordev` requires Python 3.10+ and JAX 0.10.0+.
+`tensordev` requires Python 3.11+ and JAX 0.10.0–0.11.x.
 
 The package is developed and tested primarily with the JAX backend.
 
@@ -33,11 +33,15 @@ pip install git+https://github.com/hagerpa/tensordev.git
 ## License
 
 `tensordev` is released under the Apache License 2.0.
-See [`LICENSE`](LICENSE) for details.
+See the [license](https://github.com/hagerpa/tensordev/blob/main/LICENSE) for
+details.
 
 ## Quick start
 
 ```python
+import jax
+jax.config.update("jax_enable_x64", True)
+
 import tensordev as td
 from tensordev.util import random_trigonometric_polynomial_paths
 
@@ -50,6 +54,25 @@ print(td.tensor_to_flat(sig).shape)
 print(ip.shape)
 ```
 
+### Device placement
+
+With a CUDA-enabled JAX installation, device placement follows JAX. To compute
+only a signature on a GPU, move the path and leave the rest of the application
+on the CPU:
+
+```python
+gpu = jax.devices("gpu")[0]
+X_gpu = jax.device_put(X, gpu)
+
+sig_gpu = td.path_signature(X_gpu, trunc=4)
+```
+
+Public calls use the portable JAX implementation on the selected device.
+Specialized wordwise executors for ordinary and exact scalar-FSSK signatures
+are included, but automatic selection remains closed until exact NVIDIA
+targets and profitable workload regions pass the bundled real-GPU benchmark.
+No device or execution-method option is part of the core API.
+
 ## Package structure
 
 ```text
@@ -57,106 +80,107 @@ tensordev/
 ├── core/           # Tensor algebra backends
 ├── development/    # Signature development, free and classical
 ├── sss/            # State-space signatures, aka Volterra signatures for finite state-space kernels
-├── volterra/       # Volterra signatures: fractional, gamma, piecewise-constant kernels
+├── volterra/       # Volterra signatures: fractional, gamma and FSSK kernels
 ├── kernel/         # Signature kernels: classical, free, FSSK, higher-order
 └── util/           # Path generators and combinatorics
 ```
 
 ### `tensordev.core` — tensor algebra operations
 
-A core object provides the tensor-algebra operations exposed on the
-`tensordev` module. The default `Jax()` core is dimension-free and unbounded.
-Enable float64 before importing JAX or `tensordev` when needed.
+A core provides the tensor-algebra operations exposed on the `tensordev`
+module. The default JAX core is dimension-free and accepts any total-degree
+truncation. The same module-level operations work with bounded total-degree,
+bidegree, partially symmetrized, and shear cores, including products, series,
+inner products, and coordinate conversions.
 
-```python
-import tensordev as td
-import jax.numpy as jnp
+Use `make_core` to construct a core without changing the background default.
+`set_default_core` accepts the same construction arguments and installs the
+result, or it can install an already constructed core:
 
-A = (jnp.ones((1,)), jnp.ones((2,)), jnp.ones((4,)), jnp.ones((8,)))
-B = (jnp.ones((1,)), jnp.ones((2,)), jnp.ones((4,)), jnp.ones((8,)))
-
-C = td.tensor_product(A, B, trunc=3)
-S = td.tensor_summation(A, B)
-E = td.tensor_exponential(A[1:], trunc=3)
-L = td.tensor_logarithm(A[1:], trunc=3)
-ip = td.tensor_inner_product(A, B)
-```
-
-Use `set_default_core` for a fixed precomputation capacity, a default
-truncation, or another grading, representation, or coordinate system:
-
-| `dims` | `max_trunc` | `representation` | `coordinates` | core |
+| `dims` | `max_trunc` | `partially_symmetrized` | `coordinates` | core |
 |---|---|---|---|---|
-| integer | integer | `"ordered"` | `"standard"` | dense total degree |
-| pair | pair | `"ordered"` / `"partially_symmetrized"` | `"standard"` | bidegree |
-| pair | integer | `"ordered"` | `"shear"` | dense total-degree shear |
-| pair | pair | `"ordered"` / `"partially_symmetrized"` | `"shear"` | bidegree shear |
+| integer | integer | `False` | `"standard"` | dense total degree |
+| pair | pair | `False` / `True` | `"standard"` | bidegree |
+| pair | integer | `False` | `"shear"` | dense total-degree shear |
+| pair | pair | `False` / `True` | `"shear"` | bidegree shear |
 
-`max_trunc` fixes the capacity; `default_trunc` may select any smaller degree
-or componentwise smaller bidegree rectangle.  Module-level operations use the
-installed core; `core.at_truncation(...)` returns a view sharing its plans.
+`max_trunc` fixes the capacity, while `default_trunc` may select a smaller
+degree or bidegree rectangle. Module-level operations use the installed core;
+pass `core=...` to a development to override it locally.
 
 ```python
-total = td.set_default_core(
-    dims=2, max_trunc=8, default_trunc=4, precompute_shuffle=True
-)
-sig = td.path_signature(X)
+import jax.numpy as jnp
+import tensordev as td
 
-sym_shear = td.set_default_core(
+core = td.set_default_core(
     dims=(2, 1),
     max_trunc=(4, 3),
     default_trunc=(2, 2),
-    representation="partially_symmetrized",
+    partially_symmetrized=True,
     coordinates="shear",
     precompute_shuffle="generator",
 )
 X_split = jnp.zeros((4, 33, 3))
 bisig = td.path_signature(X_split)
-level_12 = bisig[1, 2]
+level_12 = bisig[1, 2]                 # bidegree (1, 2)
+low_bidegrees = bisig[:2, :2]          # structural truncation (1, 1)
+first_two = td.tensor_slice(bisig)[:2]  # first two paths in every block
+td.reset_default_core()
 ```
 
-Shuffle precomputation is part of the same core:
+A `BigradedTensor` stores one unpadded array per bidegree. `A[n, m]` selects a
+block and `A[:N, :M]` selects an upper-exclusive bidegree prefix. Use
+`td.tensor_slice(A)[key]` instead to apply `key` to the batch or time axes of
+every block. The core methods `tensor_from_total` and `tensor_to_total`
+convert ordered tensors between bidegree and dense total layouts;
+`tensor_to_ordered` expands partially symmetrized words into ordered words. It
+is the adjoint of partial symmetrization, not an inverse reconstruction.
 
-- `False`: retain no optional shuffle plans;
-- `"generator"`: retain first-level-factor shuffles used by Volterra methods
-  on bidegree and shear cores;
-- `True`: retain arbitrary shuffle products within capacity.
+Set `precompute_shuffle` to `False`, `"generator"` (the first-level shuffles
+needed by multi-component Volterra methods), or `True` (all shuffles within
+capacity). Use `td.core_expected_memory(...)` before constructing large
+capacities; it reports retained plan memory in MiB by default.
 
-A bidegree core returns a `BigradedTensor` PyTree with one unpadded array leaf
-per active bidegree and path width `sum(dims)`. The optional
-`"partially_symmetrized"` representation is compact, and `"shear"` selects
-shear coordinates. `symmetrized_core` and `shear_core` derive matching cores
-and reuse compatible precomputation.
+`shear_core(core, ...)` and `symmetrize_core(core, ...)` derive a matching core
+from an existing one and inherit its compatible configuration and plans.
 
-`tensor_from_standard_coordinates` and `tensor_to_standard_coordinates`
-preserve grading, while `tensor_from_total` and `tensor_to_total` convert
-ordered bidegree tensors between bidegree and dense total layouts.
-`tensor_to_ordered` is the adjoint ordered word expansion of
-`tensor_partially_symmetrize`, not an inverse reconstruction.
-
-Given a three-dimensional path `X3` and native word tensors `alpha`, `beta`,
-use `tensor_signature_inner_product` against an ordered standard signature;
-only the word operand is converted:
+Use `tensor_shear_pairing` to pair words in shear coordinates with a tensor in
+standard coordinates. Partially symmetrized cores accept either an ordered or
+a partially symmetrized standard tensor; the compact case is contracted
+directly without expansion:
 
 ```python
-standard = td.total_degree_core(d=3, max_trunc=4)
+import jax.numpy as jnp
+import tensordev as td
+
+X3 = jnp.array([[0., 0., 0.], [0.2, -0.1, 0.3]])
+standard = td.make_core(dims=3, max_trunc=2)
 standard_sig = td.path_signature(X3, core=standard)
 shear = td.shear_core(standard, dims=(2, 1), precompute_shuffle=True)
-words = shear.tensor_shuffle_product(alpha, beta, trunc=4)
-values = shear.tensor_signature_inner_product(words, standard_sig)
+
+alpha = (jnp.zeros((1,)), jnp.array([1., 0., 0.]), jnp.zeros((9,)))
+beta = (jnp.zeros((1,)), jnp.array([0., 0., 1.]), jnp.zeros((9,)))
+words = shear.tensor_shuffle_product(alpha, beta, trunc=2)
+values = shear.tensor_shear_pairing(words, standard_sig)
 ```
 
 `tensor_inner_product` is the Euclidean pairing for tensors in the same
-coordinates. Use the `*_first_on` arguments when a scalar level is omitted.
-
-Use `core_expected_memory` before constructing large capacities. It returns
-retained plan-array memory in MiB by default and accepts `breakdown=True`.
+coordinates. When tuple operands omit the scalar level,
+`tensor_shear_pairing` accepts `words_first_on=True` or
+`standard_first_on=True` as appropriate. For homogeneous partially
+symmetrized standard blocks, pass
+`standard_partially_symmetrized=True` explicitly.
 
 Set defaults before tracing JAX functions. Signatures, free developments, and
-Volterra signatures support configured cores.
-`free_kernel`, `higher_order_kernel`, `fssk_state`, and `fssk_vsig` require
-standard total-degree coordinates and reject bidegree or shear
-defaults. `reset_default_core()` restores the environment-selected default.
+Volterra signatures support configured cores. `reset_default_core()` restores
+the environment-selected default.
+
+The repository includes an optional
+[native CPU companion](https://github.com/hagerpa/tensordev/tree/main/native)
+for sufficiently large CPU Horner steps with standard-coordinate, partially
+symmetrized bidegree cores and `dims=(1, q)`, `q > 1`. It is not included in
+the TensorDev wheel and is not separately published for 0.1.0. After cloning
+the repository, install it from source with `python -m pip install ./native`.
 
 The construction is described in Hager and Pelizzari,
 [*Expected signatures via partial integration, coordinate change and
@@ -170,6 +194,9 @@ Compute truncated signatures with optional blocking. `block_size` splits the pat
 
 ```python
 import numpy as np
+import jax
+jax.config.update("jax_enable_x64", True)
+
 import jax.numpy as jnp
 import tensordev as td
 from tensordev.util import random_trigonometric_polynomial_paths
@@ -189,15 +216,16 @@ sig_c = td.tensor_product(sig_a, sig_b, trunc=4)
 np.testing.assert_allclose(
     td.tensor_to_flat(sig),
     td.tensor_to_flat(sig_c),
-    atol=1e-12,
+    rtol=1e-5,
+    atol=1e-6,
 )  # ✓
 
 # shuffle identity via tensor_shuffle_product and tensor_inner_product
 # a, b are fixed basis vectors — broadcast over the batch dimension
 e1 = td.tensor_densify((None, jnp.array([1., 0.])))
 e2 = td.tensor_densify((None, jnp.array([0., 1.])))
-core = td.total_degree_core(
-    d=2,
+core = td.make_core(
+    dims=2,
     max_trunc=4,
     precompute_shuffle=True,
 )
@@ -205,7 +233,8 @@ core = td.total_degree_core(
 np.testing.assert_allclose(
     td.tensor_inner_product(sig, core.tensor_shuffle_product(e1, e2, trunc=4)),
     td.tensor_inner_product(sig, e1) * td.tensor_inner_product(sig, e2),
-    atol=1e-10,
+    rtol=1e-5,
+    atol=1e-6,
 )  # ✓
 ```
 
@@ -229,7 +258,8 @@ sig = td.path_signature(X, trunc=3)
 np.testing.assert_allclose(
     td.tensor_to_flat(sig),
     td.tensor_to_flat(higher_order_sig),
-    atol=1e-12,
+    rtol=1e-5,
+    atol=1e-6,
 )  # ✓
 ```
 
@@ -237,11 +267,14 @@ np.testing.assert_allclose(
 
 State-space signatures are Volterra signatures whose convolution kernel is a *finite state-space kernel* (FSSK), i.e. a matrix-exponential kernel of the form
 
-$$K_{A,b}^\Lambda(t,s) = \sum_{r=1}^q \bigl(\mathbf{1}^\top e^{-\Lambda(t-s)} b_r\bigr) A_r .$$
+$$K_{A,b}^\Lambda(t,s) = \sum_{r=1}^q \bigl(\mathbf{1}^\top e^{-\Lambda(t-s)} b_r\bigr) A_r,$$
 
-with dense or Jordan state-space operators $\Lambda$. This package provides functionality for propagating and reading out the hidden state that evolves via an ODE, making online/streaming evaluation of such Volterra signatures exact and efficient.
+with dense or Jordan state-space operators $\Lambda$. This package propagates
+and reads out the ODE hidden state, making online evaluation of these
+Volterra signatures exact and efficient.
 
 ```python
+import jax
 import jax.numpy as jnp
 from tensordev.sss import StateSpaceSignature
 
@@ -255,12 +288,17 @@ sss = StateSpaceSignature.from_jordan(
     osc_decays=jnp.array([0.5]),
     osc_freqs=jnp.array([2 * jnp.pi]),
     osc_sizes=(1,),
-    A=jnp.eye(2)[None],   # (n=1, m=2, d=2)
-    b=jnp.ones((1, 3)),   # (n=1, R=3)
+    A=jnp.eye(2)[None],   # (q=1, m=2, d=2)
+    b=jnp.ones((1, 3)),   # (q=1, R=3)
     trunc=3,
 )
 
 result = sss.vsig(X, dt=1.0 / 32)
+
+# Moving only X selects GPU execution while the surrounding workflow stays
+# on the CPU.
+gpu = jax.devices("gpu")[0]
+result_gpu = sss.vsig(jax.device_put(X, gpu), dt=1.0 / 32)
 ```
 
 `StateSpaceSignature` carries an optional persistent hidden state for streaming/online evaluation:
@@ -286,24 +324,23 @@ np.testing.assert_allclose(
 
 ### `tensordev.volterra` — Volterra signature
 
-Volterra signatures for fractional, gamma, and piecewise-constant kernel
-families, computed via the quadratic triangular recursion with JAX-vectorized
-evaluation of the inner loop or, on uniform grids, by FFT acceleration.
+Volterra signatures for fractional, gamma, and finite state-space kernels,
+computed by a quadratic recursion or, on uniform grids, by FFT acceleration.
 
 ```python
 import jax.numpy as jnp
 import tensordev as td
-from tensordev.volterra import ConvolutionKernel, VolterraSignature, vsig
+from tensordev.volterra import VolterraSignature, vsig
 
-A = jnp.eye(2)[None]  # (n=1, m=2, d=2)
+A = jnp.eye(2)[None]  # (q=1, m=2, d=2)
 dt = 1.0 / 32
 
 # functional API — fractional kernel k(t,s) = (t-s)^{β-1} / Γ(β)
-kernel = ConvolutionKernel.fractional(beta=jnp.array([0.8]), A=A)
+kernel = td.ConvolutionKernel.fractional(beta=jnp.array([0.8]), A=A)
 result = vsig(X, kernel=kernel, dt=dt, trunc=3)
 
 # class-based — Gamma kernel, adding exponential damping to the fractional kernel
-kernel_g = ConvolutionKernel.gamma(
+kernel_g = td.ConvolutionKernel.gamma(
     beta=jnp.array([0.8]),
     rate=jnp.array([1.0]),
     scale=jnp.array([1.0]),
@@ -313,7 +350,7 @@ vsig_obj = VolterraSignature(kernel=kernel_g, trunc=3)
 result = vsig_obj.vsig(X, dt=dt)
 
 # Native rectangular truncation.  The split dimensions must sum to kernel.m.
-bicore = td.bigraded_core(
+bicore = td.make_core(
     dims=(1, 1),
     max_trunc=(3, 2),
     default_trunc=(2, 1),
@@ -324,8 +361,8 @@ rectangular = vsig(X, kernel=kernel, core=bicore, dt=dt)
 rectangular_vsig = VolterraSignature(kernel=kernel, core=bicore)
 ```
 
-The quadratic, FFT, and fractional Adams schemes all return the native tensor
-representation selected by `core`.  Scalar-component kernels (`q=1`) do not
+The quadratic, FFT, and fractional Adams schemes all return tensors in the
+format selected by `core`.  Scalar-component kernels (`q=1`) do not
 need shuffle plans.  For multi-component kernels above total depth one,
 construct the bidegree core with `precompute_shuffle="generator"`; full
 shuffle-product plans are unnecessary for Volterra evaluation.
@@ -336,7 +373,7 @@ Available kernel constructors:
 |---|---|---|
 | `ConvolutionKernel.fractional` | $k_p(t,s) = \Gamma(\beta_p)^{-1}(t-s)^{\beta_p-1}$ | `beta`, `A` |
 | `ConvolutionKernel.gamma` | $k(t,s) = \mathrm{scale}\cdot e^{-\mathrm{rate}(t-s)}\cdot\Gamma(\beta)^{-1}(t-s)^{\beta-1}$ | `beta`, `rate`, `scale`, `A` |
-| `ConvolutionKernel.piecewise_constant` | $k(i,j) = B_{p,i,j}$ | `B`, `A` |
+| `ConvolutionKernel.fssk` | finite state-space kernel | `fssk` |
 
 Setting `beta=1` with `ConvolutionKernel.fractional` recovers the classical iterated-integral signature.
 
@@ -354,6 +391,9 @@ Kernel objects for empirical statistics: batchwise values, Gram matrices, MMD, a
 
 ```python
 import numpy as np
+import jax
+jax.config.update("jax_enable_x64", True)
+
 from tensordev.util import random_trigonometric_polynomial_paths
 from tensordev.kernel import SigKernel, RBFKernel
 
@@ -437,17 +477,19 @@ implemented backend.
 | `Numba` | Numba | stub |
 | `Torch` / `TensorFlow` | PyTorch / TensorFlow | stub |
 
-The active backend is selected via the `TENSORDEV_BACKEND` environment variable. The default is `"jax"`.
+`TENSORDEV_BACKEND` selects the initial backend and defaults to `"jax"`.
+`set_default_core` may then replace the active core, while
+`reset_default_core` restores that initial backend selection.
 
 ```bash
 TENSORDEV_BACKEND=jax python my_script.py
 ```
 
 ```python
-from tensordev._backend import get_default_core, get_default_seq_core
+import tensordev as td
 
-core = get_default_core()
-seq_core = get_default_seq_core()
+core = td.get_default_core()
+seq_core = td.get_default_seq_core()
 ```
 
 ## Acknowledgements and theoretical background
@@ -470,6 +512,10 @@ The main theoretical background for the algorithms implemented here is:
 - P. Kidger and T. Lyons,
   [*Signatory: differentiable computations of the signature and logsignature transforms, on both CPU and GPU*](https://arxiv.org/abs/2001.00706),
   ICLR 2021.
+
+- T. Nygaard,
+  [*pathsig: A GPU-Accelerated Library for Truncated and Projected Path Signatures*](https://arxiv.org/abs/2602.24066),
+  arXiv preprint, 2026.
 
 - C. Salvi, T. Cass, J. Foster, T. Lyons and W. Yang,
   [*The Signature Kernel is the Solution of a Goursat PDE*](https://arxiv.org/abs/2006.14794),
@@ -496,5 +542,5 @@ The main theoretical background for the algorithms implemented here is:
   arXiv preprint, 2026.
 
 - P. P. Hager and L. Pelizzari,
-  [*A Technical Note on Signature Computations with Mixed Truncation, Coordinate Changes, and Symmetrization*](https://github.com/hagerpa/tensordev/tree/main/academia/bidegree),
+  [*A Technical Note on Signature Computations with Bidegree Truncation, Coordinate Changes, and Symmetrization*](https://github.com/hagerpa/tensordev/tree/main/academia/bidegree),
   technical note, 2026.

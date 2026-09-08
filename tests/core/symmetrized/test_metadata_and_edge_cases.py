@@ -61,7 +61,7 @@ def test_quotient_specs_are_hashable_pytree_metadata_across_coordinates(cores):
         standard_spec.truncation,
         coordinates="standard",
         include_scalar=True,
-        representation="partially_symmetrized",
+        partially_symmetrized=True,
     )
 
     assert standard_spec == equal_standard_spec
@@ -81,8 +81,8 @@ def test_quotient_specs_are_hashable_pytree_metadata_across_coordinates(cores):
     @jax.jit
     def static_metadata_code(tensor):
         spec = tensor.spec
-        traces.append((spec.representation, spec.coordinates))
-        code = int(spec.representation == "partially_symmetrized")
+        traces.append((spec.partially_symmetrized, spec.coordinates))
+        code = int(spec.partially_symmetrized)
         code += 2 * int(spec.coordinates == "shear")
         return tensor[(0, 0)] + code
 
@@ -103,10 +103,10 @@ def test_quotient_specs_are_hashable_pytree_metadata_across_coordinates(cores):
         np.asarray([10]),
     )
     assert traces == [
-        ("ordered", "standard"),
-        ("partially_symmetrized", "standard"),
-        ("ordered", "shear"),
-        ("partially_symmetrized", "shear"),
+        (False, "standard"),
+        (True, "standard"),
+        (False, "shear"),
+        (True, "shear"),
     ]
 
 
@@ -117,7 +117,7 @@ def test_quotient_specs_are_hashable_pytree_metadata_across_coordinates(cores):
         ("ordered_shear", "quotient_shear"),
     ),
 )
-def test_public_algebra_rejects_cross_representation_inputs(
+def test_public_algebra_rejects_mismatched_symmetrization(
     cores,
     ordered_name,
     quotient_name,
@@ -127,9 +127,15 @@ def test_public_algebra_rejects_cross_representation_inputs(
     ordered = _constant_tensor(ordered_core, 1, trunc=(1, 1))
     quotient = _constant_tensor(quotient_core, 1, trunc=(1, 1))
 
-    with pytest.raises(ValueError, match="expected 'ordered'"):
+    with pytest.raises(
+        ValueError,
+        match="partially_symmetrized.*expected False",
+    ):
         ordered_core.tensor_summation(quotient, quotient)
-    with pytest.raises(ValueError, match="expected 'partially_symmetrized'"):
+    with pytest.raises(
+        ValueError,
+        match="partially_symmetrized.*expected True",
+    ):
         quotient_core.tensor_summation(ordered, ordered)
 
 
@@ -211,7 +217,7 @@ def test_bridge_edge_grades_preserve_the_q_q_transpose_pairing(
     "core_name",
     ("quotient_standard", "quotient_shear"),
 )
-def test_complex_signature_pairing_is_bilinear_q_q_transpose(cores, core_name):
+def test_complex_shear_pairing_is_bilinear_q_q_transpose(cores, core_name):
     core = cores[core_name]
     grade = (1, 2)
     plan = core.bridge_plan_store.grade_plan(grade)
@@ -240,7 +246,7 @@ def test_complex_signature_pairing_is_bilinear_q_q_transpose(cores, core_name):
         plan,
         scatter_add=_scatter_add,
     )
-    result = core.tensor_signature_inner_product_homogeneous(
+    result = core.tensor_shear_pairing_homogeneous(
         words,
         signature,
         grade=grade,

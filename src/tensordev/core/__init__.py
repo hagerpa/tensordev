@@ -1,5 +1,7 @@
 from .einsum import Einsum
-from .jax import Jax, JaxSequentialCore, total_degree_core
+from tensordev._backend import make_core
+
+from .jax import Jax, JaxSequentialCore
 from .numba import Numba
 from .universal import Universal
 from .bigraded import (
@@ -7,7 +9,6 @@ from .bigraded import (
 	BigradedTensor,
 	JaxBigraded,
 	JaxPartiallySymmetrizedBigraded,
-	bigraded_core,
 )
 from .shear import (
 	JaxPartiallySymmetrizedShearBigraded,
@@ -15,7 +16,7 @@ from .shear import (
 	JaxShearTotal,
 	shear_core,
 )
-from .bigraded.symmetrized.factory import symmetrized_core
+from .bigraded.symmetrized.factory import symmetrize_core
 
 __all__ = [
 	"Einsum",
@@ -23,14 +24,13 @@ __all__ = [
 	"JaxSequentialCore",
 	"Numba",
 	"Universal",
-	"total_degree_core",
+	"make_core",
 	"BigradedSpec",
 	"BigradedTensor",
 	"JaxBigraded",
 	"JaxPartiallySymmetrizedBigraded",
 	"JaxPartiallySymmetrizedShearBigraded",
-	"bigraded_core",
-	"symmetrized_core",
+	"symmetrize_core",
 	"JaxShearTotal",
 	"JaxShearBigraded",
 	"shear_core",

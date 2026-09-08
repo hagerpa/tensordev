@@ -15,7 +15,7 @@ from tensordev.core.shear.symmetrized import (
 )
 
 
-def symmetrized_core(
+def symmetrize_core(
     core: Any,
     *,
     precompute_shuffle: bool | Literal["generator"] | None = None,
@@ -46,20 +46,20 @@ def symmetrized_core(
             precompute_shuffle=shuffle,
         )
 
-    if getattr(core, "representation", None) == "partially_symmetrized":
+    if getattr(core, "partially_symmetrized", False) is True:
         raise TypeError(
-            "symmetrized_core requires an ordered source core; the supplied "
+            "symmetrize_core requires an ordered source core; the supplied "
             f"{type(core).__name__} is already partially symmetrized."
         )
     if getattr(core, "grading", None) == "total_degree":
         raise TypeError(
-            "symmetrized_core requires a bidegree source core; total-degree "
+            "symmetrize_core requires a bidegree source core; total-degree "
             "partial symmetrization is not supported."
         )
     raise TypeError(
-        "symmetrized_core supports built-in ordered JaxBigraded and "
+        "symmetrize_core supports built-in ordered JaxBigraded and "
         f"JaxShearBigraded source cores, got {type(core).__name__}."
     )
 
 
-__all__ = ["symmetrized_core"]
+__all__ = ["symmetrize_core"]

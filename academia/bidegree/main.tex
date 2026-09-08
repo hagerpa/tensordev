@@ -17,7 +17,6 @@
 \usepackage{atbegshi}
 \usepackage[autostyle]{csquotes}
 \usepackage[toc,page]{appendix}
-\usepackage{todonotes}
 \usepackage{algorithm}
 \usepackage[most]{tcolorbox}
 \usepackage[
@@ -126,38 +125,46 @@
 \newcommand{\wh}[1]{\widehat{#1}}
 
 \begin{document}
-\title[Signature Computations with Mixed Truncation]
-{A Technical Note on Signature Computations with Mixed Truncation,
+\title[Signature Computations with Bidegree Truncation]
+{A Technical Note on Signature Computations with Bidegree Truncation,
 Coordinate Changes, and Symmetrization}
 \author{Paul P. Hager \and Luca Pelizzari}
-\date{}
+\date{\today}
 
 \begin{abstract}
 We give explicit data layouts and algorithms for signature computations with
-mixed truncation, the shear coordinate transformation, and partial
-symmetrization. The constructions separate the precomputation of combinatorial
-rank maps from vectorized runtime operations in ordered and partially
-symmetrized coordinates.
+bidegree truncation, the coordinate transformation introduced in
+\cite{mainpaper}, and symmetrization over a partial alphabet.
+The main conceptual difficulty is providing a contiguous array layout for
+the bidegree-truncated tensors and expressing the basic tensor-algebra
+operations, concatenation and shuffle, efficiently within this layout.
+Our main approach is to introduce a rank axis that accounts for the
+colexicographic ordering of the positions of the letters of the first
+alphabet.
+All operations can then be expressed as operations on the rank axis and as
+permutations of the remaining dense tensor axes corresponding to the partial
+alphabets.
+We provide further implementation details for vectorized array execution
+and discuss how word-parallel signature computation interfaces with the
+ordered and partially symmetrized bidegree layouts.
+
+\par\smallskip
+\noindent\textbf{Disclaimer.}
+To distinguish this paper from our other publications, we note that every
+part of the manuscript was written and revised through iterative
+human--machine cycles of prompting, generation, and review using the large
+language models \emph{GBT-5.6 Sol} and \emph{Claude Fabel 5.0}. All algorithms proposed
+in the paper were implemented in \texttt{tensordev}, and both the
+implementations and the examples were verified through an extensive suite
+of unit tests. The authors reviewed and approved all generated material and
+take full responsibility for the final content.
 \end{abstract}
 
 \maketitle
 
-\setcounter{secnumdepth}{4}
-\setcounter{tocdepth}{4}
+\setcounter{secnumdepth}{3}
+\setcounter{tocdepth}{2}
 \tableofcontents
-
-\section{Introduction}
-
-This note supplements \cite{mainpaper} with implementation-ready formulas for
-signature computations over an alphabet split into two coordinate groups. The
-resulting mixed truncation is useful when the two groups require different
-truncation levels.
-
-We first fix the algebraic notation and compact data layouts. We then derive
-concatenation, shuffle, coordinate-transformation, and Horner algorithms in
-standard and shear coordinates, before and after partial symmetrization.
-Implementation remarks distinguish precomputed combinatorial maps from the
-operations performed at runtime.
 
 \section{Algebraic preliminaries}\label{sec:algebraic_preliminaries}
 
@@ -169,7 +176,8 @@ $\mathcal{A}
 \mathcal{A}^{\prime}
 \mathbin{\dot\cup}
 \mathcal{A}^{\prime\prime}$
-be a finite alphabet with $\mathcal{A}^{\prime\prime}$ nonempty, and define
+be a finite alphabet with both $\mathcal{A}^{\prime}$ and
+$\mathcal{A}^{\prime\prime}$ nonempty, and define
 $d := |\mathcal{A}|$. We write
 $\blue{i}\in\mathcal{A}^{\prime}$ and
 $\orange{j}\in\mathcal{A}^{\prime\prime}$, and denote by
@@ -293,7 +301,7 @@ For $s\leq u\leq t$, Chen's identity states that
     \otimes
     \Sig{Y}_{u,t}.
 \]
-If $Y$ is affine on $[s,t]$, then
+If $Y_{s,\cdot}$ is linear on $[s,t]$, then
 \[
     \Sig{Y}_{s,t}
     =
@@ -302,7 +310,7 @@ If $Y$ is affine on $[s,t]$, then
     \sum_{r=0}^{\infty}
     \frac{Y_{s,t}^{\otimes r}}{r!}.
 \]
-Consequently, the signature of a piecewise affine path is obtained by tensor exponentiation of each increment and combining the
+Consequently, the signature of a piecewise linear path is obtained by tensor exponentiation of each increment and combining the
 segment signatures by concatenation.
 
 The shuffle product on
@@ -338,7 +346,7 @@ coordinates satisfy the shuffle identity
     \right\rangle.
 \]
 
-\subsection{Bigraded truncation}\label{sec:bigraded_truncation}
+\subsection{Bidegree truncation}\label{sec:bigraded_truncation}
 
 For the alphabet split
 $\mathcal{A}
@@ -442,7 +450,7 @@ the shuffle identity becomes
         \Sig{Y}^{N,M}_{s,t}
     \big\rangle.
 \]
-For $K\in\mathbb{N}_0$, the uniformly truncated tensor algebra of degree
+For $K\in\mathbb{N}_0$, the total-degree truncated tensor algebra of degree
 $K$ is
 \[
     T^K(\mathbb{R}^{d})
@@ -459,8 +467,9 @@ $K$ is
     :=
     \pi_K(\mathbf{a}\otimes\mathbf{b}).
 \]
-For $K=N+M$, it is the smallest uniformly truncated tensor algebra
+For $K=N+M$, it is the smallest total-degree truncated tensor algebra
 containing $T^{N,M}(\mathbb{R}^{d})$.
+
 \subsection{Shear coordinate transformation}
 \label{sec:shear_coordinate_transformation}
 
@@ -480,11 +489,11 @@ $\mathbb{R}\langle\mathcal{A}\rangle\times T((\mathbb{R}^d))$ defined by
     \quad
     \mathbf{a}\in T((\mathbb{R}^d)).
 \]
-The transformation is characterized by the representation of signatures in
-the resulting coordinates
+The transformation is characterized by the signature coefficients in the
+resulting coordinates
 $\langle\cdot,\cdot\rangle_{\Psi}$. More precisely, let
-$Y=(A,X)\in C^{1\text{-var}}([s,t],\mathbb{R}^{d})$ and
-$w\in\mathcal{W}_{\mathcal{A}}$ with
+$Y=(A,X)\in C^{1\text{-var}}([s,t],\mathbb{R}^{d})$. For
+$w\in\mathcal{W}_{\mathcal{A}}$, write
 $\decomp{\mathcal{A}^{\prime}}(w)
     =
     \left(
@@ -519,7 +528,9 @@ $\mathbf{a}\in T((\mathbb{R}^d))$ and $(n,m)\in\mathbb{N}_0^2$,
     \Psi^{-1}\bigl(\mathbf{a}^{(n,m)}\bigr).
 \]
 Consequently, they restrict to inverse linear automorphisms of
-$T^{N,M}(\mathbb{R}^d)$.\subsection{Partial symmetrization and quotient normal forms}
+$T^{N,M}(\mathbb{R}^d)$.
+
+\subsection{Partial symmetrization and quotient normal forms}
 \label{sec:partial_symmetrization}
 
 Following \cite{mainpaper}, we partially symmetrize by imposing
@@ -622,6 +633,16 @@ given by
         \mathbf{a}
     \big\rangle.
 \]
+The graded transpose of $\symmetrizer$ is the injective map
+$\symmetrizer^{\ast}:\mathbb{R}_{\mathcal{A}^{\prime\prime}}
+\langle\mathcal{A}\rangle\to\mathbb{R}\langle\mathcal{A}\rangle$,
+characterized by
+$\symmetrizer^{\ast}([w])=\sum_{[v]=[w]}v$. Consequently,
+$\langle\alpha,\widehat{\mathbf{a}}\rangle
+=\langle\symmetrizer^{\ast}(\alpha),\mathbf{a}\rangle$.
+Each distinct ordered representative occurs exactly once in this sum, so no
+factorial weight is introduced. The map $\symmetrizer^{\ast}$ is an adjoint
+lift, not an inverse of $\symmetrizer$.
 For $N,M\in\mathbb{N}_0$, define the bigraded truncated partially
 symmetrized tensor algebra and its dual word space by
 \[
@@ -672,12 +693,12 @@ where
 $\alpha_0,\ldots,\alpha_n
 \in\mathbb{N}_0^{\mathcal{A}^{\prime\prime}}$,
 $\blue{i_1},\ldots,\blue{i_n}\in\mathcal{A}^{\prime}$, and $|\alpha_0| + \cdots + |\alpha_n|=m$.
+
 \subsection{Coordinate changes, quotients, and induced products}
 \label{sec:coordinate_changes_and_products}
 
-The standard coordinate representation of the signature is
-$\Sig{Y}$, while its shear coordinate representation is
-$\Psi(\Sig{Y})$, since
+In standard coordinates the signature is $\Sig{Y}$, while in shear
+coordinates it is $\Psi(\Sig{Y})$, since
 \[
     \big\langle
         w,
@@ -727,13 +748,13 @@ The corresponding shear pairing on the quotient is therefore defined by
     \mathbb{R}_{\mathcal{A}^{\prime\prime}}
     \langle\mathcal{A}\rangle.
 \]
-The standard and shear coordinate representations, before and after partial
-symmetrization, each carry a tensor product governing the corresponding Chen
+The standard and shear coordinates, before and after partial symmetrization,
+each carry a tensor product governing the corresponding Chen
 identity and a dual product governing multiplication of coordinate
 functionals. The products used below are summarized as follows:
 \[
 \begin{array}{c|c|c}
-    \text{coordinate representation}
+    \text{coordinates}
     &
     \text{group law}
     &
@@ -842,10 +863,11 @@ corresponding bigraded truncations. We denote the resulting products by
 \]
 In the following sections, we revisit these products in their respective
 coordinate layouts and derive explicit algorithms for their computation.
+
 \section{Data layouts}
 \label{sec:data_layouts}
 
-For a uniformly truncated tensor, each homogeneous component
+For a total-degree truncated tensor, each homogeneous component
 $(\mathbb{R}^{d})^{\otimes r}$ has the canonical dense array layout with
 shape
 \[
@@ -1066,7 +1088,7 @@ ordered coordinates and then their partially symmetrized counterparts. In each
 case, we separate the combinatorial action on the placement axis from the
 corresponding operations on the dense axes.
 
-\subsection{Ordered coordinates}{\ }
+\subsection{Ordered coordinates}
 
 \subsubsection{Concatenation.}\label{sec:ord_concat}
 For fixed bidegrees $(n_1,m_1)$ and $(n_2,m_2)$ with
@@ -1277,7 +1299,7 @@ $Q^{\prime\prime}_{\iota_1,\iota_2}(P_1,P_2)$ records the positions
 occupied by its $\mathcal{A}^{\prime\prime}$-letters within the
 $\mathcal{A}^{\prime\prime}$-subsequence.
 
-\begin{figure}[h]
+\begin{figure}[ht]
     \centering
     \begin{tikzpicture}[
         x=0.55cm,
@@ -1561,7 +1583,7 @@ decompositions $n=n_1+n_2$ and $m=m_1+m_2$ gives the
 $(n,m)$-block of $\ell_1\shuffle_{N,M}\ell_2$.
 \end{proof}
 
-To justify this sparse representation, we first record that the output placement together with the induced placements uniquely determines the input placements and the shuffle.
+To justify this sparse formula, we first record that the output placement together with the induced placements uniquely determines the input placements and the shuffle.
 
 \begin{lemma}
 \label{lem:shuffle_pullback}
@@ -1664,7 +1686,7 @@ $Q''=\operatorname{rk}^{-1}(r'')$. Equivalently,
 By \Cref{lem:shuffle_pullback}, no multiplicities are required. These
 sets are enumerated by \Cref{alg:shuffle_placement_arrays}.
 
-\begin{algorithm}[h]
+\begin{algorithm}[ht]
 \caption{Placement-rank lists for the shuffle}
 \label{alg:shuffle_placement_arrays}
 \begin{algorithmic}[1]
@@ -1747,7 +1769,7 @@ Let $z=(z^{\prime},z^{\prime\prime})
     \mathbb{R}^{|\mathcal{A}^{\prime}|}
     \oplus
     \mathbb{R}^{|\mathcal{A}^{\prime\prime}|}.$
-The mixed-truncated product
+The bidegree-truncated product
 \[
     \mathbf{b}_0
     =
@@ -1758,10 +1780,11 @@ The mixed-truncated product
 \]
 is computed by the Horner recursion in
 \Cref{alg:ordered_signature_horner}, directly on the stored bidegree
-blocks.
+blocks. Set $\kappa_{n,0}:=0$ and, for $m>0$,
+$\kappa_{n,m}:=|\operatorname{Pl}(n,m-1)|$.
 
-\begin{algorithm}[h]
-\caption{Horner recursion in ordered coordinates}
+\begin{algorithm}[ht]
+\caption{Horner recursion in ordered standard coordinates}
 \label{alg:ordered_signature_horner}
 \begingroup
 \algrenewcommand\algorithmiccomment[1]{\hfill\texttt{//}#1}
@@ -1789,35 +1812,39 @@ All other blocks of $\mathbf{b}_{N+M}$ are absent
         $0\leq m\leq M$, and
         $1\leq n+m\leq N+M-q+1$}
         \Comment{\texttt{(*)}}
-        \For{$k=0,\ldots,|\operatorname{Pl}(n,m)|-1$}
-            \If{$m>0$ and
-                $k<|\operatorname{Pl}(n,m-1)|$}
+        \State
+        $\mathbf{b}_{q-1}^{(n,m)}
+        \gets
+        \mathbf{a}^{(n,m)}$
+        \If{$m>0$}
+            \For{$k=0,\ldots,\kappa_{n,m}-1$}
                 \State
                 $\displaystyle
                 \bigl(\mathbf{b}_{q-1}^{(n,m)}\bigr)_k
                 \gets
-                \mathbf{a}^{(n,m)}_k
+                \bigl(\mathbf{b}_{q-1}^{(n,m)}\bigr)_k
                 +
                 \frac{1}{q}
                 \bigl(\mathbf{b}_{q}^{(n,m-1)}\bigr)_k
                 \otimes z^{\prime\prime}$
-            \Else
+            \EndFor
+        \EndIf
+        \If{$n>0$}
+            \For{$k=0,\ldots,|\operatorname{Pl}(n-1,m)|-1$}
                 \State
                 $\displaystyle
-                \bigl(\mathbf{b}_{q-1}^{(n,m)}\bigr)_k
+                \bigl(\mathbf{b}_{q-1}^{(n,m)}\bigr)_{k+\kappa_{n,m}}
                 \gets
-                \mathbf{a}^{(n,m)}_k
+                \bigl(\mathbf{b}_{q-1}^{(n,m)}\bigr)_{k+\kappa_{n,m}}
                 +
                 \frac{1}{q}
                 \tau_{n-1,m,1,0}
                 \left(
-                    \bigl(\mathbf{b}_{q}^{(n-1,m)}\bigr)_{
-                        k-|\operatorname{Pl}(n,m-1)|
-                    }
+                    \bigl(\mathbf{b}_{q}^{(n-1,m)}\bigr)_k
                     \otimes z^{\prime}
                 \right)$
-            \EndIf
-        \EndFor
+            \EndFor
+        \EndIf
     \EndFor
 \EndFor
 \State \Return $\mathbf{b}_0$
@@ -1829,6 +1856,17 @@ their computation may be parallelized.
 \endgroup
 \end{algorithm}
 
+The outer loop over $q$ and the active bidegrees in
+\Cref{alg:ordered_signature_horner} is common to all four signature
+computations. With $\widehat{\otimes}$, $\odot$, or
+$\widehat{\odot}$, only the fixed-bidegree formula for right multiplication
+by $z$ changes. In each case, repeated substitution in the corresponding
+unpruned recursion gives the appropriate tensor exponential through degree
+$N+M$. Since right multiplication by $z$ raises the total degree by one,
+discarding inactive blocks cannot change any block retained by
+$\pi^{N,M}$. We use this product--Horner argument below without repeating
+it.
+
 \begin{implrmk}
 The runtime loops over the Horner depth $q$ and the active bidegrees remain,
 but the placement-rank loops in
@@ -1839,15 +1877,14 @@ $(q,n,m)$, the complete block update is
     \gets\mathbf{a}^{(n,m)}$
 \If{$m>0$}
     \State $\mathbf{b}_{q-1}^{(n,m)}
-        [0:|\operatorname{Pl}(n,m-1)|]
+        [0:\kappa_{n,m}]
         \mathrel{+}=
         q^{-1}\mathbf{b}_{q}^{(n,m-1)}
         \otimes z^{\prime\prime}$
 \EndIf
 \If{$n>0$}
     \State $\mathbf{b}_{q-1}^{(n,m)}
-        [|\operatorname{Pl}(n,m-1)|:
-        |\operatorname{Pl}(n,m)|]
+        [\kappa_{n,m}:|\operatorname{Pl}(n,m)|]
         \mathrel{+}=
         q^{-1}\tau_{n-1,m,1,0}
         \left(
@@ -1857,11 +1894,12 @@ $(q,n,m)$, the complete block update is
 \EndIf
 \end{algorithmic}
 Both assignments act on contiguous rank ranges and are vectorized over all
-rank and dense axes. No placement data are precomputed, and only
-$\mathbf{b}_{q}$ and $\mathbf{b}_{q-1}$ are stored.
+rank and dense axes. The Horner update itself does not consult any placement
+map, and only $\mathbf{b}_{q}$ and $\mathbf{b}_{q-1}$ are live numerical
+states.
 \end{implrmk}
 
-If $Y$ is piecewise affine on
+If $Y$ is piecewise linear on
 $s=t_0<\cdots<t_J=t$, with increments
 $\Delta Y_j=Y_{t_{j-1},t_j}$, we set
 $\mathbf{S}_0=e_{\emptyset}$ and apply the recursion successively for
@@ -1881,8 +1919,10 @@ Chen's identity then gives
 $\mathbf{S}_J
     =
     \pi^{N,M}\Sig{Y}_{s,t}$.
+The same partitionwise assembly applies in the remaining three settings,
+using the corresponding product and fixed-bidegree update described below.
 
-\subsection{Partially symmetrized coordinates}{\ }
+\subsection{Partially symmetrized coordinates}
 
 \subsubsection{Concatenation.}
 For
@@ -1960,7 +2000,7 @@ to
 \]
 
 Then, in complete analogy with \Cref{lem:ordered_concatenation}, we obtain
-the following block representation.
+the following block formula.
 
 \begin{lemma}
 \label{lem:symmetrized_concatenation}
@@ -2139,8 +2179,8 @@ $S_{(n+1)|\mathcal{A}^{\prime\prime}|}=m$, its contribution gives the final subt
 \end{proof}
 \begin{implrmk}
 The outer loop over the bidegree splittings remains. For one fixed
-splitting, all input-rank pairs and all dense axes are vectorized. Store the
-target-rank array
+splitting, all input-rank pairs and all dense axes are vectorized. Store only
+the target-rank array
 \[
     K(j_1,j_2)
     :=
@@ -2149,9 +2189,7 @@ target-rank array
         \boldsymbol{\alpha}\dott\boldsymbol{\beta}
     \right)
 \]
-in lexicographic input-pair order, together with a stable ordering by $K$,
-the offsets of equal target ranks, and one target rank per segment. The
-runtime update is
+in lexicographic input-pair order. The runtime update is
 \begin{algorithmic}[1]
 \State $\mathbf{V}\gets
     \widehat{\tau}_{n_1,m_1,n_2,m_2}
@@ -2160,43 +2198,44 @@ runtime update is
         \otimes
         \widehat{\mathbf{b}}^{(n_2,m_2)}
     \right)$
-\State flatten the two rank axes of $\mathbf{V}$ and reorder them by the
-stored ordering
-\State $\mathbf{S}\gets$ segmented sum of $\mathbf{V}$ over the stored
-offsets
-\State add $\mathbf{S}$ at the stored target ranks of
-$\widehat{\mathbf{c}}^{(n,m)}$
+\State flatten the two rank axes of $\mathbf{V}$
+\State $\widehat{\mathbf{c}}^{(n,m)}\gets
+    \operatorname{scatteradd}
+    \left(
+        \widehat{\mathbf{c}}^{(n,m)},K,\mathbf{V}
+    \right)$
 \end{algorithmic}
-Thus there is no runtime loop over $(j_1,j_2)$. The segmented sum is the
-only rank-axis reduction. If the pair axis is too large to materialize, it
-may be processed in batches, with partial segment sums accumulated at the
-same target ranks.
+Here $\operatorname{scatteradd}(\mathbf{C},K,\mathbf{V})$ adds row $j$ of
+$\mathbf{V}$ to row $K_j$ of $\mathbf{C}$, so repeated target ranks are
+accumulated directly. Thus there is no runtime loop over $(j_1,j_2)$ and no
+stored ordering, segment offsets, or list of distinct targets. If the pair
+axis is too large to materialize, it may be processed in batches with partial
+updates scattered to the same target ranks.
 \end{implrmk}
 
 \subsubsection{Shuffle.}
 Although the quotient shuffle product
 $\widehat{\shuffle}_{N,M}$ can be computed recursively in the partially
-symmetrized block representation, we do not compile this recursion
+symmetrized block layout, we do not compile this recursion
 directly in partially symmetrized standard coordinates. Already for
-distinct
-$\orange{i},\orange{j}\in\mathcal{A}^{\prime\prime}$ and
+$\orange{i}\in\mathcal{A}^{\prime\prime}$ and
 $\blue{k},\blue{\ell}\in\mathcal{A}^{\prime}$, we have
 \[
 \begin{aligned}
     \bigl([\orange{i}]\blue{k}\bigr)
     \widehat{\shuffle}
-    \bigl([\orange{j}]\blue{\ell}\bigr)
+    \bigl([\orange{i}]\blue{\ell}\bigr)
     ={}&
-    [\orange{i}]\blue{k}[\orange{j}]\blue{\ell}
+    [\orange{i}]\blue{k}[\orange{i}]\blue{\ell}
     +
-    2[\orange{i}\orange{j}]\blue{k}\blue{\ell}
+    2[\orange{i}\orange{i}]\blue{k}\blue{\ell}
     +
-    2[\orange{i}\orange{j}]\blue{\ell}\blue{k}
+    2[\orange{i}\orange{i}]\blue{\ell}\blue{k}
     +
-    [\orange{j}]\blue{\ell}[\orange{i}]\blue{k}.
+    [\orange{i}]\blue{\ell}[\orange{i}]\blue{k}.
 \end{aligned}
 \]
-The coefficients arise because distinct ordinary shuffles collapse to the
+The coefficients arise because different shuffle placements produce the
 same partially symmetrized basis element. In higher bidegrees, the
 $\mathcal{A}^{\prime\prime}$-blocks may additionally split across several
 gaps created by an interleaving of the
@@ -2208,15 +2247,15 @@ coordinates is simply
 \[
     \bigl([\orange{i}]\blue{k}\bigr)
     \gammashufflesym
-    \bigl([\orange{j}]\blue{\ell}\bigr)
+    \bigl([\orange{i}]\blue{\ell}\bigr)
     =
-    [\orange{i}]\blue{k}[\orange{j}]\blue{\ell}
+    [\orange{i}]\blue{k}[\orange{i}]\blue{\ell}
     +
-    [\orange{j}]\blue{\ell}[\orange{i}]\blue{k}.
+    [\orange{i}]\blue{\ell}[\orange{i}]\blue{k}.
 \]
 Indeed, $\gammashufflesym$ only interleaves the two units
 $[\orange{i}]\blue{k}$ and
-$[\orange{j}]\blue{\ell}$; no
+$[\orange{i}]\blue{\ell}$; no
 $\mathcal{A}^{\prime\prime}$-block is split. More generally, only the
 $\mathcal{A}^{\prime}$-skeletons are interleaved, while the two terminal
 $\mathcal{A}^{\prime\prime}$-blocks are merged with a single
@@ -2225,32 +2264,33 @@ multi-binomial coefficient, as shown in
 
 This suggests carrying out the entire computation on the dual side in
 partially symmetrized shear coordinates. Under the coordinate
-transformation, let $\widehat{\Psi}^{\ast}$ denote the dual coordinate map
-defined by $\langle\widehat{\Psi}^{\ast}(\ell),\widehat{\mathbf{a}}\rangle
+transformation, the dual coordinate map
+$(\widehat{\Psi}^{-1})^{\ast}$ is characterized by
+$\langle(\widehat{\Psi}^{-1})^{\ast}(\ell),\widehat{\mathbf{a}}\rangle
 :=\langle\ell,\widehat{\Psi}^{-1}(\widehat{\mathbf{a}})\rangle$. Shuffle
 products then satisfy
 \[
-    \widehat{\Psi}^{\ast}
+    (\widehat{\Psi}^{-1})^{\ast}
     \left(
         \ell_1\widehat{\shuffle}_{N,M}\ell_2
     \right)
     =
-    \widehat{\Psi}^{\ast}(\ell_1)
+    (\widehat{\Psi}^{-1})^{\ast}(\ell_1)
     \gammashufflesym_{N,M}
-    \widehat{\Psi}^{\ast}(\ell_2),
+    (\widehat{\Psi}^{-1})^{\ast}(\ell_2),
 \]
 while right concatenation by
 $\blue{i}\in\mathcal{A}^{\prime}$ is preserved\footnote{Right concatenation by
 $\orange{i}\in\mathcal{A}^{\prime\prime}$, corresponding to integration
 against $X^i$, must instead be transported to shear coordinates by
 integration by parts
-$\widehat{\Psi}^{\ast}\circ\mathcal{R}_{\orange{i}}\circ
-(\widehat{\Psi}^{\ast})^{-1}$, where
+$(\widehat{\Psi}^{-1})^{\ast}\circ\mathcal{R}_{\orange{i}}\circ
+\widehat{\Psi}^{\ast}$, where
 $\mathcal{R}_{\orange{i}}(\ell)=\ell\orange{i}$.}:
 \[
-    \widehat{\Psi}^{\ast}(\ell\blue{i})
+    (\widehat{\Psi}^{-1})^{\ast}(\ell\blue{i})
     =
-    \widehat{\Psi}^{\ast}(\ell)\blue{i}.
+    (\widehat{\Psi}^{-1})^{\ast}(\ell)\blue{i}.
 \]
 
 
@@ -2264,7 +2304,7 @@ $z=(z^{\prime},z^{\prime\prime})
 In direct analogy with the ordered-coordinate recursion in
 \Cref{alg:ordered_signature_horner}, write
 $\exp_{\widehat{\otimes}}(z):=\widehat{\exp_{\otimes}(z)}$. The
-mixed-truncated product
+bidegree-truncated product
 \[
     \widehat{\mathbf{b}}_0
     =
@@ -2272,132 +2312,59 @@ mixed-truncated product
     \widehat{\otimes}_{N,M}
     \exp_{\widehat{\otimes}}(z)
 \]
-is computed by the Horner recursion in
-\Cref{alg:symmetrized_signature_horner}. The outer recursion and the
-traversal of the active bidegrees are unchanged; only right
-multiplication by the first-level increment is adapted to the partially
-symmetrized block representation.
-
-\begin{algorithm}
-\caption{Horner recursion in partially symmetrized coordinates}
-\label{alg:symmetrized_signature_horner}
-\begingroup
-\algrenewcommand\algorithmiccomment[1]{\hfill\texttt{//}#1}
-\begin{algorithmic}[1]
-\Require
-$\widehat{\mathbf{a}}\in\widehat{T}^{N,M}(\mathbb{R}^{d})$ and
-$z=(z^{\prime},z^{\prime\prime})\in\mathbb{R}^{d}$
-\Ensure
-$\widehat{\mathbf{b}}_0
-=
-\widehat{\mathbf{a}}
-\widehat{\otimes}_{N,M}
-\exp_{\widehat{\otimes}}(z)$
-\State
-$\widehat{\mathbf{b}}_{N+M}^{(0,0)}
-\gets
-\widehat{\mathbf{a}}^{(0,0)}$
-\For{$q=N+M,\ldots,1$}
-    \State
-    $\widehat{\mathbf{b}}_{q-1}^{(0,0)}
-    \gets
-    \widehat{\mathbf{a}}^{(0,0)}$
-    \ForAll{$(n,m)$ such that
-        $0\leq n\leq N$,
-        $0\leq m\leq M$, and
-        $1\leq n+m\leq N+M-q+1$}
-        \Comment{\texttt{(*)}}
-        \State
-        $\widehat{\mathbf{b}}_{q-1}^{(n,m)}
-        \gets
-        \widehat{\mathbf{a}}^{(n,m)}$
-        \If{$m>0$}
-            \ForAll{$\boldsymbol{\alpha}
-                =
-                (\alpha_0,\ldots,\alpha_n)
-                \in\operatorname{MPl}(n,m-1)$,
-                in increasing rank $k$}
-                \ForAll{$\orange{i}\in\mathcal{A}^{\prime\prime}$}
-                    \State
-                    $k^{\prime}
-                    \gets
-                    \operatorname{rk}_{\mathrm{sym}}
-                    \left(
-                        \alpha_0,\ldots,
-                        \alpha_n+\delta_{\orange{i}}
-                    \right)$
-                    \State
-                    $\displaystyle
-                    \bigl(
-                        \widehat{\mathbf{b}}_{q-1}^{(n,m)}
-                    \bigr)_{k^{\prime}}
-                    \gets
-                    \bigl(
-                        \widehat{\mathbf{b}}_{q-1}^{(n,m)}
-                    \bigr)_{k^{\prime}}
-                    +
-                    \frac{z^{\prime\prime}_{\orange{i}}}{q}
-                    \bigl(
-                        \widehat{\mathbf{b}}_{q}^{(n,m-1)}
-                    \bigr)_k$
-                \EndFor
-            \EndFor
-        \EndIf
-        \If{$n>0$}
-            \State
-            $r
-            \gets
-            |\operatorname{MPl}(n,m)|
-            -
-            |\operatorname{MPl}(n-1,m)|$
-            \For{$k=0,\ldots,
-                |\operatorname{MPl}(n-1,m)|-1$}
-                \State
-                $\displaystyle
-                \bigl(
-                    \widehat{\mathbf{b}}_{q-1}^{(n,m)}
-                \bigr)_{k+r}
-                \gets
-                \bigl(
-                    \widehat{\mathbf{b}}_{q-1}^{(n,m)}
-                \bigr)_{k+r}
-                +
-                \frac{1}{q}
-                \bigl(
-                    \widehat{\mathbf{b}}_{q}^{(n-1,m)}
-                \bigr)_k
-                \otimes z^{\prime}$
-            \EndFor
-        \EndIf
-    \EndFor
-\EndFor
-\State \Return $\widehat{\mathbf{b}}_0$
-\Statex
-\Statex \texttt{(*)} For fixed $q$, the active bidegrees may be traversed
-in any order and
-their computation may be parallelized.
-\end{algorithmic}
-\endgroup
-\end{algorithm}
+is computed by the outer recursion of
+\Cref{alg:ordered_signature_horner}, with $\widehat{\otimes}$ in place of
+$\otimes$ and the partially symmetrized fixed-bidegree update below.
 
 \begin{implrmk}
 The runtime loops over $q$ and the active bidegrees remain. For the
-$z^{\prime\prime}$-contribution, retain one loop over
-$\orange{i}\in\mathcal{A}^{\prime\prime}$ and vectorize over the complete
-input rank axis and all dense $\mathcal{A}^{\prime}$-axes. With the
-precomputed target-rank maps
-$K^{\prime\prime}_{n,m,\orange{i}}$, the fixed-bidegree update is
+$z^{\prime\prime}$-contribution, vectorize jointly over
+$\orange{i}\in\mathcal{A}^{\prime\prime}$, the complete input-rank axis,
+and all dense $\mathcal{A}^{\prime}$-axes. Let
+$\delta_{\orange{i}}\in\mathbb{N}_0^{\mathcal{A}^{\prime\prime}}$ be the
+unit multi-index at $\orange{i}$. If
+$(\alpha_0,\ldots,\alpha_n)
+=\operatorname{rk}_{\mathrm{sym}}^{-1}(k)
+\in\operatorname{MPl}(n,m-1)$, precompute
+\[
+    K^{\prime\prime}_{n,m}(\orange{i},k)
+    :=
+    \operatorname{rk}_{\mathrm{sym}}
+    \left(
+        \alpha_0,\ldots,
+        \alpha_n+\delta_{\orange{i}}
+    \right).
+\]
+Flatten the pairs $(\orange{i},k)$ in lexicographic order. The direct plan
+stores the resulting target array $K^{\prime\prime}_{n,m}$. For the
+destination-ordered plan, store the increasing array $H$ of distinct target
+ranks, one primary edge index in $E_{\mathrm{pri}}$ for each entry of $H$,
+and the remaining edge indices and targets in $E_{\mathrm{col}}$ and
+$K_{\mathrm{col}}$. The fixed-bidegree update is
 \begin{algorithmic}[1]
 \State $\widehat{\mathbf{b}}_{q-1}^{(n,m)}
     \gets\widehat{\mathbf{a}}^{(n,m)}$
 \If{$m>0$}
-    \ForAll{$\orange{i}\in\mathcal{A}^{\prime\prime}$}
+    \State form the flattened edge array
+    $\mathbf{V}_{(\orange{i},k)}
+    \gets
+    q^{-1}z^{\prime\prime}_{\orange{i}}
+    (\widehat{\mathbf{b}}_q^{(n,m-1)})_k$
+    \If{the direct plan is retained}
         \State $\widehat{\mathbf{b}}_{q-1}^{(n,m)}
-            [K^{\prime\prime}_{n,m,\orange{i}}]
-            \mathrel{+}=
-            q^{-1}z^{\prime\prime}_{\orange{i}}
-            \widehat{\mathbf{b}}_{q}^{(n,m-1)}$
-    \EndFor
+        \gets
+        \operatorname{scatteradd}
+        (\widehat{\mathbf{b}}_{q-1}^{(n,m)},
+        K^{\prime\prime}_{n,m},\mathbf{V})$
+    \Else
+        \State $\widehat{\mathbf{b}}_{q-1}^{(n,m)}[H]
+        \mathrel{+}=\mathbf{V}[E_{\mathrm{pri}}]$
+        \State $\widehat{\mathbf{b}}_{q-1}^{(n,m)}
+        \gets
+        \operatorname{scatteradd}
+        (\widehat{\mathbf{b}}_{q-1}^{(n,m)},
+        K_{\mathrm{col}},\mathbf{V}[E_{\mathrm{col}}])$
+    \EndIf
 \EndIf
 \If{$n>0$}
     \State $\widehat{\mathbf{b}}_{q-1}^{(n,m)}
@@ -2408,41 +2375,45 @@ $K^{\prime\prime}_{n,m,\orange{i}}$, the fixed-bidegree update is
         \otimes z^{\prime}$
 \EndIf
 \end{algorithmic}
-For fixed $\orange{i}$, the target ranks are distinct, so each update is an
-indexed addition without reduction. There is no loop over multiset-placement
-ranks. A backend supporting indexed addition with an additional letter axis
-may fuse the loop over $\mathcal{A}^{\prime\prime}$, but this is not
-required. Only two Horner states are stored.
+There is no runtime loop over letters or multiset-placement ranks. The
+direct plan retains only $K^{\prime\prime}_{n,m}$; the destination-ordered
+plan retains $H$, $E_{\mathrm{pri}}$, $E_{\mathrm{col}}$, and
+$K_{\mathrm{col}}$. Only two Horner states are live.
 \end{implrmk}
-
-If $Y$ is piecewise affine on
-$s=t_0<\cdots<t_J=t$, with increments
-$\Delta Y_j=Y_{t_{j-1},t_j}$, we set
-$\widehat{\mathbf{S}}_0=e_{[\emptyset]}$ and apply the recursion
-successively for
-\[
-    \widehat{\mathbf{S}}_j
-    =
-    \widehat{\mathbf{S}}_{j-1}
-    \widehat{\otimes}_{N,M}
-    \exp_{\widehat{\otimes}}(\Delta Y_j),
-    \qquad
-    j=1,\ldots,J.
-\]
-The partially symmetrized Chen identity then gives $\widehat{\mathbf{S}}_J
-    = \Sigsym{Y}^{N,M}_{s,t}$.
 
 
 \section{Operations in shear coordinates}
 \label{sec:shear_coordinate_computation}
 
 In this section, we express the coordinate transformations, transported
-concatenation products, signature computations, and dual products in the
-block layouts of \Cref{sec:placement_layouts}. As in
+concatenation products, signature computations, and dual products. Since
+$\Psi$ and $\Psi^{-1}$ are graded, they commute with $\pi_K$ and restrict to
+$T^K(\mathbb{R}^d)$. Hence, under total-degree truncation, computations in
+ordered shear coordinates are performed directly on the canonical dense
+homogeneous components and require neither bidegree blocks nor placement
+ranks. More precisely, enumerate the words of length $r$ as
+$w_0,\ldots,w_{d^r-1}$ in the lexicographic order induced by the fixed
+alphabet order and, for $L\in\{\Psi,\Psi^{-1}\}$, precompute
+\[
+    D_r^L(k,\ell)
+    :=
+    \big\langle
+        w_k,
+        L(e_{w_\ell})
+    \big\rangle.
+\]
+If $x_\ell=\langle w_\ell,\mathbf{a}^{(r)}\rangle$, then the flattened
+coefficient vector of $L(\mathbf{a}^{(r)})$ is $D_r^Lx$ and is reshaped
+back to the canonical $r$-axis array. The nonzero row, column, and
+coefficient lists of $D_r^L$ may be retained instead of the dense matrix
+when this uses less memory. A finite maximum degree is required because
+these degreewise maps are precomputed. The remainder of the section gives
+the corresponding formulas in the bidegree block layouts of
+\Cref{sec:placement_layouts}. As in
 \Cref{sec:standard_coordinate_operations}, we first treat the ordered
 coordinates and then their partially symmetrized counterparts.
 
-\subsection{Ordered coordinates}{\ }
+\subsection{Ordered coordinates}
 
 
 \subsubsection{Concatenation.}\label{sec:shear_concat}
@@ -2613,7 +2584,7 @@ $Q^{\prime\prime}_{Q^{\prime},R}(P_1,P_2)$ records the positions occupied
 by the $\mathcal{A}^{\prime\prime}$-letters of the first input within the
 $\mathcal{A}^{\prime\prime}$-subsequence of the output.
 
-\begin{figure}[h]
+\begin{figure}[ht]
     \centering
     \begin{tikzpicture}[
         x=0.55cm,
@@ -2916,7 +2887,7 @@ corresponding term are permuted by
 \]
 
 Grouping the terms according to the resulting pair
-$(Q^{\prime},Q^{\prime\prime})$ gives the displayed representation and
+$(Q^{\prime},Q^{\prime\prime})$ gives the displayed formula and
 its stated support. The recursion partitions the unit interleavings
 according to the final $\mathcal{A}^{\prime}$-letter, and the ordinary
 terminal shuffle contains each $R$ once. Thus, for fixed input placements
@@ -2989,7 +2960,7 @@ Their terminal block lengths follow from
     \qquad
     l\in\{1,2\},
 \]
-and hence the defining block-length representation recovers $P_1$ and
+and hence the defining block-length encoding recovers $P_1$ and
 $P_2$. Finally, writing
 $d=\sum_{u=1}^{n}\delta p_u$, we recover the terminal shuffle placement
 from
@@ -3073,7 +3044,7 @@ arrays are required. The lists are generated directly by enumerating
 $P_1$, $P_2$, $Q^{\prime}$, and $R$ as described in the following
 algorithm.
 
-\begin{algorithm}[h]
+\begin{algorithm}[ht]
 \caption{Placement-rank lists for the ordered shear shuffle}
 \label{alg:gamma_shuffle_placement_arrays}
 \begin{algorithmic}[1]
@@ -3243,7 +3214,7 @@ For constructing permutation tuples, given
     \in
     \operatorname{Pl}(u,v),\qquad \{\bar q_1<\cdots<\bar q_v\}
     =
-    \{1,\ldots,u+v\}\setminus Q.
+    \{1,\ldots,u+v\}\setminus Q,
 \]
 and tuples
 $a=(a_1,\ldots,a_u)$ and
@@ -3272,7 +3243,11 @@ $\mathcal{A}^{\prime\prime}$-axes. By the \emph{support} of either
 transformation at bidegree $(n,m)$, we mean the collection of its nonzero
 contributions, each specified by an output placement, an input placement,
 and a permutation of the dense
-$\mathcal{A}^{\prime\prime}$-axes. The graded-row identities established in
+$\mathcal{A}^{\prime\prime}$-axes. For a graded linear map $L$ and a word
+$w\in\mathcal{W}_{\mathcal{A}}$, we write $L_w$ for its graded row,
+characterized by
+$\langle w,L(\mathbf{a})\rangle=\langle L_w,\mathbf{a}\rangle$.
+The graded-row identities established in
 \cite[Propositions~3.2 and~3.7]{mainpaper} provide recursive descriptions
 of these supports. For
 $u\in\mathcal{W}_{\mathcal{A}^{\prime\prime}}$,
@@ -3355,7 +3330,7 @@ $\mathcal{A}^{\prime\prime}$-axes by
 $\sigma^{\pm}_{n,m,c}$, contributes to the output placement slice of rank
 $k$.
 
-For the recursive construction and the mathematical representation of the
+For the recursive construction and the explicit formulas for the
 transformations, it is convenient to group the support entries by their
 output rank, since the graded-row recursions determine one output placement
 slice at a time. We therefore define
@@ -3403,7 +3378,7 @@ and
 \]
 
 \begin{lemma}
-\label{lem:psi_support_representation}
+\label{lem:psi_support_formula}
 For every bidegree $(n,m)$, the permutation tables and support relations
 produced by
 \Cref{alg:psi_support,alg:psi_inverse_support}
@@ -3437,14 +3412,14 @@ and
     \mathbf{a}^{(n,m)}_\ell.
 \]
 The pairs $(\ell,c)$ in each fixed-output fibre are pairwise distinct.
-In particular, every term in the representation of $\Psi$ has coefficient
-one, while the coefficient of a term in the representation of
+In particular, every term in the formula for $\Psi$ has coefficient one,
+while the coefficient of a term in the formula for
 $\Psi^{-1}$ is determined by its input and output placement ranks through
 $\varepsilon_{n,m}$.
 \end{lemma}
 
 The support tables in
-\Cref{lem:psi_support_representation} are constructed recursively in the
+\Cref{lem:psi_support_formula} are constructed recursively in the
 $\mathcal{A}^{\prime}$-degree. For $n=0$, both transformations are the
 identity on words over $\mathcal{A}^{\prime\prime}$, and we initialize
 \[
@@ -3512,7 +3487,7 @@ output rank. During the construction of the transformation supports, we
 use a temporary reverse index from an input-rank pair to the zero-based row
 positions at which it occurs.
 
-\begin{algorithm}[h]
+\begin{algorithm}[ht]
 \caption{Sparse support for $\Psi$}
 \label{alg:psi_support}
 \begin{algorithmic}[1]
@@ -3621,7 +3596,7 @@ and has rank
     \ell+\binom{p_n+q-1}{n}.
 \]
 
-\begin{algorithm}[h]
+\begin{algorithm}[ht]
 \caption{Sparse support for $\Psi^{-1}$}
 \label{alg:psi_inverse_support}
 \begin{algorithmic}[1]
@@ -3701,7 +3676,7 @@ $\mathsf{T}^{-}_{n,m}$
 \end{algorithmic}
 \end{algorithm}
 
-\begin{proof}[Proof of \Cref{lem:psi_support_representation}]
+\begin{proof}[Proof of \Cref{lem:psi_support_formula}]
 We prove the two assertions simultaneously by induction on the
 $\mathcal{A}^{\prime}$-degree $n$. By linearity and the definition of the
 graded rows, it is enough to show that, for each basis word with a fixed
@@ -3724,7 +3699,7 @@ $\mathcal{A}^{\prime\prime}$. The initialization
     =
     \{(0,0,0)\}
 \]
-therefore gives both representations.
+therefore gives both formulas.
 
 Suppose that the assertions hold for
 $\mathcal{A}^{\prime}$-degree $n-1$, and fix
@@ -3805,7 +3780,7 @@ parent permutation table then recovers its key. The parent pair is unique
 by the induction hypothesis. Thus, the pairs in
 $\mathsf{T}^{+}_{n,m}(\operatorname{rk}(P))$ are pairwise distinct.
 Finally, every ordinary-shuffle term occurs once with coefficient one, so
-the asserted representation of $\Psi$ follows.
+the asserted formula for $\Psi$ follows.
 
 For $\Psi^{-1}$, write the row word as
 \[
@@ -3923,7 +3898,7 @@ is
         \operatorname{rk}(G)
     \bigr).
 \]
-This proves the asserted representation of $\Psi^{-1}$ and completes the
+This proves the asserted formula for $\Psi^{-1}$ and completes the
 induction.
 \end{proof}
 
@@ -3933,40 +3908,42 @@ The nested loops in
 During this construction, keep the support grouped by output rank so that
 the parent fibres required at the next
 $\mathcal{A}^{\prime}$-degree are contiguous. Afterward, regroup the same
-entries by permutation key and, for each $c$, form the rank-axis matrices
-\[
-    M^{+,c}_{n,m}(k,\ell)
-    :=
-    \mathbbm{1}_{\{(k,\ell)\in\mathsf{T}^{+,c}_{n,m}\}},
-    \qquad
-    M^{-,c}_{n,m}(k,\ell)
-    :=
-    \mathbbm{1}_{\{(k,\ell)\in\mathsf{T}^{-,c}_{n,m}\}}.
-\]
+entries by permutation key $c$ and retain their output- and input-rank lists
+$K_c$ and $L_c$. For the inverse, the sign of a retained pair $(k,\ell)$ is
+$\eta_{n,m}(k)\eta_{n,m}(\ell)$. For a small group for which it is
+memory-competitive, one may additionally materialize the corresponding
+signed dense rank matrix $M_c$.
+
 At runtime, the loops are over the bidegrees and the permutation keys only.
-For one bidegree, flatten all dense axes into one trailing axis and apply
+For one key, apply
 \begin{algorithmic}[1]
-\State $\mathbf{Y}\gets0$
-\ForAll{$c$}
+\If{a dense rank matrix $M_c$ is retained}
     \State $\mathbf{X}\gets
         \operatorname{reshape}
         \left(
-            (\operatorname{id}^{\otimes n}\otimes
-            \sigma^{+}_{n,m,c})\mathbf{a}^{(n,m)}
+            (\operatorname{id}^{\otimes n}\otimes\sigma_c)
+            \mathbf{a}^{(n,m)}
         \right)$
-    \State $\mathbf{Y}\mathrel{+}=M^{+,c}_{n,m}\mathbf{X}$
-\EndFor
-\State reshape $\mathbf{Y}$ to the output block shape
+    \State $\mathbf{Y}\mathrel{+}=M_c\mathbf{X}$
+\Else
+    \State $\mathbf{V}\gets\mathbf{a}^{(n,m)}[L_c]$
+    \State apply $\sigma_c$ to the dense
+        $\mathcal{A}^{\prime\prime}$-axes of $\mathbf{V}$
+    \State flatten the dense axes of $\mathbf{V}$ into one trailing axis
+    \If{applying $\Psi^{-1}$}
+        \State multiply each row of $\mathbf{V}$ by
+        $\eta_{n,m}(K_c)\eta_{n,m}(L_c)$
+    \EndIf
+    \State $\mathbf{Y}\gets
+        \operatorname{scatteradd}(\mathbf{Y},K_c,\mathbf{V})$
+\EndIf
 \end{algorithmic}
-for $\Psi$. For $\Psi^{-1}$, replace $M^{+,c}_{n,m}$ and
-$\sigma^{+}_{n,m,c}$ by $M^{-,c}_{n,m}$ and
-$\sigma^{-}_{n,m,c}$, multiply the input rank axis by $\eta_{n,m}$ before
-each matrix product, and multiply the final output rank axis by
-$\eta_{n,m}$. Thus there is no runtime loop over support entries, placement
-ranks, or dense coordinates: each key uses one dense-axis permutation and
-one rank-axis matrix multiplication. The matrices may be stored in sparse
-or dense form according to their density, chosen once during
-precomputation.
+Thus there is no runtime loop over support entries, placement ranks, or
+dense coordinates. Dense groups permute the full block and use one
+rank-axis matrix multiplication. All other groups first gather the required
+placement slices, then permute only this batch and scatter-add it along the
+rank axis. In particular, the latter are retained as rank-pair lists rather
+than as sparse matrices.
 \end{implrmk}
 
 Finally, let
@@ -3987,15 +3964,23 @@ displacement, respectively every peeling index, to vanish, so the diagonal
 contains only the identity dense-axis permutation. All transformation data
 depend only on the truncation parameters.
 
+With the graded-transpose convention of \cite{mainpaper}, transposing the
+precomputed block maps for $\Psi$ gives $\Psi^{\ast}$. Hence a functional
+$\ell$ in shear coordinates is paired with a tensor $\mathbf{a}$ in standard
+coordinates as
+$\langle\ell,\mathbf{a}\rangle_{\Psi}
+=\langle\Psi^{\ast}(\ell),\mathbf{a}\rangle$, without first forming
+$\Psi(\mathbf{a})$.
+
 \subsubsection{Computing signatures.}
 
 Since $\Psi$ preserves bidegrees,
 $\pi^{N,M}\circ\Psi=\Psi\circ\pi^{N,M}$. Thus, one may compute the
-standard mixed-truncated signature by
+standard bidegree-truncated signature by
 \Cref{alg:ordered_signature_horner} and apply the transformation $\Psi$
 from \Cref{sec:transformations} once at the end. This is the natural
-procedure when only the final representation of the signature in shear
-coordinates is required.
+procedure when only the final shear coordinates of the signature are
+required.
 
 There is also a direct shear-coordinate recursion. Although a general
 product $\mathbf{a}\odot_{N,M}\mathbf{b}$ is evaluated through the
@@ -4175,140 +4160,14 @@ $(T((\mathbb{R}^d)),\odot)$, we define
     \sum_{r=0}^{\infty}
     \frac{z^{\odot r}}{r!},
 \]
-with $z^{\odot0}=e_{\emptyset}$. The mixed-truncated product
+with $z^{\odot0}=e_{\emptyset}$. The bidegree-truncated product
 $\pi^{N,M}
 \bigl(
     \mathbf{a}\odot\exp_{\odot}(z)
 \bigr)$
-is computed by the same pruned Horner scheme as in standard coordinates,
-using the first-level action from
+is computed by the outer recursion of
+\Cref{alg:ordered_signature_horner}, using the first-level action from
 \Cref{lem:ordered_shear_first_level_action}.
-
-\begin{algorithm}[h]
-\caption{Horner recursion in ordered shear coordinates}
-\label{alg:ordered_shear_signature_horner}
-\begingroup
-\algrenewcommand\algorithmiccomment[1]{\hfill\texttt{//}#1}
-\begin{algorithmic}[1]
-\Require
-$\mathbf{a}\in T^{N,M}(\mathbb{R}^{d})$ and
-$z=(z^{\prime},z^{\prime\prime})\in\mathbb{R}^{d}$
-\Ensure
-$\mathbf{b}_0
-=
-\pi^{N,M}
-\bigl(
-    \mathbf{a}\odot\exp_{\odot}(z)
-\bigr)$
-\State
-$\mathbf{b}_{N+M}^{(0,0)}
-\gets
-\mathbf{a}^{(0,0)}$
-\State
-All other blocks of $\mathbf{b}_{N+M}$ are absent
-\For{$q=N+M,\ldots,1$}
-    \State
-    $\mathbf{b}_{q-1}^{(0,0)}
-    \gets
-    \mathbf{a}^{(0,0)}$
-    \ForAll{$(n,m)$ such that
-        $0\leq n\leq N$,
-        $0\leq m\leq M$, and
-        $1\leq n+m\leq N+M-q+1$}
-        \Comment{\texttt{(*)}}
-        \State
-        $\mathbf{b}_{q-1}^{(n,m)}
-        \gets
-        \mathbf{a}^{(n,m)}$
-        \If{$m>0$}
-            \For{$k=0,\ldots,
-                |\operatorname{Pl}(n,m-1)|-1$}
-                \State
-                $\displaystyle
-                \bigl(
-                    \mathbf{b}_{q-1}^{(n,m)}
-                \bigr)_k
-                \gets
-                \bigl(
-                    \mathbf{b}_{q-1}^{(n,m)}
-                \bigr)_k
-                +
-                \frac{1}{q}
-                \bigl(
-                    \mathbf{b}_{q}^{(n,m-1)}
-                \bigr)_k
-                \otimes z^{\prime\prime}$
-            \EndFor
-        \EndIf
-        \If{$n>0$}
-            \ForAll{$P=\{p_1<\cdots<p_n\}
-                \in\operatorname{Pl}(n,m)$
-                with $p_0=0$ and increasing rank $k$}
-                \State
-                $\ell\gets
-                \operatorname{rk}\left(\{p_1,\ldots,p_{n-1}\}\right)$
-                \ForAll{$Q\in
-                    \operatorname{Pl}
-                    \left(
-                        p_n-p_{n-1}-1,
-                        n+m-p_n
-                    \right)$
-                    with increasing rank}
-                    \State
-                    $\displaystyle
-                    \bigl(
-                        \mathbf{b}_{q-1}^{(n,m)}
-                    \bigr)_k
-                    \gets
-                    \bigl(
-                        \mathbf{b}_{q-1}^{(n,m)}
-                    \bigr)_k
-                    +
-                    \frac{1}{q}
-                    \tau_{n-1,m,1,0}
-                    \left(
-                        \left(
-                            \operatorname{id}^{\otimes n-1}
-                            \otimes\rho_{P,Q}
-                        \right)
-                        \bigl(
-                            \mathbf{b}_{q}^{(n-1,m)}
-                        \bigr)_{\ell}
-                        \otimes z^{\prime}
-                    \right)$
-                \EndFor
-            \EndFor
-        \EndIf
-    \EndFor
-\EndFor
-\State \Return $\mathbf{b}_0$
-\Statex
-\Statex \texttt{(*)} For fixed $q$, the active bidegrees may be traversed
-in any order and their computation may be parallelized.
-\end{algorithmic}
-\endgroup
-\end{algorithm}
-
-To verify the stated output, consider the unpruned recursion
-$\widetilde{\mathbf{b}}_{N+M}=\mathbf{a}$ and
-$\widetilde{\mathbf{b}}_{q-1}
-=
-\mathbf{a}
-+
-q^{-1}\widetilde{\mathbf{b}}_q\odot z$.
-Repeated substitution gives
-$\widetilde{\mathbf{b}}_0
-=
-\mathbf{a}\odot
-\sum_{r=0}^{N+M}z^{\odot r}/r!$.
-The two block updates in
-\Cref{alg:ordered_shear_signature_horner} are precisely the two
-contributions from
-\Cref{lem:ordered_shear_first_level_action}. Since right multiplication
-by $z$ increases the total degree by one, discarding the inactive blocks
-at every step does not affect any block that is retained at the end.
-Terms of degree greater than $N+M$ vanish under $\pi^{N,M}$, which proves
-the asserted result.
 
 \begin{implrmk}
 The runtime loops over $q$, the active bidegrees, and the permutation keys
@@ -4347,35 +4206,7 @@ $\odot_{N,M}$-product nor a coordinate transformation is evaluated inside
 the update.
 \end{implrmk}
 
-If $Y$ is piecewise affine on
-$s=t_0<\cdots<t_J=t$, with increments
-$\Delta Y_j=Y_{t_{j-1},t_j}$, set
-$\mathbf{S}^{\Psi}_0=e_{\emptyset}$ and recursively define
-\[
-    \mathbf{S}^{\Psi}_j
-    =
-    \pi^{N,M}
-    \left(
-        \mathbf{S}^{\Psi}_{j-1}
-        \odot
-        \exp_{\odot}(\Delta Y_j)
-    \right),
-    \qquad
-    j=1,\ldots,J.
-\]
-Since $\odot$ adds bidegrees, truncating after each update does not affect
-any subsequently retained coordinate. Chen's identity and the definition
-of the transported product therefore give
-$\mathbf{S}^{\Psi}_j
-=
-\pi^{N,M}\Psi(\Sig{Y}_{s,t_j})$ for every $j$, and in particular
-$\mathbf{S}^{\Psi}_J
-=
-\pi^{N,M}\Psi(\Sig{Y}_{s,t})$.
-The standard-coordinate computation followed by $\Psi$ is natural for a
-one-off terminal signature, while the direct recursion is useful when
-intermediate states are already stored or repeatedly updated in shear
-coordinates. Its additional work is confined to shuffling the two
+The additional work in the direct recursion is confined to shuffling the two
 $\mathcal{A}^{\prime\prime}$-blocks adjacent to the final
 $\mathcal{A}^{\prime}$-letter.
 
@@ -4408,7 +4239,7 @@ restricts to
 \subsubsection{Shuffle.}
 \label{sec:symmetrized_shear_shuffle}
 
-Since $\gammashufflesym$ preserves bidegrees, it restricts to a product
+Since $\gammashufflesym$ adds bidegrees, it induces a truncated product
 \[
     \gammashufflesym_{N,M}
     :
@@ -4569,7 +4400,7 @@ $\alpha_{n_1}+\beta_{n_2}$ and contributes
 $\lambda(\boldsymbol{\alpha},\boldsymbol{\beta})$. This coefficient is
 independent of $Q^{\prime}$. Every interleaving occurs exactly once, so
 summing over $Q^{\prime}$ and over all bidegree splittings gives the stated
-representation.
+formula.
 \end{proof}
 
 Let
@@ -4615,7 +4446,7 @@ for each pair of input ranks by
     \lambda(\boldsymbol{\alpha},\boldsymbol{\beta}).
 \]
 
-\begin{algorithm}[h]
+\begin{algorithm}[ht]
 \caption{Multiset-placement rank lists for the partially symmetrized shear
 shuffle}
 \label{alg:gamma_shuffle_sym_rank_arrays}
@@ -4685,9 +4516,9 @@ The nested rank loops in
 \Cref{alg:gamma_shuffle_sym_rank_arrays} are precomputation only. At
 runtime, the loops are over the bidegree splittings and
 $Q'\in\operatorname{Pl}(n_1,n_2)$. For one $Q'$, vectorize over the full
-input-pair axis. Store its output-rank array, the common coefficient array
-$\widehat{\lambda}$, a stable ordering by output rank, the segment offsets,
-and one target rank per segment. The keyed update is
+input-pair axis and store its target-rank array $K_{Q'}$ in lexicographic
+input-pair order. The coefficient array $\widehat{\lambda}$ is common to all
+$Q'$. The keyed update is
 \begin{algorithmic}[1]
 \State $\mathbf{V}\gets
     \widehat{\Theta}_{Q'}
@@ -4698,16 +4529,17 @@ and one target rank per segment. The keyed update is
     \right)$
 \State flatten the two rank axes of $\mathbf{V}$
 \State $\mathbf{V}\gets\widehat{\lambda}\,\mathbf{V}$
-\State reorder $\mathbf{V}$ by the stored output-rank ordering
-\State $\mathbf{S}\gets$ segmented sum of $\mathbf{V}$ over the stored
-offsets
-\State add $\mathbf{S}$ at the stored target ranks of the output block
+\State $\widehat{\mathbf{c}}^{(n,m)}\gets
+    \operatorname{scatteradd}
+    \left(
+        \widehat{\mathbf{c}}^{(n,m)},K_{Q'},\mathbf{V}
+    \right)$
 \end{algorithmic}
-Thus there is no runtime loop over $(j_1,j_2)$. The only rank-axis
-reduction is the segmented sum, required because distinct input pairs may
-have the same output rank. If needed, the flattened pair axis may be
-processed in batches with partial sums accumulated at the same target
-ranks.
+Thus there is no runtime loop over $(j_1,j_2)$. Distinct input pairs that
+have the same output rank are accumulated by the scatter-add itself; no
+output-rank ordering, segment offsets, or per-segment target array is stored.
+If needed, the flattened pair axis may be processed in batches with updates
+scattered to the same target ranks.
 \end{implrmk}
 
 \subsubsection{Coordinate transformations.}
@@ -4850,7 +4682,7 @@ $(\gamma_0,\ldots,\gamma_{n-1})$ contributes to
 \]
 with the corresponding product of multi-binomial coefficients.
 
-\begin{algorithm}[h]
+\begin{algorithm}[ht]
 \caption{Sparse matrix for $\widehat{\Psi}$}
 \label{alg:psi_hat}
 \begin{algorithmic}[1]
@@ -4938,7 +4770,7 @@ $\mathcal{A}^{\prime}$-letter and merged with the terminal block of a
 parent term. The remaining multi-index $\alpha_n-\nu$ stays in the new
 terminal block. Empty tuples in the following algorithm are omitted.
 
-\begin{algorithm}[h]
+\begin{algorithm}[ht]
 \caption{Sparse matrix for $\widehat{\Psi}^{-1}$}
 \label{alg:psi_hat_inverse}
 \begin{algorithmic}[1]
@@ -5111,36 +4943,46 @@ placement of rank $\ell$ induces
 $\{g_1<\cdots<g_n\}$. Thus all contributions to the same matrix entry
 have the same sign, which is recovered from the two ranks, while
 $\widehat{C}^{-}_{n,m}$ stores only their positive magnitude. This proves
-both representations.
+both formulas.
 \end{proof}
 
 \begin{implrmk}
 The recursive loops in
 \Cref{alg:psi_hat,alg:psi_hat_inverse} are precomputation only. Several
-contributions may produce the same matrix entry, so each output row is
-first accumulated in an associative array and then stored as a sparse or
-dense matrix according to its final density.
+contributions may produce the same matrix entry, so their coefficients are
+first combined. For each bidegree, retain the resulting output-rank list
+$K$, input-rank list $L$, and coefficient list $\Lambda$. For a small block
+for which it is memory-competitive, one may additionally materialize the
+corresponding dense rank matrix $C$.
 
-At runtime, the only loop is over the bidegrees. Flatten the dense
+At runtime, flatten the dense
 $\mathcal{A}^{\prime}$-axes into one trailing axis and apply
 \begin{algorithmic}[1]
 \State $\mathbf{X}\gets
     \operatorname{reshape}
     (\widehat{\mathbf{a}}^{(n,m)})$
-\State $\mathbf{Y}\gets
-    \widehat{C}^{+}_{n,m}\mathbf{X}$
+\If{applying $\widehat{\Psi}^{-1}$}
+    \State $\mathbf{X}\gets\widehat{\eta}_{n,m}\mathbf{X}$
+\EndIf
+\If{a dense rank matrix $C$ is retained}
+    \State $\mathbf{Y}\gets C\mathbf{X}$
+\Else
+    \State $\mathbf{V}\gets\Lambda\,\mathbf{X}[L]$
+    \State $\mathbf{Y}\gets
+        \operatorname{scatteradd}(0,K,\mathbf{V})$
+\EndIf
+\If{applying $\widehat{\Psi}^{-1}$}
+    \State $\mathbf{Y}\gets\widehat{\eta}_{n,m}\mathbf{Y}$
+\EndIf
 \State reshape $\mathbf{Y}$ to the output block shape
 \end{algorithmic}
-for $\widehat{\Psi}$. For the inverse, with
-$D_{n,m}=\operatorname{diag}(\widehat{\eta}_{n,m})$, replace the matrix
-product by
-\[
-    \mathbf{Y}
-    =
-    D_{n,m}\widehat{C}^{-}_{n,m}D_{n,m}\mathbf{X}.
-\]
+Here $C=\widehat{C}^{+}_{n,m}$ for the forward map and
+$C=\widehat{C}^{-}_{n,m}$ for the inverse map.
 Hence there is no runtime loop over multiset-placement ranks, matrix
-entries, or dense coordinates. No dense-axis permutation is required.
+entries, or dense coordinates. Dense blocks use one rank-axis matrix
+multiplication; all other blocks use a gather, coefficient scaling, and
+scatter-add from the retained rank-pair lists. No dense-axis permutation is
+required.
 \end{implrmk}
 
 Finally, consider a nonzero entry with output multiset placement
@@ -5154,6 +4996,20 @@ place. It follows from \eqref{eq:rk_sym} that $h\geq k$. Equality forces the
 two placements to agree and all distributed or pulled-back multi-indices to
 vanish. Hence both matrices are upper triangular in the multiset-placement
 ordering, with diagonal entries equal to one.
+
+Analogously, transposing the precomputed block maps for $\widehat{\Psi}$
+gives $\widehat{\Psi}^{\ast}$. For a functional $\ell$ in partially
+symmetrized shear coordinates, the shear pairing is evaluated as
+$\langle\ell,\widehat{\mathbf{a}}\rangle_{\Psi}
+=\langle\widehat{\Psi}^{\ast}(\ell),
+\widehat{\mathbf{a}}\rangle$ directly in the partially symmetrized layout.
+If $\widehat{\mathbf{a}}=\symmetrizer(\mathbf{a})$, the same pairing may be
+evaluated against the ordered tensor $\mathbf{a}$ in standard coordinates as
+$\langle\ell,\widehat{\mathbf{a}}\rangle_{\Psi}
+=\langle\symmetrizer^{\ast}(\widehat{\Psi}^{\ast}(\ell)),
+\mathbf{a}\rangle$. Thus the partially symmetrized pairing uses no additional
+class-size weights, while the ordered pairing uses the adjoint lift
+$\symmetrizer^{\ast}$.
 
 \subsubsection{Computing signatures.}
 
@@ -5172,11 +5028,12 @@ Since $\widehat{\Psi}$ preserves bidegrees,
         \pi^{N,M}\Sigsym{Y}_{s,t}
     \right).
 \]
-Thus, one may compute the partially symmetrized mixed-truncated signature
-by \Cref{alg:symmetrized_signature_horner} and apply
-$\widehat{\Psi}$ from \Cref{sec:symmetrized_transformations} once at the
-end. This is the natural procedure when only the final representation of
-the signature in partially symmetrized shear coordinates is required.
+Thus, one may compute the partially symmetrized bidegree-truncated signature
+by \Cref{alg:ordered_signature_horner} with the partially symmetrized block
+update, and apply $\widehat{\Psi}$ from
+\Cref{sec:symmetrized_transformations} once at the end. This is the natural
+procedure when only the final partially symmetrized shear coordinates of the
+signature are required.
 
 There is also a direct recursion. Since $\widehat{\Psi}$ is the identity
 on the first level, for
@@ -5293,7 +5150,7 @@ additional coefficient appears.
 
 For the $z^{\prime}$-contribution, removing the final
 $\mathcal{A}^{\prime}$-letter merges the two adjacent
-$\mathcal{A}^{\prime\prime}$-blocks. In the ordered representation these
+$\mathcal{A}^{\prime\prime}$-blocks. In ordered coordinates these
 blocks are combined by their ordinary shuffle. After partial
 symmetrization, all shuffle terms belong to the class with multi-index
 $\alpha_{n-1}+\alpha_n$, and their multiplicity is
@@ -5312,7 +5169,7 @@ appends the final dense $\mathcal{A}^{\prime}$-axis. This gives the second
 term.
 \end{proof}
 
-The mixed-truncated product
+The bidegree-truncated product
 \[
     \widehat{\mathbf{b}}_0
     =
@@ -5323,163 +5180,27 @@ The mixed-truncated product
         \exp_{\widehat{\odot}}(z)
     \right)
 \]
-is therefore computed by the same pruned Horner scheme as in the preceding
-signature algorithms, using the first-level action from
+is therefore computed by the outer recursion of
+\Cref{alg:ordered_signature_horner}, using the first-level action from
 \Cref{lem:symmetrized_shear_first_level_action}.
 
-\begin{algorithm}
-\caption{Horner recursion in partially symmetrized shear coordinates}
-\label{alg:symmetrized_shear_signature_horner}
-\begingroup
-\algrenewcommand\algorithmiccomment[1]{\hfill\texttt{//}#1}
-\begin{algorithmic}[1]
-\Require
-$\widehat{\mathbf{a}}\in\widehat{T}^{N,M}(\mathbb{R}^{d})$ and
-$z=(z^{\prime},z^{\prime\prime})\in\mathbb{R}^{d}$
-\Ensure
-$\widehat{\mathbf{b}}_0
-=
-\pi^{N,M}
-\left(
-    \widehat{\mathbf{a}}
-    \,\widehat{\odot}\,
-    \exp_{\widehat{\odot}}(z)
-\right)$
-\State
-$\widehat{\mathbf{b}}_{N+M}^{(0,0)}
-\gets
-\widehat{\mathbf{a}}^{(0,0)}$
-\State
-All other blocks of $\widehat{\mathbf{b}}_{N+M}$ are absent
-\For{$q=N+M,\ldots,1$}
-    \State
-    $\widehat{\mathbf{b}}_{q-1}^{(0,0)}
-    \gets
-    \widehat{\mathbf{a}}^{(0,0)}$
-    \ForAll{$(n,m)$ such that
-        $0\leq n\leq N$,
-        $0\leq m\leq M$, and
-        $1\leq n+m\leq N+M-q+1$}
-        \Comment{\texttt{(*)}}
-        \State
-        $\widehat{\mathbf{b}}_{q-1}^{(n,m)}
-        \gets
-        \widehat{\mathbf{a}}^{(n,m)}$
-        \If{$m>0$}
-            \ForAll{$(\alpha_0,\ldots,\alpha_n)
-                \in\operatorname{MPl}(n,m-1)$
-                with increasing rank $k$}
-                \ForAll{$\orange{i}\in\mathcal{A}^{\prime\prime}$}
-                    \State
-                    $k^{\prime}
-                    \gets
-                    \operatorname{rk}_{\mathrm{sym}}
-                    \left(
-                        \alpha_0,\ldots,
-                        \alpha_n+\delta_{\orange{i}}
-                    \right)$
-                    \State
-                    $\displaystyle
-                    \bigl(
-                        \widehat{\mathbf{b}}_{q-1}^{(n,m)}
-                    \bigr)_{k^{\prime}}
-                    \gets
-                    \bigl(
-                        \widehat{\mathbf{b}}_{q-1}^{(n,m)}
-                    \bigr)_{k^{\prime}}
-                    +
-                    \frac{z^{\prime\prime}_{\orange{i}}}{q}
-                    \bigl(
-                        \widehat{\mathbf{b}}_{q}^{(n,m-1)}
-                    \bigr)_k$
-                \EndFor
-            \EndFor
-        \EndIf
-        \If{$n>0$}
-            \ForAll{$(\alpha_0,\ldots,\alpha_n)
-                \in\operatorname{MPl}(n,m)$
-                with increasing rank $k$}
-                \State
-                $\ell
-                \gets
-                \operatorname{rk}_{\mathrm{sym}}
-                \left(
-                    \alpha_0,\ldots,\alpha_{n-2},
-                    \alpha_{n-1}+\alpha_n
-                \right)$
-                \State
-                $\displaystyle
-                \lambda
-                \gets
-                \prod_{\orange{i}\in\mathcal{A}^{\prime\prime}}
-                \binom{
-                    \alpha_{n-1,\orange{i}}
-                    +
-                    \alpha_{n,\orange{i}}
-                }{
-                    \alpha_{n-1,\orange{i}}
-                }$
-                \State
-                $\displaystyle
-                \bigl(
-                    \widehat{\mathbf{b}}_{q-1}^{(n,m)}
-                \bigr)_k
-                \gets
-                \bigl(
-                    \widehat{\mathbf{b}}_{q-1}^{(n,m)}
-                \bigr)_k
-                +
-                \frac{\lambda}{q}
-                \bigl(
-                    \widehat{\mathbf{b}}_{q}^{(n-1,m)}
-                \bigr)_{\ell}
-                \otimes z^{\prime}$
-            \EndFor
-        \EndIf
-    \EndFor
-\EndFor
-\State \Return $\widehat{\mathbf{b}}_0$
-\Statex
-\Statex \texttt{(*)} For fixed $q$, the active bidegrees may be traversed
-in any order and their computation may be parallelized.
-\end{algorithmic}
-\endgroup
-\end{algorithm}
-
-The two updates are precisely the $z^{\prime\prime}$- and
-$z^{\prime}$-contributions in
-\Cref{lem:symmetrized_shear_first_level_action}. Repeated substitution in
-the unpruned Horner recursion gives
-\[
-    \widehat{\mathbf{a}}
-    \,\widehat{\odot}\,
-    \sum_{r=0}^{N+M}
-    \frac{z^{\widehat{\odot}r}}{r!}.
-\]
-Since right multiplication by $z$ increases the total degree by one,
-discarding the inactive blocks at each step does not affect any block
-retained at the end. Terms of degree greater than $N+M$ vanish after
-applying $\pi^{N,M}$, which proves the stated output of the algorithm.
-
 \begin{implrmk}
-The runtime loops over $q$ and the active bidegrees remain. For the
-$z^{\prime\prime}$-contribution, reuse the target-rank maps
-$K^{\prime\prime}_{n,m,\orange{i}}$ and retain one loop over
-$\orange{i}\in\mathcal{A}^{\prime\prime}$, vectorized over all input ranks
-and dense $\mathcal{A}^{\prime}$-axes. For the $z^{\prime}$-contribution,
+The runtime loops over $q$ and the active bidegrees remain. The
+$z^{\prime\prime}$-contribution uses the same joint edge axis and the same
+precomputed direct or destination-ordered plan as in the standard partially
+symmetrized recursion. Thus all $\mathcal{A}^{\prime\prime}$-letters and
+input ranks are processed together. For the $z^{\prime}$-contribution,
 precompute the input-rank and coefficient arrays $L_{n,m}$ and
 $\Lambda_{n,m}$. The fixed-bidegree update is
 \begin{algorithmic}[1]
 \State $\widehat{\mathbf{b}}_{q-1}^{(n,m)}
     \gets\widehat{\mathbf{a}}^{(n,m)}$
 \If{$m>0$}
-    \ForAll{$\orange{i}\in\mathcal{A}^{\prime\prime}$}
-        \State $\widehat{\mathbf{b}}_{q-1}^{(n,m)}
-            [K^{\prime\prime}_{n,m,\orange{i}}]
-            \mathrel{+}=
-            q^{-1}z^{\prime\prime}_{\orange{i}}
-            \widehat{\mathbf{b}}_{q}^{(n,m-1)}$
-    \EndFor
+    \State form all values
+    $q^{-1}z^{\prime\prime}_{\orange{i}}
+    (\widehat{\mathbf{b}}_q^{(n,m-1)})_k$
+    on the joint edge axis $(\orange{i},k)$
+    \State add them by the retained direct or destination-ordered plan
 \EndIf
 \If{$n>0$}
     \State $\mathbf{V}\gets
@@ -5489,64 +5210,317 @@ $\Lambda_{n,m}$. The fixed-bidegree update is
         q^{-1}\Lambda_{n,m}\mathbf{V}\otimes z^{\prime}$
 \EndIf
 \end{algorithmic}
-There is no runtime loop over multiset-placement ranks. The
+There is no runtime loop over letters or multiset-placement ranks. The
 $z^{\prime}$-term is one dense gather, scaling, tensor product, and direct
 addition in output-rank order; no reduction or dense-axis permutation is
-required. Only two Horner states are stored.
+required. Only two Horner states are live.
 \end{implrmk}
 
-If $Y$ is piecewise affine on
-$s=t_0<\cdots<t_J=t$, with increments
-$\Delta Y_j=Y_{t_{j-1},t_j}$, set
-$\widehat{\mathbf{S}}^{\Psi}_0=e_{[\emptyset]}$ and apply the recursion
-successively:
-\[
-    \widehat{\mathbf{S}}^{\Psi}_j
-    =
-    \pi^{N,M}
-    \left(
-        \widehat{\mathbf{S}}^{\Psi}_{j-1}
-        \,\widehat{\odot}\,
-        \exp_{\widehat{\odot}}(\Delta Y_j)
-    \right),
-    \qquad
-    j=1,\ldots,J.
-\]
-Since $\widehat{\odot}$ adds bidegrees, truncating after each update does
-not affect any subsequently retained coordinate. The partially
-symmetrized Chen identity and the definition of the transported product
-therefore give
-\[
-    \widehat{\mathbf{S}}^{\Psi}_j
-    =
-    \pi^{N,M}
-    \widehat{\Psi}
-    \bigl(
-        \Sigsym{Y}_{s,t_j}
-    \bigr),
-    \qquad
-    j=0,\ldots,J.
-\]
-In particular,
-\[
-    \widehat{\mathbf{S}}^{\Psi}_J
-    =
-    \pi^{N,M}
-    \widehat{\Psi}
-    \bigl(
-        \Sigsym{Y}_{s,t}
-    \bigr).
-\]
-The standard partially symmetrized computation followed by
-$\widehat{\Psi}$ is natural for a one-off terminal signature, while the
-direct recursion is useful when intermediate states are already stored or
-repeatedly updated in partially symmetrized shear coordinates. In the
-$z^{\prime}$-contribution, the entire shuffle of the two terminal
+In the $z^{\prime}$-contribution, the entire shuffle of the two terminal
 $\mathcal{A}^{\prime\prime}$-blocks collapses to one source rank and one
 multi-binomial coefficient.
 
+\section{Parallel signature computation}
+\label{sec:parallel_signature_computation}
+
+The Horner schemes above update complete bidegree blocks through vectorized
+array operations. A complementary approach proposed in
+\cite[Secs.~3.1--3.2]{nygaard2026pathsig} computes signature
+coefficients directly in the word basis. For each target word, one
+computational unit evolves the signature coefficients of its prefix chain
+through all path increments. The time iteration within one unit remains
+sequential, whereas the units associated with distinct target words are
+independent. We explain how this word-parallel approach interfaces with the
+ordered and partially symmetrized bidegree layouts.
+
+\subsection{Wordwise recursion}
+
+For reference, we first recall the wordwise signature recursion from
+\cite[Secs.~3.1--3.2]{nygaard2026pathsig}. The construction in this
+subsection is not new; we repeat it only to fix notation and to make the
+subsequent adaptation to the ordered and partially symmetrized bidegree
+layouts self-contained.
+
+Let $Y$ be piecewise linear on $s=t_0<\cdots<t_J=t$, with increments
+$\Delta Y_j=Y_{t_{j-1},t_j}$, and set
+$\mathbf{S}_j:=\Sig{Y}_{s,t_j}$. For
+$w=i_1\cdots i_r\in\mathcal{W}_{\mathcal{A}}$, write
+$w_{[q]}:=i_1\cdots i_q$ and $w_{[0]}:=\varnothing$. Chen's identity gives
+\[
+    \big\langle w_{[p]},\mathbf{S}_j\big\rangle
+    =
+    \sum_{q=0}^{p}
+    \big\langle w_{[q]},\mathbf{S}_{j-1}\big\rangle
+    \frac{
+        \prod_{u=q+1}^{p}\Delta Y_j^{i_u}
+    }{
+        (p-q)!
+    },
+    \qquad
+    p=0,\ldots,r,
+\]
+with the empty product equal to one. The following in-place Horner scheme
+computes the terminal coefficient while retaining only the coefficients of
+the prefixes of $w$.
+
+\begin{algorithm}[ht]
+\caption{Signature computation over one prefix chain}
+\label{alg:word_parallel_signature}
+\begin{algorithmic}[1]
+\Require a word $w=i_1\cdots i_r$ and increments
+$\Delta Y_1,\ldots,\Delta Y_J$
+\Ensure $\langle w,\Sig{Y}_{s,t}\rangle$
+\State $a_0\gets1$ and $a_p\gets0$ for $p=1,\ldots,r$
+\For{$j=1,\ldots,J$}
+    \For{$p=r,\ldots,1$}
+        \State $h\gets0$
+        \For{$q=0,\ldots,p-1$}
+            \State
+            $\displaystyle
+            h\gets
+            \frac{\Delta Y_j^{i_{q+1}}}{p-q}
+            \left(a_q+h\right)$
+        \EndFor
+        \State $a_p\gets a_p+h$
+    \EndFor
+\EndFor
+\State \Return $a_r$
+\end{algorithmic}
+\end{algorithm}
+
+The descending loop over $p$ ensures that every $a_q$ used in the update
+still equals
+$\langle w_{[q]},\mathbf{S}_{j-1}\rangle$. Thus one computational unit
+requires $r+1$ local scalar values and performs
+$\mathcal{O}(Jr^2)$ arithmetic operations. Assigning one prefix chain to
+each target word repeats the computation of shared prefixes, but removes
+any dependence between distinct computational units; this is the
+granularity used in \cite{nygaard2026pathsig}.
+
+\subsection{Ordered bidegree layout}
+
+The set of words retained by bidegree truncation is
+\[
+    \mathcal{W}_{\mathcal{A}}^{N,M}
+    :=
+    \left\{
+        w\in\mathcal{W}_{\mathcal{A}}:
+        |w|_{\mathcal{A}^{\prime}}\leq N,
+        \quad
+        |w|_{\mathcal{A}^{\prime\prime}}\leq M
+    \right\}.
+\]
+It is prefix-closed, since taking a prefix cannot increase either component
+of the bidegree. Hence \Cref{alg:word_parallel_signature} applies directly
+to every coordinate of the bidegree-truncated signature.
+
+For fixed $(n,m)$, interleaving the two letter sequences according to the
+placement gives a bijection
+\[
+    \operatorname{Pl}(n,m)
+    \times
+    (\mathcal{A}^{\prime})^n
+    \times
+    (\mathcal{A}^{\prime\prime})^m
+    \longrightarrow
+    \left\{
+        w\in\mathcal{W}_{\mathcal{A}}:
+        |w|_{\mathcal{A}^{\prime}}=n,
+        \quad
+        |w|_{\mathcal{A}^{\prime\prime}}=m
+    \right\}.
+\]
+Replacing the placement by its colexicographic rank is exactly the block
+layout in \eqref{eq:mixed_block_layout}. Thus the computational units for
+bidegree $(n,m)$ may be indexed directly by the scalar entries of
+$\mathbf{S}^{(n,m)}$, without first enumerating the words in a separate
+ordering.
+
+\begin{implrmk}
+For a fixed bidegree $(n,m)$, launch one computational unit for every scalar
+entry of the block, hence
+\[
+    |\operatorname{Pl}(n,m)|
+    |\mathcal{A}^{\prime}|^n
+    |\mathcal{A}^{\prime\prime}|^m
+\]
+units in total. The ordinary flattening of the block axes gives the unit
+index. The placement rank is decoded through the precomputed inverse-rank
+table, and the two dense letter tuples are interleaved according to that
+placement. The unit then applies
+\Cref{alg:word_parallel_signature} and writes its terminal value directly
+to the same array entry. The prefix values remain local to the unit, so no
+ranks of the prefixes are required. There is no output permutation or
+rank-axis accumulation. The loops over the path increments and the prefixes
+remain inside each unit, while all scalar entries of a fixed bidegree block
+are independent. Processing one bidegree at a time gives the same word
+length and loop bounds to all units in the corresponding launch.
+\end{implrmk}
+
+\subsection{Partially symmetrized bidegree layout}
+
+The direct reuse of the ordered word-parallel computation is to evaluate
+all ordered representatives and then apply the partial symmetrization map.
+Since one partially symmetrized coordinate is the sum of the corresponding
+ordered coordinates, this reduction may be fused with the final writes by
+mapping each ordered word to its multiset-placement rank. This avoids
+storing the complete ordered output, but it does not reduce the wordwise
+arithmetic and requires accumulation when several representatives have the
+same target rank.
+
+A quotient-native alternative follows from the partially symmetrized
+first-level update. Let
+\[
+    [w]
+    =
+    \alpha_0\blue{i_1}\alpha_1\cdots
+    \blue{i_n}\alpha_n
+\]
+be a quotient word in normal form. Its multiset-prefix set is
+\[
+\begin{aligned}
+    \operatorname{Pref}_{\mathrm{sym}}([w])
+    :={}&
+    \left\{
+        \beta:
+        0\leq\beta\leq\alpha_0
+    \right\}
+    \\
+    &\cup
+    \bigcup_{p=1}^{n}
+    \left\{
+        \alpha_0\blue{i_1}\cdots
+        \alpha_{p-1}\blue{i_p}\beta:
+        0\leq\beta\leq\alpha_p
+    \right\},
+\end{aligned}
+\]
+where the inequalities are componentwise. These are precisely the quotient
+classes containing a prefix of an ordered representative of $[w]$. The
+cardinality of this set is
+\[
+    \left|
+        \operatorname{Pref}_{\mathrm{sym}}([w])
+    \right|
+    =
+    \sum_{p=0}^{n}
+    \prod_{\orange{i}\in\mathcal{A}^{\prime\prime}}
+    \left(
+        \alpha_{p,\orange{i}}+1
+    \right).
+\]
+
+\begin{lemma}
+\label{lem:symmetrized_prefix_closure}
+The set $\operatorname{Pref}_{\mathrm{sym}}([w])$ is closed under the
+predecessor maps in the partially symmetrized first-level action.
+Consequently, the coordinate
+$\langle[w],\Sigsym{Y}_{s,t}\rangle$ can be computed independently by
+restricting the partially symmetrized product--Horner recursion to this set.
+\end{lemma}
+
+\begin{proof}
+Consider an element whose terminal multi-index is $\beta$. Its
+$\mathcal{A}^{\prime\prime}$-contribution only uses the elements obtained
+by replacing $\beta$ by
+$\beta-\delta_{\orange{i}}$ for those
+$\orange{i}\in\mathcal{A}^{\prime\prime}$ with
+$\beta_{\orange{i}}>0$. These elements belong to the same componentwise
+interval. If $\beta=0$ and the element ends in
+$\blue{i_p}\in\mathcal{A}^{\prime}$, its
+$\mathcal{A}^{\prime}$-contribution uses the preceding element ending in
+the complete block $\alpha_{p-1}$. This element also belongs to
+$\operatorname{Pref}_{\mathrm{sym}}([w])$. Hence the set is closed under
+all predecessor operations in the partially symmetrized first-level action.
+The product--Horner recursion consists only of repeated applications of
+this action, so no coordinate outside the set is required.
+\end{proof}
+
+\begin{implrmk}
+For
+$k=\operatorname{rk}_{\mathrm{sym}}
+(\alpha_0,\ldots,\alpha_n)$, precompute the elements of
+$\operatorname{Pref}_{\mathrm{sym}}([w])$ and their predecessor edges. The
+combinatorial graph depends only on the multiset-placement rank $k$; its
+$p$-th $\mathcal{A}^{\prime}$-edge reads the increment coordinate selected
+by the $p$-th dense $\mathcal{A}^{\prime}$-index. One computational unit
+may then be assigned to every scalar entry
+\[
+    \left(
+        k,
+        \blue{i_1},\ldots,\blue{i_n}
+    \right)
+\]
+of the block in \eqref{eq:symmetrized_block_layout}. It keeps the values on
+the multiset-prefix set locally, applies the partially symmetrized Horner
+recursion through the path increments, and writes only the coordinate of
+$[w]$. Distinct output entries are independent, and no ordered
+$\mathcal{A}^{\prime\prime}$-axes or rank-axis reduction are required. The
+path increments and the local Horner depth remain sequential within the
+unit. The local coordinate set has cardinality
+$|\operatorname{Pref}_{\mathrm{sym}}([w])|$, so its working memory varies
+with the multiset-placement rank. When this local problem is too large for
+one computational unit, the ordered word-parallel computation followed by
+reduction onto the multiset-placement layout gives the direct fallback.
+\end{implrmk}
+
+The ordered reduction is an immediate implementation of partial
+symmetrization. The quotient-native construction in
+\Cref{lem:symmetrized_prefix_closure} avoids the expansion into ordered
+representatives, but its efficiency depends on the sizes of the
+multiset-prefix sets and on the available local memory.
+
+\subsection{Shear coordinates}
+
+The word-parallel recursion is naturally formulated in standard
+coordinates. Its ordered output already has the layout required by $\Psi$,
+while the quotient-native output has the layout required by
+$\widehat{\Psi}$. The corresponding shear-coordinate signatures are
+therefore obtained by
+\[
+    \Psi\bigl(\pi^{N,M}\Sig{Y}_{s,t}\bigr)
+    \qquad\text{and}\qquad
+    \widehat{\Psi}
+    \bigl(\pi^{N,M}\Sigsym{Y}_{s,t}\bigr),
+\]
+using the transformations constructed above.
+
+We do not propose a direct word-parallel recursion in shear coordinates.
+In the ordered case, right multiplication by an
+$\mathcal{A}^{\prime}$-letter joins two adjacent
+$\mathcal{A}^{\prime\prime}$-blocks through an ordinary shuffle; after
+partial symmetrization, the same action contributes a multi-binomial
+coefficient. A shear-coordinate output is therefore not closed on an
+ordinary prefix chain. The direct shear-coordinate Horner schemes of
+\Cref{lem:ordered_shear_first_level_action,lem:symmetrized_shear_first_level_action}
+remain the appropriate alternatives when the intermediate states are
+required in shear coordinates.
 
 
-\bibliographystyle{plain}
-\bibliography{biblio}
+\begin{thebibliography}{1}
+
+\bibitem{fraenkelMor1983}
+Aviezri~S. Fraenkel and Moshe Mor.
+\newblock Combinatorial compression and partitioning of large dictionaries.
+\newblock {\em The Computer Journal}, 26(4):336--343, 1983.
+
+\bibitem{mainpaper}
+Paul~P. Hager and Luca Pelizzari.
+\newblock Expected signatures via partial integration, coordinate change and
+  symmetrization.
+\newblock arXiv:2607.29534 [math.PR], 2026.
+
+\bibitem{knuth2011taocp4a}
+Donald~E. Knuth.
+\newblock {\em The Art of Computer Programming, Volume 4A: Combinatorial
+  Algorithms, Part 1}.
+\newblock Addison-Wesley, 2011.
+
+\bibitem{nygaard2026pathsig}
+Tobias Nygaard.
+\newblock {pathsig}: A {GPU}-accelerated library for truncated and projected
+  path signatures, 2026.
+
+\end{thebibliography}
+
 \end{document}

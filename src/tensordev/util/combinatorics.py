@@ -1,9 +1,9 @@
 """Packed combinatorial layouts for Volterra coefficient algorithms.
 
-The helpers in this module build graded multi-index layouts that replace tuple-
-keyed combinatorics by dense array indexing. The resulting layouts are valid JAX
-pytrees and can therefore be passed into jitted coefficient and evaluation
-kernels, while still providing a few host-side convenience methods.
+The helpers represent graded multi-indices by dense array indices.  The
+resulting layouts are valid JAX pytrees and can therefore be passed into
+jitted coefficient and evaluation kernels while retaining host-side lookup
+methods.
 """
 
 from __future__ import annotations
@@ -32,8 +32,7 @@ class MultiIndexLayout:
     the ordering is deterministic and chosen so that lower-degree blocks are
     prefixes of higher-degree layouts.
 
-    The main purpose of the layout is to replace tuple-keyed combinatorics with
-    dense integer indexing:
+    Multi-indices use dense integer indexing:
 
     - ``idx <-> ell[idx]``
     - degree blocks via ``offsets``
@@ -92,7 +91,7 @@ class MultiIndexLayout:
     def index_of(self, ell: Sequence[int]) -> int:
         """Return the packed index of a multi-index ``ell``.
 
-        This helper is intended for host-side preprocessing and debugging. Jitted
+        This helper is intended for host-side preprocessing and inspection. Jitted
         numerical kernels should instead use the precomputed navigation arrays
         ``plus`` and ``minus``.
         """

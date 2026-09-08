@@ -10,9 +10,9 @@ from tensordev.core.utils.annotations import jit as dummy_jit
 class ShearCoordinateCore:
     """Mixin implementing coordinate-transported shear operations.
 
-    Representation-specific subclasses provide the four coordinate actions
+    Concrete subclasses provide the four coordinate actions
     and their homogeneous block variants.  The ordinary algebra drivers live
-    on :class:`~tensordev.core.universal.Universal` and its representation
+    on :class:`~tensordev.core.universal.Universal` and its block
     specializations, so neither shear core carries a second implementation of
     graded products, contractions, matrix products, or formal series.
     """

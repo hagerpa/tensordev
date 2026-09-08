@@ -15,6 +15,7 @@ from tensordev.core.bigraded.symmetrized.combinatorics import (
     multiset_placement_count,
 )
 from tensordev.core.utils.precompute import _readonly, _unsigned_index_dtype
+from tensordev.core.utils.segmented import DestinationRankPlan
 
 
 def _positive_count(value: object, *, name: str) -> int:
@@ -200,6 +201,74 @@ def _emit_doubleprime_generator_targets(
     return valid
 
 
+@njit(cache=True, nogil=True)
+def _emit_doubleprime_generator_destination(
+    output_placements: np.ndarray,
+    binomial: np.ndarray,
+    selected_edge_ids: np.ndarray,
+    collision_target_ranks: np.ndarray,
+    source_rank_count: int,
+    doubleprime_rank_count: int,
+) -> bool:
+    """Fill a compact inverse terminal-append map in destination order."""
+    block_count = output_placements.shape[1]
+    alphabet_size = output_placements.shape[2]
+    edge_count = alphabet_size * source_rank_count
+    tail_primary_count = doubleprime_rank_count - source_rank_count
+    collision_cursor = tail_primary_count
+    scratch = np.empty((block_count, alphabet_size), dtype=np.uint64)
+
+    for target_rank in range(output_placements.shape[0]):
+        has_terminal_letter = False
+        for letter in range(alphabet_size - 1, -1, -1):
+            if output_placements[target_rank, block_count - 1, letter] == 0:
+                continue
+            if target_rank >= doubleprime_rank_count:
+                return False
+            for block in range(block_count):
+                for source_letter in range(alphabet_size):
+                    scratch[block, source_letter] = output_placements[
+                        target_rank, block, source_letter
+                    ]
+            scratch[block_count - 1, letter] -= 1
+            source_rank = _rank_blocks_impl(scratch, binomial)
+            if source_rank >= source_rank_count:
+                return False
+            edge_id = letter * source_rank_count + source_rank
+            if edge_id >= edge_count:
+                return False
+
+            if not has_terminal_letter:
+                if target_rank < source_rank_count:
+                    expected = (
+                        (alphabet_size - 1) * source_rank_count
+                        + target_rank
+                    )
+                    if edge_id != expected:
+                        return False
+                else:
+                    tail_index = target_rank - source_rank_count
+                    if tail_index >= tail_primary_count:
+                        return False
+                    selected_edge_ids[tail_index] = edge_id
+                has_terminal_letter = True
+            else:
+                if collision_cursor >= selected_edge_ids.size:
+                    return False
+                selected_edge_ids[collision_cursor] = edge_id
+                collision_target_ranks[
+                    collision_cursor - tail_primary_count
+                ] = target_rank
+                collision_cursor += 1
+
+        if target_rank < doubleprime_rank_count and not has_terminal_letter:
+            return False
+        if target_rank >= doubleprime_rank_count and has_terminal_letter:
+            return False
+
+    return collision_cursor == selected_edge_ids.size
+
+
 def compile_concatenation_targets(
     left_placements: object,
     right_placements: object,
@@ -268,6 +337,69 @@ def compile_doubleprime_generator_targets(
     if not valid:
         raise AssertionError("generator emitter produced an invalid rank")
     return _readonly(targets.astype(target_dtype, copy=False))
+
+
+def compile_doubleprime_generator_destination(
+    output_placements: object,
+    binomial: np.ndarray,
+    *,
+    source_rank_count: int,
+    doubleprime_rank_count: int,
+    compiled: bool,
+) -> DestinationRankPlan:
+    """Return a compact destination-ordered terminal-append plan."""
+    output = _placement_array(output_placements, name="output_placements")
+    source_rank_count = _positive_count(
+        source_rank_count,
+        name="source_rank_count",
+    )
+    doubleprime_rank_count = _positive_count(
+        doubleprime_rank_count,
+        name="doubleprime_rank_count",
+    )
+    output_rank_count = output.shape[0]
+    if doubleprime_rank_count > output_rank_count:
+        raise ValueError(
+            "doubleprime_rank_count cannot exceed the output rank count."
+        )
+
+    alphabet_size = output.shape[2]
+    edge_count = alphabet_size * source_rank_count
+    tail_primary_count = doubleprime_rank_count - source_rank_count
+    collision_count = edge_count - doubleprime_rank_count
+    if tail_primary_count < 0 or collision_count < 0:
+        raise ValueError("invalid destination-plan rank counts")
+    selected_edge_ids = np.empty(
+        edge_count - source_rank_count,
+        dtype=np.uint64,
+    )
+    collision_target_ranks = np.empty(
+        collision_count,
+        dtype=np.uint64,
+    )
+    emitter = _execution_function(
+        compiled,
+        _emit_doubleprime_generator_destination,
+    )
+    valid = emitter(
+        output,
+        np.asarray(binomial, dtype=np.uint64),
+        selected_edge_ids,
+        collision_target_ranks,
+        source_rank_count,
+        doubleprime_rank_count,
+    )
+    if not valid:
+        raise AssertionError("destination generator emitter produced invalid ranks")
+    return DestinationRankPlan.from_edges(
+        selected_edge_ids,
+        collision_target_ranks,
+        edge_count=edge_count,
+        output_rank_count=doubleprime_rank_count,
+        primary_head_start=(alphabet_size - 1) * source_rank_count,
+        primary_head_count=source_rank_count,
+        tail_primary_count=tail_primary_count,
+    )
 
 
 __all__ = []

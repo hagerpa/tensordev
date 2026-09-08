@@ -18,8 +18,7 @@ Checks verified per class
 
 Multi-batch checks (Section 7)
 -------------------------------
-Inputs of shape (*batch, T, d) with len(batch) > 1 exercise the three fixes
-in BaseKernel:
+Inputs of shape (*batch, T, d) with len(batch) > 1 verify:
   a. compute_kernel: full batch-shape validation (not just axis 0)
   b. compute_Gram non-sym: pairwise col-concat uses axis=len(X.shape)-2
   c. compute_Gram sym: G is initialised as (*batch_x, *batch_y) and indexed
@@ -255,7 +254,6 @@ def test_compute_expected_scoring_rule_smoke(setup_name, request):
 
 # ---------------------------------------------------------------------------
 # 5. FSSKSigKernel-specific: compute_Gram sym=True matches sym=False
-#    (specifically exercises the _dispatch path added by the refactor)
 # ---------------------------------------------------------------------------
 
 def test_fssk_sym_gram_matches_nonsym(fssk_setup):
@@ -285,21 +283,20 @@ def test_fssk_compute_mmd_finite(fssk_setup):
 def test_hok_call_time_increment_input_agrees_with_ctor(hok_setup):
     """
     Passing increment_input at call time should give the exact same result as
-    setting it at construction time (the notebook pattern).
+    setting it at construction time.
     """
-    ctor_kernel, dX, dY = hok_setup   # ctor_kernel has increment_input=True
+    ctor_kernel, dX, dY = hok_setup
 
     # Use equal-sized sub-batches for batchwise (non-pairwise) evaluation
     dX_sub = dX[:BATCH_X]
     dY_sub = dY[:BATCH_X]
 
-    # Build an equivalent kernel WITHOUT increment_input in ctor, pass it at call time
     call_kernel = HigherOrderKernel(
         log_steps=ctor_kernel.log_steps,
         log_degree=ctor_kernel.log_degree,
         backend=ctor_kernel.backend,
         dyadic_order=ctor_kernel.dyadic_order,
-        increment_input=False,   # default — will be overridden at call time
+        increment_input=False,
     )
 
     out_ctor = ctor_kernel(dX_sub, dY_sub, evaluate="terminal", pairwise=False)
@@ -315,8 +312,7 @@ def test_hok_call_time_increment_input_agrees_with_ctor(hok_setup):
 
 # ---------------------------------------------------------------------------
 # 7. Multi-batch axis: (*batch, T, d) inputs
-#    Uses SigKernel throughout — the fixes are in BaseKernel so one concrete
-#    kernel is sufficient.
+#    One BaseKernel implementation is sufficient for these shared contracts.
 # ---------------------------------------------------------------------------
 
 # Small sizes so tests stay fast.
@@ -415,7 +411,6 @@ def test_multibatch_gram_sym_shape_symmetry_and_chunking(multibatch_sig_setup):
         rtol=1e-10, atol=1e-10,
         err_msg="multi-batch sym Gram: chunked != full",
     )
-
 
 
 

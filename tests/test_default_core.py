@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+
 import jax.numpy as jnp
 import pytest
 
@@ -190,6 +192,48 @@ def test_set_default_core_constructs_total_degree_from_integer_dims():
     assert td.tensor_product.__self__ is core
 
 
+def test_make_core_matches_default_construction_without_installing_it():
+    initial_pair = td.get_default_core_pair()
+    kwargs = {
+        "dims": (1, 2),
+        "max_trunc": (2, 1),
+        "default_trunc": (1, 1),
+        "partially_symmetrized": True,
+        "coordinates": "shear",
+        "precompute_shuffle": "generator",
+    }
+
+    constructed = td.make_core(**kwargs)
+
+    assert td.get_default_core_pair() is initial_pair
+    installed = td.set_default_core(**kwargs)
+    assert type(constructed) is type(installed)
+    assert constructed.dims == installed.dims
+    assert constructed.max_truncation == installed.max_truncation
+    assert constructed.default_truncation == installed.default_truncation
+    assert (
+        constructed.partially_symmetrized
+        is installed.partially_symmetrized
+        is True
+    )
+    assert constructed.coordinates == installed.coordinates
+    assert constructed.shuffle_plan_store.scope == "generator"
+    assert installed.shuffle_plan_store.scope == "generator"
+
+
+def test_make_core_uses_the_default_core_construction_api():
+    make_parameters = inspect.signature(td.make_core).parameters
+    set_parameters = inspect.signature(td.set_default_core).parameters
+
+    assert tuple(make_parameters) == tuple(
+        name
+        for name in set_parameters
+        if name not in {"core", "seq_core"}
+    )
+    for name in tuple(make_parameters)[2:]:
+        assert make_parameters[name].default == set_parameters[name].default
+
+
 def test_set_default_core_constructs_bidegree_from_tuple_dims():
     core = td.set_default_core(
         dims=(1, 2),
@@ -369,24 +413,41 @@ def test_public_default_api_and_forwarded_operations_are_exported():
         "get_default_seq_core",
         "set_default_core",
         "reset_default_core",
+        "ConvolutionKernel",
         "tensor_product",
         "tensor_shuffle_product",
         "tensor_exponential",
-        "tensor_shear_inner_product",
-        "tensor_flatten",
+        "tensor_shear_pairing",
+        "tensor_to_flat",
         "shear_core",
-        "total_degree_core",
+        "make_core",
         "core_expected_memory",
         "tensor_from_standard_coordinates",
         "tensor_to_standard_coordinates",
     }
 
     assert expected <= set(td.__all__)
+    assert "tensor_signature_inner_product" not in td.__all__
+    assert "tensor_shear_inner_product" not in td.__all__
+    assert "total_degree_core" not in td.__all__
+    assert "bigraded_core" not in td.__all__
+    assert "symmetrized_core" not in td.__all__
+    assert "tensor_flatten" not in td.__all__
     assert "JaxSequentialCoreFreeDevelopment" not in td.__all__
+    for removed in (
+        "total_degree_core",
+        "bigraded_core",
+        "symmetrized_core",
+        "tensor_signature_inner_product",
+        "tensor_signature_inner_product_homogeneous",
+        "tensor_shear_inner_product",
+        "tensor_shear_inner_product_homogeneous",
+    ):
+        assert not hasattr(td, removed)
 
 
 def test_shear_pairing_is_rebound_with_the_default_core():
-    standard = td.total_degree_core(d=2, max_trunc=1)
+    standard = td.make_core(dims=2, max_trunc=1)
     core = td.shear_core(standard, dims=(1, 1))
     words = (
         jnp.ones((1,), dtype=jnp.float32),
@@ -395,9 +456,9 @@ def test_shear_pairing_is_rebound_with_the_default_core():
 
     td.set_default_core(core)
 
-    assert td.tensor_shear_inner_product.__self__ is core
-    assert td.tensor_shear_inner_product(words, words) == (
-        core.tensor_shear_inner_product(words, words)
+    assert td.tensor_shear_pairing.__self__ is core
+    assert td.tensor_shear_pairing(words, words) == (
+        core.tensor_shear_pairing(words, words)
     )
 
 
@@ -453,8 +514,8 @@ def test_background_total_shear_signature_matches_standard_signature():
         ],
         dtype=jnp.float32,
     )
-    standard_core = td.total_degree_core(
-        d=2,
+    standard_core = td.make_core(
+        dims=2,
         max_trunc=3,
         default_trunc=3,
     )
@@ -486,7 +547,7 @@ def test_background_bidegree_shear_signature_matches_standard_signature():
         ],
         dtype=jnp.float32,
     )
-    standard_core = td.bigraded_core(
+    standard_core = td.make_core(
         dims=(1, 1),
         max_trunc=(2, 2),
         default_trunc=(2, 1),
@@ -518,8 +579,8 @@ def test_shuffle_memory_estimator_matches_allocated_plan_payload(
     dimension,
     truncation,
 ):
-    core = td.total_degree_core(
-        d=dimension,
+    core = td.make_core(
+        dims=dimension,
         max_trunc=truncation,
         precompute_shuffle=True,
     )
@@ -651,18 +712,10 @@ def test_unified_memory_estimator_defaults_to_mib_and_validates_unit():
                 log_degree=(1, 1),
             ),
         ),
-        (
-            "fssk_state",
-            lambda path: td.fssk_state(path, kernel=None, dt=1.0, trunc=1),
-        ),
-        (
-            "fssk_vsig",
-            lambda path: td.fssk_vsig(path, kernel=None, dt=1.0, trunc=1),
-        ),
     ],
 )
 def test_total_degree_specific_entry_points_reject_bidegree_default(feature, call):
-    core = td.bigraded_core(
+    core = td.make_core(
         dims=(1, 1),
         max_trunc=(1, 1),
     )
@@ -673,13 +726,32 @@ def test_total_degree_specific_entry_points_reject_bidegree_default(feature, cal
         call(path)
 
 
+def test_scalar_fssk_entry_points_use_bidegree_default():
+    core = td.make_core(dims=(1, 1), max_trunc=(1, 1))
+    td.set_default_core(core)
+    kernel = td.FSSK.from_matrix(
+        Lambda=jnp.zeros((1, 1)),
+        A=jnp.eye(2)[None, :, :],
+        b=jnp.ones((1, 1)),
+    )
+    path = jnp.zeros((3, 2))
+
+    state = td.fssk_state(path, kernel=kernel, dt=1.0)
+    signature = td.fssk_vsig(path, kernel=kernel, dt=1.0)
+
+    assert state.spec.truncation == (1, 1)
+    assert state.spec.include_scalar is False
+    assert signature.spec.truncation == (1, 1)
+    assert signature.spec.include_scalar is True
+
+
 @pytest.mark.parametrize("precompute_shuffle", [False, "generator", True])
 def test_bigraded_memory_estimator_matches_allocated_plan_payload(
     precompute_shuffle,
 ):
     dims = (1, 2)
     capacity = (2, 1)
-    core = td.bigraded_core(
+    core = td.make_core(
         dims=dims,
         max_trunc=capacity,
         precompute_shuffle=precompute_shuffle,
@@ -958,7 +1030,7 @@ def test_shear_plan_statistics_report_compile_and_memory_structure():
 def test_bigraded_factory_and_estimator_exclude_shuffle_by_default():
     dims = (1, 1)
     capacity = (2, 2)
-    core = td.bigraded_core(dims=dims, max_trunc=capacity)
+    core = td.make_core(dims=dims, max_trunc=capacity)
 
     assert core.shuffle_plan_store is None
     assert td.core_expected_memory(
@@ -968,21 +1040,21 @@ def test_bigraded_factory_and_estimator_exclude_shuffle_by_default():
     ) == core.memory_mb()
 
 
-def test_bigraded_factory_validates_capacity_and_supports_scalar_only_core():
-    with pytest.raises(ValueError, match="strictly positive"):
-        td.bigraded_core(dims=(0, 1), max_trunc=(1, 1))
+def test_make_core_validates_bidegree_capacity_and_supports_scalar_only_core():
+    with pytest.raises(ValueError, match="must be positive"):
+        td.make_core(dims=(0, 1), max_trunc=(1, 1))
     with pytest.raises(TypeError, match="dims must be a pair"):
-        td.bigraded_core(dims=(1,), max_trunc=(1, 1))
+        td.make_core(dims=(1,), max_trunc=(1, 1))
     with pytest.raises(ValueError, match="non-negative"):
-        td.bigraded_core(dims=(1, 1), max_trunc=(1, -1))
+        td.make_core(dims=(1, 1), max_trunc=(1, -1))
     with pytest.raises(ValueError, match="exceeds core capacity"):
-        td.bigraded_core(
+        td.make_core(
             dims=(1, 1),
             max_trunc=(1, 1),
             default_trunc=(2, 1),
         )
 
-    scalar_core = td.bigraded_core(dims=(1, 1), max_trunc=(0, 0))
+    scalar_core = td.make_core(dims=(1, 1), max_trunc=(0, 0))
     identity = scalar_core.tensor_exponential(tuple(), trunc=(0, 0))
     assert identity.grades == ((0, 0),)
     assert jnp.array_equal(identity[0, 0], jnp.ones((1,), dtype=identity[0, 0].dtype))

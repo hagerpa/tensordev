@@ -69,7 +69,7 @@ class StaticKernel(ABC):
 
 
 # ---------------------------------------------------------------------------
-# Internal broadcast helper (mirrors free._broadcast_pairwise)
+# Pairwise broadcasting
 # ---------------------------------------------------------------------------
 
 def _expand_for_gram(X: Array, Y: Array, n_trailing: int = 2) -> tuple[Array, Array]:

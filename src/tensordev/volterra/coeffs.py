@@ -24,9 +24,8 @@ class VolterraCoefficients:
     Packed interval coefficients for the quadratic Volterra-signature scheme.
 
     This object stores the coefficient arrays consumed by the symmetric
-    shuffle/Horner evaluation routines.  The public package name deliberately
-    does not include ``symmetric``; the implementation assumes the coefficient
-    symmetry hypothesis from the paper, i.e. the coefficient of a word ``w p``
+    shuffle/Horner evaluation routines.  These routines assume the coefficient
+    symmetry hypothesis from the paper: the coefficient of a word ``w p``
     depends on the prefix word ``w`` only through its multi-index ``ell``.
 
     For a triple ``(s,t,tau)`` and a prefix multi-index ``ell`` with
@@ -35,8 +34,8 @@ class VolterraCoefficients:
 
         K_{s,t}^{w(ell) p, tau} / (t - s)^{|ell| + 1}.
 
-    Consequently, ``alpha`` has trailing shape ``(n, M)``, where
-    ``M = #{ell in N^n : |ell| <= trunc - 1}``.  All axes before ``(n, M)``
+    Consequently, ``alpha`` has trailing shape ``(q, M)``, where
+    ``M = #{ell in N^q : |ell| <= trunc - 1}``.  All axes before ``(q, M)``
     are generic leading axes.  For grid precomputation these leading axes are
     usually ``(source_interval, readout_index)``.
     """
@@ -45,7 +44,7 @@ class VolterraCoefficients:
     trunc: int = field(metadata={"static": True})
     m: int = field(metadata={"static": True})
     q: int = field(metadata={"static": True})
-    alpha: Array        # leading + (n, M)
+    alpha: Array        # leading + (q, M)
     valid: Array        # leading, boolean mask for Delta^3-valid triples
 
     @property

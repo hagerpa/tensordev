@@ -107,7 +107,7 @@ def test_target_public_estimator_is_byte_exact_against_full_core():
         "dims": (1, 2),
         "max_trunc": (10, 4),
         "precompute_shuffle": True,
-        "representation": "ordered",
+        "partially_symmetrized": False,
         "coordinates": "shear",
     }
     previous_pair = td.get_default_core_pair()
@@ -166,7 +166,7 @@ def test_target_estimator_does_not_expand_or_allocate_support(monkeypatch):
             dims=(1, 2),
             max_trunc=(10, 4),
             precompute_shuffle=True,
-            representation="ordered",
+            partially_symmetrized=False,
             coordinates="shear",
             unit="bytes",
         )

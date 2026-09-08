@@ -804,7 +804,8 @@ class VolterraSignature:
         order:
             Quadrature order for the basis-expansion scheme (default ``0``).
         scheme:
-            ``"auto"`` (default), ``"fft"``, or ``"quadratic"``.
+            ``"auto"`` (default), ``"fft"``, ``"quadratic"``, or
+            ``"adams"``.
 
         Returns
         -------

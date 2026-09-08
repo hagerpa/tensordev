@@ -691,7 +691,7 @@ class TotalShearPlanBuilder:
             )
         return categories
 
-    def expected_memory_bytes_by_category(
+    def _expected_memory_bytes_by_category(
         self,
         *,
         degree: int,
@@ -1078,7 +1078,7 @@ class TotalShearPlanBuilder:
             with_transpose=True,
         )
 
-    def expected_transform_memory(
+    def _expected_transform_memory(
         self,
         degree: int,
         *,
@@ -1121,8 +1121,8 @@ class TotalShearPlanBuilder:
             with_transpose=False,
         )
 
-    def expected_generator_memory(self, output_degree: int) -> dict[str, int]:
-        return self.expected_memory_bytes_by_category(
+    def _expected_generator_memory(self, output_degree: int) -> dict[str, int]:
+        return self._expected_memory_bytes_by_category(
             degree=output_degree,
             records=self._generator_records(output_degree),
             source_domains=("full",) * (output_degree - 1) + ("prime",),
@@ -1154,13 +1154,13 @@ class TotalShearPlanBuilder:
             with_transpose=False,
         )
 
-    def expected_shuffle_memory(
+    def _expected_shuffle_memory(
         self,
         left_degree: int,
         right_degree: int,
     ) -> dict[str, int]:
         degree = left_degree + right_degree
-        return self.expected_memory_bytes_by_category(
+        return self._expected_memory_bytes_by_category(
             degree=degree,
             records=self._gamma_records(left_degree, right_degree),
             source_domains=("full",) * degree,
@@ -1197,22 +1197,22 @@ def _expected_total_shear_memory_bytes_by_category(
     builder = TotalShearPlanBuilder(normalized_dims)
     family_memories: dict[str, list[dict[str, int]]] = {
         "forward": [
-            builder.expected_transform_memory(degree, inverse=False)
+            builder._expected_transform_memory(degree, inverse=False)
             for degree in range(capacity + 1)
         ],
         "inverse": [
-            builder.expected_transform_memory(degree, inverse=True)
+            builder._expected_transform_memory(degree, inverse=True)
             for degree in range(capacity + 1)
         ],
         "generator": [
-            builder.expected_generator_memory(degree)
+            builder._expected_generator_memory(degree)
             for degree in range(1, capacity + 1)
         ],
         "shuffle": (
             []
             if scope == "none"
             else [
-                builder.expected_shuffle_memory(left_degree, right_degree)
+                builder._expected_shuffle_memory(left_degree, right_degree)
                 for left_degree, right_degree in _total_gamma_pairs(
                     capacity, scope
                 )

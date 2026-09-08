@@ -67,13 +67,13 @@ _X_1d = jnp.array(
 
 
 # ---------------------------------------------------------------------------
-# 1. q=1 regression: scalar FFT still agrees with vsig
+# 1. q=1: scalar FFT agrees with vsig
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("order", [0, 1, 2])
 @pytest.mark.parametrize("trunc", [1, 2, 3])
 def test_q1_fft_matches_vsig(order, trunc):
-    """q=1 FFT path is unaffected by the q>1 wiring."""
+    """The q=1 FFT path agrees with direct Volterra evaluation."""
     X = jnp.array(
         [[0.0, 0.0], [0.2, -0.1], [0.4, 0.3], [0.1, 0.5]],
         dtype=jnp.float64,
@@ -85,7 +85,7 @@ def test_q1_fft_matches_vsig(order, trunc):
 
 
 # ---------------------------------------------------------------------------
-# 2. q=2, m=1 — simplest layout, catches channel-order bugs clearly
+# 2. q=2, m=1 — simplest channel-order layout
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("order", [0, 1, 2])
@@ -120,7 +120,7 @@ def test_q2_m1_various_betas(beta_pair):
 @pytest.mark.parametrize("order", [0, 1, 2])
 @pytest.mark.parametrize("trunc", [2, 3])
 def test_q2_m2_order_vs_vsig(order, trunc):
-    """vsig_fft (q=2, m=2) agrees with vsig — catches letter-axis bugs."""
+    """vsig_fft preserves letter-axis order for q=2 and m=2."""
     kernel = _q2_kernel_m2(beta0=0.8, beta1=1.0)
     ref = vsig(_X_2d, kernel=kernel, dt=1.0, trunc=trunc, order=order)
     got = vsig_fft(_X_2d, kernel=kernel, dt=1.0, trunc=trunc, order=order)
@@ -186,4 +186,3 @@ def test_q2_m1_batch():
     ref = vsig(X_batch, kernel=kernel, dt=0.25, trunc=2, order=1, axis=-2)
     got = vsig_fft(X_batch, kernel=kernel, dt=0.25, trunc=2, order=1, axis=-2)
     _assert_allclose(got, ref, atol=1e-10, label="q2 batch")
-

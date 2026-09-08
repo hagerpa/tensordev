@@ -1,6 +1,6 @@
 """Placement-factored ordered-bidegree shear coordinates.
 
-The numerical representation in this module is exactly ``BigradedTensor``:
+The numerical storage in this module is exactly ``BigradedTensor``:
 one placement axis followed by packed prime and double-prime dense axes.  No
 operation below constructs or traverses a dense total-degree level.
 """
@@ -15,6 +15,7 @@ from typing import Any, Literal, Mapping
 import jax.numpy as jnp
 import numpy as np
 
+from tensordev.core.capabilities import _WORDWISE_SIGNATURE_PROTOCOL
 from tensordev.core.shear._compiled_gamma import (
     _ShearShuffleWorkspace,
     _shear_shuffle_group_count,
@@ -990,14 +991,14 @@ class ShearBigradedCore(BigradedShearCoordinateCore, StandardBigradedCore):
 
     def _prepare_ordered_signature_pairing_operands(
         self,
-        representation_standard_words,
+        standard_words,
         ordered_standard_signature,
         *,
         words_first_on: bool,
         standard_first_on: bool,
     ):
-        representation_standard_words = self._validate_element_coordinates(
-            representation_standard_words,
+        standard_words = self._validate_element_coordinates(
+            standard_words,
             name="words",
             coordinates="standard",
         )
@@ -1015,8 +1016,8 @@ class ShearBigradedCore(BigradedShearCoordinateCore, StandardBigradedCore):
             raise ValueError(
                 f"standard_first_on={standard_first_on} requires its tensor "
                 f"to {expected} the scalar block."
-            )
-        return representation_standard_words, ordered_standard_signature
+        )
+        return standard_words, ordered_standard_signature
 
     @symbolic_plan_compilation_scope()
     def __init__(
@@ -1152,7 +1153,7 @@ class ShearBigradedCore(BigradedShearCoordinateCore, StandardBigradedCore):
                 if self.shuffle_plan_store is None
                 else self.shuffle_plan_store.scope
             ),
-            "representation_plan_statistics": self.plan_store.plan_statistics(),
+            "block_plan_statistics": self.plan_store.plan_statistics(),
             "shear_plan_statistics": shear_statistics,
             "shuffle_plan_statistics": shuffle_statistics,
             "authoritative_memory_bytes": sum(categories.values()) - derived_bytes,
@@ -1490,6 +1491,8 @@ class ShearBigradedCore(BigradedShearCoordinateCore, StandardBigradedCore):
 
 class JaxShearBigraded(_JaxBigradedBackend, ShearBigradedCore):
     """JAX ordered-bidegree shear core."""
+
+    _wordwise_signature_protocol = _WORDWISE_SIGNATURE_PROTOCOL
 
     def __init__(
         self,

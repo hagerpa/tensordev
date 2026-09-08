@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from math import comb
 from numbers import Integral
-from typing import Any, Iterator, Literal, Optional, Sequence, Tuple
+from typing import Any, Iterator, Optional, Sequence, Tuple
 
 import jax
 import numpy as np
@@ -34,6 +34,48 @@ def _bidegree(value: object, *, name: str = "grade") -> Bidegree:
         _integer(value[0], name=f"{name}[0]"),
         _integer(value[1], name=f"{name}[1]"),
     )
+
+
+def _prefix_slice_degree(value: slice, *, name: str, maximum: int) -> int:
+    """Resolve one upper-exclusive prefix slice to its largest active degree."""
+    start = value.start
+    if start is not None:
+        if isinstance(start, bool) or not isinstance(start, Integral):
+            raise TypeError(
+                f"{name} slice start must be 0 or None, got {start!r}."
+            )
+        if int(start) != 0:
+            raise ValueError(
+                f"{name} slice must start at 0; only rectangular prefixes "
+                "such as A[:n, :m] are representable."
+            )
+
+    step = value.step
+    if step is not None:
+        if isinstance(step, bool) or not isinstance(step, Integral):
+            raise TypeError(
+                f"{name} slice step must be 1 or None, got {step!r}."
+            )
+        if int(step) != 1:
+            raise ValueError(
+                f"{name} slice step must be 1; only rectangular prefixes "
+                "such as A[:n, :m] are representable."
+            )
+
+    stop = value.stop
+    if stop is None:
+        return maximum
+    if isinstance(stop, bool) or not isinstance(stop, Integral):
+        raise TypeError(
+            f"{name} slice stop must be a positive integer or None, got {stop!r}."
+        )
+    stop = int(stop)
+    if stop <= 0:
+        raise ValueError(
+            f"{name} slice stop must be positive, got {stop}; "
+            "an empty bidegree axis is not representable."
+        )
+    return min(stop - 1, maximum)
 
 
 @lru_cache(maxsize=None)
@@ -78,7 +120,7 @@ class BigradedSpec:
     truncation: Bidegree
     coordinates: str = "standard"
     include_scalar: bool = True
-    representation: Literal["ordered", "partially_symmetrized"] = "ordered"
+    partially_symmetrized: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -106,15 +148,10 @@ class BigradedSpec:
                 "include_scalar must be a bool, "
                 f"got {type(self.include_scalar).__name__}."
             )
-        if not isinstance(self.representation, str):
+        if not isinstance(self.partially_symmetrized, bool):
             raise TypeError(
-                "representation must be a string, got "
-                f"{type(self.representation).__name__}."
-            )
-        if self.representation not in {"ordered", "partially_symmetrized"}:
-            raise ValueError(
-                "representation must be either 'ordered' or "
-                f"'partially_symmetrized', got {self.representation!r}."
+                "partially_symmetrized must be a bool, got "
+                f"{type(self.partially_symmetrized).__name__}."
             )
 
     @property
@@ -165,7 +202,7 @@ class BigradedSpec:
     def rank_count(self, grade: object) -> int:
         """Number of stored rank coordinates at ``grade``."""
         n, m = _bidegree(grade)
-        if self.representation == "ordered":
+        if not self.partially_symmetrized:
             return self.placement_count((n, m))
         parts = (n + 1) * self.d_doubleprime
         return comb(m + parts - 1, m)
@@ -178,7 +215,7 @@ class BigradedSpec:
                 f"{self.truncation}."
             )
         dense_width = self.d_prime**n
-        if self.representation == "ordered":
+        if not self.partially_symmetrized:
             dense_width *= self.d_doubleprime**m
         return self.rank_count((n, m)) * dense_width
 
@@ -189,7 +226,7 @@ class BigradedSpec:
             self.truncation,
             coordinates=self.coordinates,
             include_scalar=include_scalar,
-            representation=self.representation,
+            partially_symmetrized=self.partially_symmetrized,
         )
 
 
@@ -276,6 +313,50 @@ class BigradedTensor:
         return iter(self.blocks)
 
     def __getitem__(self, grade: object) -> Any:
+        if isinstance(grade, slice):
+            raise TypeError(
+                "structural bidegree slicing requires two prefix slices, "
+                "for example A[:n, :m]."
+            )
+        if (
+            isinstance(grade, (tuple, list))
+            and any(isinstance(component, slice) for component in grade)
+        ):
+            if len(grade) != 2 or not all(
+                isinstance(component, slice) for component in grade
+            ):
+                raise TypeError(
+                    "structural bidegree slicing requires two prefix slices, "
+                    "for example A[:n, :m]; use A[n, m] to select one block."
+                )
+            N, M = self.truncation
+            truncation = (
+                _prefix_slice_degree(
+                    grade[0],
+                    name="first bidegree component",
+                    maximum=N,
+                ),
+                _prefix_slice_degree(
+                    grade[1],
+                    name="second bidegree component",
+                    maximum=M,
+                ),
+            )
+            if truncation == self.truncation:
+                return self
+            spec = BigradedSpec(
+                self.spec.d_prime,
+                self.spec.d_doubleprime,
+                truncation,
+                coordinates=self.spec.coordinates,
+                include_scalar=self.spec.include_scalar,
+                partially_symmetrized=self.spec.partially_symmetrized,
+            )
+            blocks = tuple(
+                self.blocks[self.spec.index(active_grade)]
+                for active_grade in spec.grades
+            )
+            return BigradedTensor(blocks, spec)
         return self.blocks[self.spec.index(grade)]
 
     def block(self, n: int, m: int) -> Any:

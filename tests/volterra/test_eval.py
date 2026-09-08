@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tensordev.core.bigraded import bigraded_core
+from tensordev import make_core
 from tensordev.core.jax import Jax
 from tensordev.volterra import ConvolutionKernel, FractionalKernel
 from tensordev.volterra.algebra import resolve_volterra_algebra
@@ -163,7 +163,7 @@ def test_eval_e_broadcasts_coefficients_and_increment_batches():
 
 def test_scalar_eval_vte_bidegree_is_exact_projection_without_shuffle_plans():
     active = (2, 1)
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=active,
         precompute_shuffle=False,
@@ -196,7 +196,7 @@ def test_general_e_and_history_product_are_exact_bidegree_projections(
     precompute_shuffle,
 ):
     active = (2, 1)
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=active,
         precompute_shuffle=precompute_shuffle,
@@ -231,7 +231,7 @@ def test_general_e_and_history_product_are_exact_bidegree_projections(
 
 def test_general_depth_one_does_not_require_bidegree_shuffle_plans():
     active = (1, 0)
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=(1, 1),
         default_trunc=active,
@@ -256,7 +256,7 @@ def test_general_depth_one_does_not_require_bidegree_shuffle_plans():
 
 
 def test_general_coefficient_worksets_are_the_exact_reachable_subsets():
-    core = bigraded_core(
+    core = make_core(
         dims=(1, 1),
         max_trunc=(2, 1),
         precompute_shuffle=True,

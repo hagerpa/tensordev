@@ -77,7 +77,7 @@ def test_quotient_volterra_is_q_of_ordered_native_result(
     precompute_shuffle,
 ):
     active = (1, 1)
-    ordered_standard = td.bigraded_core(
+    ordered_standard = td.make_core(
         dims=(1, 1),
         max_trunc=active,
         precompute_shuffle=precompute_shuffle,
@@ -87,7 +87,7 @@ def test_quotient_volterra_is_q_of_ordered_native_result(
         if coordinates == "standard"
         else td.shear_core(ordered_standard)
     )
-    quotient = td.symmetrized_core(ordered)
+    quotient = td.symmetrize_core(ordered)
     options = dict(
         kernel=_kernel(component_count),
         trunc=active,
@@ -107,10 +107,10 @@ def test_quotient_volterra_is_q_of_ordered_native_result(
 def test_multicomponent_quotient_volterra_requires_generator_shuffle(
     coordinates,
 ):
-    standard = td.bigraded_core(
+    standard = td.make_core(
         dims=(1, 1),
         max_trunc=(1, 1),
-        representation="partially_symmetrized",
+        partially_symmetrized=True,
         precompute_shuffle=False,
     )
     core = standard if coordinates == "standard" else td.shear_core(standard)
@@ -145,7 +145,7 @@ def test_other_supported_quotient_volterra_routes_are_native_q_projections(
     precompute_shuffle,
 ):
     active = (1, 1)
-    ordered_standard = td.bigraded_core(
+    ordered_standard = td.make_core(
         dims=(1, 1),
         max_trunc=active,
         precompute_shuffle=precompute_shuffle,
@@ -155,7 +155,7 @@ def test_other_supported_quotient_volterra_routes_are_native_q_projections(
         if coordinates == "standard"
         else td.shear_core(ordered_standard)
     )
-    quotient = td.symmetrized_core(ordered)
+    quotient = td.symmetrize_core(ordered)
 
     _forbid_ordered_expansion(monkeypatch, quotient)
 

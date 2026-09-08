@@ -13,7 +13,9 @@ from tensordev.core.bigraded.symmetrized.plans import (
     PartiallySymmetrizedPlanStore,
     _expected_plan_memory_bytes_by_category,
     apply_doubleprime_generator_block,
+    apply_doubleprime_generator_prefix,
 )
+from tensordev.core.utils.precompute import _unsigned_index_dtype
 from tensordev.core.utils.segmented import apply_segmented_rank_plan
 
 
@@ -48,7 +50,7 @@ def test_grade_plans_match_quotient_widths_and_are_immutable():
         store.grade_plans[(0, 0)] = store.grade_plan((0, 0))
 
 
-def test_active_layouts_share_capacity_plans_and_preserve_representation():
+def test_active_layouts_share_capacity_plans_and_preserve_partial_symmetrization():
     store = PartiallySymmetrizedPlanStore((2, 2), (3, 2))
     layout = store.resolve(
         (2, 1),
@@ -62,7 +64,7 @@ def test_active_layouts_share_capacity_plans_and_preserve_representation():
         coordinates="shear",
     )
     assert layout.store is store
-    assert layout.representation == "partially_symmetrized"
+    assert layout.partially_symmetrized is True
     assert layout.coordinates == "shear"
     assert not layout.include_scalar
     assert all(
@@ -73,7 +75,7 @@ def test_active_layouts_share_capacity_plans_and_preserve_representation():
     scalar_layout = layout.with_scalar(True)
     assert scalar_layout.store is store
     assert scalar_layout.coordinates == "shear"
-    assert scalar_layout.representation == "partially_symmetrized"
+    assert scalar_layout.partially_symmetrized is True
     assert scalar_layout.include_scalar
 
 
@@ -149,37 +151,147 @@ def test_concat_prime_axis_permutation_is_factored_and_static():
     assert plan.dense_output_shape == (3, 3, 3)
 
 
-def test_doubleprime_generator_maps_match_terminal_block_oracle():
-    store = PartiallySymmetrizedPlanStore((2, 3), (2, 3))
-    for output_grade, plan in store.doubleprime_generator_plans.items():
-        source = store.grade_plan(plan.source_grade)
-        for letter in range(3):
-            expected = []
-            for row in source.placements:
-                blocks = [list(map(int, block)) for block in row]
-                blocks[-1][letter] += 1
-                expected.append(
-                    sym_rank(
-                        NormalForm(
-                            blocks=tuple(tuple(block) for block in blocks),
-                            primes=("p",) * output_grade[0],
-                        )
-                    )
+def _doubleprime_target_oracle(store, plan):
+    source = store.grade_plan(plan.source_grade)
+    expected = np.empty(
+        (plan.d_doubleprime, plan.source_rank_count),
+        dtype=np.int64,
+    )
+    for letter in range(plan.d_doubleprime):
+        for source_rank, row in enumerate(source.placements):
+            blocks = [list(map(int, block)) for block in row]
+            blocks[-1][letter] += 1
+            expected[letter, source_rank] = sym_rank(
+                NormalForm(
+                    blocks=tuple(tuple(block) for block in blocks),
+                    primes=("p",) * plan.output_grade[0],
                 )
-            np.testing.assert_array_equal(plan.target_ranks[letter], expected)
-            assert len(np.unique(plan.target_ranks[letter])) == source.rank_count
-        assert not plan.target_ranks.flags.writeable
+            )
+    return expected
 
 
-def test_shared_doubleprime_generator_executor_is_jittable_and_exact():
-    store = PartiallySymmetrizedPlanStore((2, 2), (2, 2))
+def _targets_encoded_by_generator_plan(plan):
+    if plan.target_ranks is not None:
+        return np.asarray(plan.target_ranks, dtype=np.int64)
+
+    destination = plan.destination_plan
+    assert destination is not None
+    source_count = plan.source_rank_count
+    encoded = np.full(
+        (plan.d_doubleprime, source_count),
+        -1,
+        dtype=np.int64,
+    )
+
+    def install(edge_id, target_rank):
+        letter, source_rank = divmod(int(edge_id), source_count)
+        assert encoded[letter, source_rank] == -1
+        encoded[letter, source_rank] = int(target_rank)
+
+    head = range(
+        destination.primary_head_start,
+        destination.primary_head_start + destination.primary_head_count,
+    )
+    for target_rank, edge_id in enumerate(head):
+        install(edge_id, target_rank)
+    selected = np.asarray(destination.selected_edge_ids)
+    for offset, edge_id in enumerate(
+        selected[: destination.tail_primary_count]
+    ):
+        install(edge_id, destination.primary_head_count + offset)
+    for edge_id, target_rank in zip(
+        selected[destination.tail_primary_count :],
+        destination.collision_target_ranks,
+    ):
+        install(edge_id, target_rank)
+
+    assert np.all(encoded >= 0)
+    return encoded
+
+
+@pytest.mark.parametrize("d_doubleprime", (1, 2, 3, 4))
+def test_doubleprime_generator_plans_match_terminal_block_oracle(
+    d_doubleprime,
+):
+    store = PartiallySymmetrizedPlanStore(
+        (2, d_doubleprime),
+        (2, 3),
+    )
+    for output_grade, plan in store.doubleprime_generator_plans.items():
+        expected = _doubleprime_target_oracle(store, plan)
+        actual = _targets_encoded_by_generator_plan(plan)
+        np.testing.assert_array_equal(actual, expected)
+        assert np.array_equal(
+            np.unique(actual),
+            np.arange(plan.doubleprime_rank_count),
+        )
+        for letter_targets in actual:
+            assert np.unique(letter_targets).size == plan.source_rank_count
+
+        if plan.target_ranks is not None:
+            assert not plan.uses_destination_order
+            assert not plan.target_ranks.flags.writeable
+            continue
+
+        assert plan.uses_destination_order
+        destination = plan.destination_plan
+        assert destination is not None
+        edge_count = plan.d_doubleprime * plan.source_rank_count
+        assert destination.edge_count == edge_count
+        assert destination.output_rank_count == plan.doubleprime_rank_count
+        assert destination.primary_head_start == (
+            (plan.d_doubleprime - 1) * plan.source_rank_count
+        )
+        assert destination.primary_head_count == plan.source_rank_count
+        assert destination.tail_primary_count == (
+            plan.doubleprime_rank_count - plan.source_rank_count
+        )
+        assert destination.collision_count == (
+            edge_count - plan.doubleprime_rank_count
+        )
+        head_edges = np.arange(
+            destination.primary_head_start,
+            destination.primary_head_start + destination.primary_head_count,
+        )
+        np.testing.assert_array_equal(
+            np.sort(
+                np.concatenate(
+                    (head_edges, destination.selected_edge_ids)
+                )
+            ),
+            np.arange(edge_count),
+        )
+        assert destination.selected_edge_ids.dtype == np.dtype(
+            _unsigned_index_dtype(edge_count - 1)
+        )
+        assert destination.collision_target_ranks.dtype == np.dtype(
+            _unsigned_index_dtype(plan.doubleprime_rank_count - 1)
+        )
+        assert not destination.selected_edge_ids.flags.writeable
+        assert not destination.collision_target_ranks.flags.writeable
+        assert plan.memory_bytes() == destination.memory_bytes()
+
+
+@pytest.mark.parametrize("d_doubleprime", (1, 2, 3, 4))
+def test_shared_doubleprime_generator_executor_is_jittable_and_exact(
+    d_doubleprime,
+):
+    store = PartiallySymmetrizedPlanStore(
+        (2, d_doubleprime),
+        (2, 2),
+    )
     plan = store.doubleprime_generator_plan((1, 2))
     source_width = plan.source_rank_count * plan.dense_prime_width
     block = jnp.arange(2 * source_width, dtype=jnp.float32).reshape(
         2,
         source_width,
     )
-    generator = jnp.asarray(((2.0, -1.0), (0.5, 3.0)))
+    generator = jnp.linspace(
+        -1.0,
+        2.0,
+        2 * d_doubleprime,
+        dtype=jnp.float32,
+    ).reshape(2, d_doubleprime)
 
     def apply(source, increment):
         return apply_doubleprime_generator_block(
@@ -199,9 +311,10 @@ def test_shared_doubleprime_generator_executor_is_jittable_and_exact():
         plan.source_rank_count,
         plan.dense_prime_width,
     )
+    targets = _doubleprime_target_oracle(store, plan)
     for batch in range(2):
         for letter in range(plan.d_doubleprime):
-            for source_rank, target_rank in enumerate(plan.target_ranks[letter]):
+            for source_rank, target_rank in enumerate(targets[letter]):
                 expected[batch, target_rank] += (
                     source[batch, source_rank] * generator[batch, letter]
                 )
@@ -212,11 +325,97 @@ def test_shared_doubleprime_generator_executor_is_jittable_and_exact():
         jax.jit(jax.grad(lambda source: apply(source, generator).sum()))(block),
         jax.grad(lambda source: apply(source, generator).sum())(block),
     )
+    np.testing.assert_allclose(
+        jax.jit(jax.grad(lambda increment: apply(block, increment).sum()))(
+            generator
+        ),
+        jax.grad(lambda increment: apply(block, increment).sum())(generator),
+    )
+    np.testing.assert_allclose(
+        jax.vmap(apply)(block, generator),
+        jnp.stack(tuple(apply(row, inc) for row, inc in zip(block, generator))),
+    )
 
 
-def test_memory_categories_are_exact_and_count_every_array_once():
-    dims = (2, 3)
-    capacity = (2, 2)
+def test_q1_destination_prefix_and_block_skip_scatter():
+    store = PartiallySymmetrizedPlanStore((2, 1), (2, 3))
+    plan = store.doubleprime_generator_plan((1, 3))
+    assert plan.uses_destination_order
+    destination = plan.destination_plan
+    assert destination is not None
+    assert destination.selected_edge_ids.size == 0
+    assert destination.collision_count == 0
+    assert plan.memory_bytes() == 0
+
+    source_width = plan.source_rank_count * plan.dense_prime_width
+    block = jnp.arange(2 * source_width, dtype=jnp.float32).reshape(
+        2, source_width
+    )
+    generator = jnp.asarray(((2.0,), (-0.5,)), dtype=jnp.float32)
+
+    def forbidden_scatter(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("q=1 destination execution must not scatter")
+
+    prefix = jax.jit(
+        lambda source, increment: apply_doubleprime_generator_prefix(
+            jnp,
+            source,
+            increment,
+            plan,
+            scatter_add=forbidden_scatter,
+        )
+    )(block, generator)
+    full = jax.jit(
+        lambda source, increment: apply_doubleprime_generator_block(
+            jnp,
+            source,
+            increment,
+            plan,
+            scatter_add=forbidden_scatter,
+        )
+    )(block, generator)
+
+    expected_prefix = (block * generator).reshape(2, -1)
+    np.testing.assert_allclose(prefix, expected_prefix)
+    suffix_width = (
+        plan.output_rank_count - plan.doubleprime_rank_count
+    ) * plan.dense_prime_width
+    np.testing.assert_allclose(full[..., : prefix.shape[-1]], prefix)
+    np.testing.assert_array_equal(
+        full[..., prefix.shape[-1] :],
+        np.zeros((2, suffix_width), dtype=np.float32),
+    )
+
+
+def test_hybrid_generator_plan_selects_destination_only_when_favorable():
+    hybrid = PartiallySymmetrizedPlanStore((1, 3), (2, 3))
+    assert not hybrid.doubleprime_generator_plan((1, 1)).uses_destination_order
+    assert hybrid.doubleprime_generator_plan((2, 3)).uses_destination_order
+
+    dense = PartiallySymmetrizedPlanStore((2, 2), (3, 3))
+    assert not dense.doubleprime_generator_plan((1, 1)).uses_destination_order
+    assert dense.doubleprime_generator_plan((3, 3)).uses_destination_order
+
+    memory_guard = PartiallySymmetrizedPlanStore((1, 8), (0, 3))
+    assert not memory_guard.doubleprime_generator_plan(
+        (0, 3)
+    ).uses_destination_order
+
+
+@pytest.mark.parametrize(
+    ("dims", "capacity"),
+    (
+        ((2, 3), (2, 2)),
+        ((1, 3), (2, 3)),
+        ((1, 1), (2, 3)),
+        ((1, 8), (0, 3)),
+    ),
+)
+def test_memory_categories_are_exact_and_count_every_array_once(
+    dims,
+    capacity,
+):
     store = PartiallySymmetrizedPlanStore(dims, capacity)
     expected = _expected_plan_memory_bytes_by_category(dims, capacity)
 

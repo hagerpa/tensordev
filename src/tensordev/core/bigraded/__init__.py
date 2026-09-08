@@ -17,7 +17,7 @@ from tensordev.core.bigraded.shuffle import (
 )
 from tensordev.core.bigraded.types import Bidegree, BigradedSpec, BigradedTensor
 from tensordev.core.bigraded.standard import StandardBigradedCore
-from tensordev.core.bigraded.jax import JaxBigraded, bigraded_core
+from tensordev.core.bigraded.jax import JaxBigraded
 from tensordev.core.bigraded.symmetrized.algebra import (
     PartiallySymmetrizedBigradedCore,
 )
@@ -40,7 +40,6 @@ __all__ = [
     "JaxPartiallySymmetrizedBigraded",
     "PartiallySymmetrizedBigradedCore",
     "StandardBigradedCore",
-    "bigraded_core",
     "colex_placements",
     "colex_rank",
     "colex_unrank",

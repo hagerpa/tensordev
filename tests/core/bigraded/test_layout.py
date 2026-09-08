@@ -28,7 +28,7 @@ def test_resolve_is_cached_by_truncation_and_scalar_policy():
     assert (0, 0) not in positive.grades
 
 
-def test_layout_exposes_representation_neutral_rank_count():
+def test_layout_exposes_symmetrization_neutral_rank_count():
     ordered = BigradedPlanStore((2, 3), (1, 2)).resolve()
     quotient = replace(
         ordered,
@@ -38,13 +38,13 @@ def test_layout_exposes_representation_neutral_rank_count():
             ordered.truncation,
             coordinates=ordered.coordinates,
             include_scalar=ordered.include_scalar,
-            representation="partially_symmetrized",
+            partially_symmetrized=True,
         ),
     )
 
-    assert ordered.representation == "ordered"
+    assert ordered.partially_symmetrized is False
     assert ordered.rank_count((1, 2)) == ordered.placement_count((1, 2)) == 3
-    assert quotient.representation == "partially_symmetrized"
+    assert quotient.partially_symmetrized is True
     assert quotient.rank_count((1, 2)) == 21
     with pytest.raises(ValueError, match="only defined for ordered layouts.*rank_count"):
         quotient.placement_count((1, 2))

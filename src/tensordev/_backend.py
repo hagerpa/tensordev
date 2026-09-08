@@ -122,12 +122,21 @@ def _grading_from_dims(dims: Any) -> str:
     )
 
 
+def _validate_partially_symmetrized(value: Any) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError(
+            "partially_symmetrized must be a bool, got "
+            f"{type(value).__name__}."
+        )
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class _CoreConfiguration:
     """Normalized constructor selected by the complete public configuration."""
 
     grading: Literal["total_degree", "bidegree"]
-    representation: Literal["ordered", "partially_symmetrized"]
+    partially_symmetrized: bool
     coordinates: Literal["standard", "shear"]
     dims: int | tuple[int, int]
     max_trunc: int | tuple[int, int]
@@ -140,7 +149,7 @@ class _CoreConfiguration:
             "standard" if self.coordinates == "standard" else "shear"
         )
         suffix = "total" if self.grading == "total_degree" else "bidegree"
-        if self.representation == "partially_symmetrized":
+        if self.partially_symmetrized:
             prefix = f"{prefix}_partially_symmetrized"
         return f"{prefix}_{suffix}"
 
@@ -160,22 +169,28 @@ class _CoreConfiguration:
             "precompute_shuffle": self.precompute_shuffle,
         }
         if self.grading == "total_degree" and self.coordinates == "standard":
-            from tensordev.core.jax import total_degree_core
+            from tensordev.core.jax import Jax
 
-            return total_degree_core(d=int(self.dims), **kwargs)
+            return Jax(d=int(self.dims), **kwargs)
         if self.grading == "bidegree" and self.coordinates == "standard":
-            from tensordev.core.bigraded import bigraded_core
+            if not self.partially_symmetrized:
+                from tensordev.core.bigraded.jax import JaxBigraded
 
-            return bigraded_core(
+                return JaxBigraded(dims=self.dims, **kwargs)
+
+            from tensordev.core.bigraded.symmetrized.jax import (
+                JaxPartiallySymmetrizedBigraded,
+            )
+
+            return JaxPartiallySymmetrizedBigraded(
                 dims=self.dims,
-                representation=self.representation,
                 **kwargs,
             )
         if self.grading == "total_degree":
             from tensordev.core.shear import JaxShearTotal
 
             return JaxShearTotal(dims=self.dims, **kwargs)
-        if self.representation == "ordered":
+        if not self.partially_symmetrized:
             from tensordev.core.shear import JaxShearBigraded
 
             return JaxShearBigraded(dims=self.dims, **kwargs)
@@ -202,7 +217,7 @@ class _CoreConfiguration:
             )
         if (
             self.grading == "bidegree"
-            and self.representation == "partially_symmetrized"
+            and self.partially_symmetrized
         ):
             from tensordev.core.bigraded.symmetrized.memory import (
                 _expected_partially_symmetrized_memory_bytes_by_category,
@@ -269,29 +284,22 @@ def _resolve_core_configuration(
     *,
     dims: Any,
     max_trunc: Any,
-    representation: Any = "ordered",
+    partially_symmetrized: Any = False,
     coordinates: Any = "standard",
     precompute_shuffle: Any = False,
 ) -> _CoreConfiguration:
     """Resolve one supported core family from all dispatch-relevant inputs.
 
-    This is the single inference path used by both :func:`set_default_core`
-    and the public memory estimator.  In particular, a pair-valued ``dims``
-    denotes either bidegree standard coordinates or total/bidegree shear
-    coordinates depending on ``max_trunc`` and ``coordinates``.  The
-    representation axis is independent but partially symmetrized cores are
-    deliberately restricted to bidegree grading.
+    This is the single inference path used by :func:`make_core`,
+    :func:`set_default_core`, and the public memory estimator. In particular,
+    a pair-valued ``dims`` denotes either bidegree standard coordinates or
+    total/bidegree shear coordinates depending on ``max_trunc`` and
+    ``coordinates``. Partial symmetrization is deliberately restricted to
+    bidegree grading.
     """
-    if not isinstance(representation, str):
-        raise TypeError(
-            "representation must be a string, got "
-            f"{type(representation).__name__}."
-        )
-    if representation not in {"ordered", "partially_symmetrized"}:
-        raise ValueError(
-            "representation must be either 'ordered' or "
-            f"'partially_symmetrized', got {representation!r}."
-        )
+    partially_symmetrized = _validate_partially_symmetrized(
+        partially_symmetrized
+    )
     if not isinstance(coordinates, str):
         raise TypeError(
             "coordinates must be a string, got "
@@ -358,9 +366,9 @@ def _resolve_core_configuration(
             "dims=pair, max_trunc=pair, coordinates='shear'."
         )
 
-    if representation == "partially_symmetrized" and grading != "bidegree":
+    if partially_symmetrized and grading != "bidegree":
         raise ValueError(
-            "representation='partially_symmetrized' requires bidegree "
+            "partially_symmetrized=True requires bidegree "
             "truncation: dims and max_trunc must both be pairs."
         )
 
@@ -377,7 +385,7 @@ def _resolve_core_configuration(
     }[shuffle_scope]
     return _CoreConfiguration(
         grading=grading,
-        representation=representation,
+        partially_symmetrized=partially_symmetrized,
         dims=normalized_dims,
         max_trunc=normalized_max_trunc,
         coordinates=coordinates,
@@ -437,6 +445,34 @@ def register_default_core_callback(
     return unregister
 
 
+def make_core(
+        *,
+        dims: int | tuple[int, int],
+        max_trunc: int | tuple[int, int],
+        default_trunc: int | tuple[int, int] | None = None,
+        partially_symmetrized: bool = False,
+        coordinates: Literal["standard", "shear"] = "standard",
+        precompute_shuffle: bool | Literal["generator"] = False,
+) -> Any:
+    """Construct a JAX algebra core without changing the process default.
+
+    The configuration arguments and inference rules are identical to the
+    construction form of :func:`set_default_core`. Integer ``dims`` and
+    ``max_trunc`` select standard total-degree truncation. Pair-valued
+    ``dims`` and ``max_trunc`` select bidegree truncation. Shear coordinates
+    require pair-valued ``dims`` and use the shape of ``max_trunc`` to choose
+    total-degree or bidegree truncation.
+    """
+    configuration = _resolve_core_configuration(
+        dims=dims,
+        max_trunc=max_trunc,
+        partially_symmetrized=partially_symmetrized,
+        coordinates=coordinates,
+        precompute_shuffle=precompute_shuffle,
+    )
+    return configuration.construct(default_trunc=default_trunc)
+
+
 def set_default_core(
         core: Any | None = None,
         seq_core: Any | None = None,
@@ -444,21 +480,20 @@ def set_default_core(
         dims: int | tuple[int, int] | None = None,
         max_trunc: int | tuple[int, int] | None = None,
         default_trunc: int | tuple[int, int] | None = None,
-        representation: Literal[
-            "ordered", "partially_symmetrized"
-        ] = "ordered",
+        partially_symmetrized: bool = False,
         coordinates: Literal["standard", "shear"] = "standard",
         precompute_shuffle: bool | Literal["generator"] = False,
 ) -> Any:
     """Set or construct the process-wide default algebra core.
 
-    Pass an already constructed ``core`` to install it directly.  To construct
-    and install a core in one call, omit ``core`` and provide ``dims`` and
-    ``max_trunc``.  The supported configurations are:
+    Pass an already constructed ``core`` to install it directly. To construct
+    and install a core in one call, omit ``core`` and pass the same
+    configuration accepted by :func:`make_core`. The supported configurations
+    are:
 
     - integer ``dims`` and integer ``max_trunc``: standard total degree;
-    - pair ``dims`` and pair ``max_trunc``: bidegree, with ordered or
-      partially symmetrized representation;
+    - pair ``dims`` and pair ``max_trunc``: bidegree, optionally with
+      ``partially_symmetrized=True``;
     - pair ``dims`` and integer ``max_trunc`` with ``coordinates="shear"``:
       dense total-degree shear;
     - pair ``dims`` and pair ``max_trunc`` with ``coordinates="shear"``:
@@ -480,11 +515,14 @@ def set_default_core(
     Any
         The installed algebra core.
     """
+    partially_symmetrized = _validate_partially_symmetrized(
+        partially_symmetrized
+    )
     construction_arguments = {
         "dims": dims,
         "max_trunc": max_trunc,
         "default_trunc": default_trunc,
-        "representation": representation,
+        "partially_symmetrized": partially_symmetrized,
         "coordinates": coordinates,
         "precompute_shuffle": precompute_shuffle,
     }
@@ -493,12 +531,12 @@ def set_default_core(
         for name, value in construction_arguments.items()
         if (
             (name == "precompute_shuffle" and value is not False)
-            or (name == "representation" and value != "ordered")
+            or (name == "partially_symmetrized" and value is not False)
             or (name == "coordinates" and value != "standard")
             or (
                 name not in {
                     "precompute_shuffle",
-                    "representation",
+                    "partially_symmetrized",
                     "coordinates",
                 }
                 and value is not None
@@ -533,14 +571,14 @@ def set_default_core(
                 "max_trunc is required when set_default_core constructs a core."
             )
 
-        configuration = _resolve_core_configuration(
+        resolved_core = make_core(
             dims=dims,
             max_trunc=max_trunc,
-            representation=representation,
+            default_trunc=default_trunc,
+            partially_symmetrized=partially_symmetrized,
             coordinates=coordinates,
             precompute_shuffle=precompute_shuffle,
         )
-        resolved_core = configuration.construct(default_trunc=default_trunc)
 
     if resolved_core is None:
         raise TypeError("core must not be None.")
