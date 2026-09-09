@@ -1,11 +1,8 @@
-"""Small exact quotient-word oracle derived from ``note_v2_implrmk.tex``.
+"""Exact quotient-word calculations for small independent tests.
 
-This module is deliberately test-only and pure Python.  It follows the
-normal forms in Section 2.4, the quotient pairing defining ``Q`` and
-``Q.T``, the quotient concatenation in Lemma 4.2, the graded-row recursions
-for Psi and its inverse in equations (5.14)--(5.15), and the normal-form
-formula for hat-Gamma in Lemma 5.8.  Exhaustive word enumeration is intended
-only for tiny independent test oracles.
+Implements normal forms, partial symmetrization and its adjoint, quotient
+concatenation, and shear coordinate maps from ``academia/bidegree/main.tex``.
+Exhaustive word enumeration limits this pure-Python reference to small examples.
 """
 
 from __future__ import annotations

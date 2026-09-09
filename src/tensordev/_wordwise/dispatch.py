@@ -8,7 +8,7 @@ or import Pallas merely because the specialized implementation is installed.
 from __future__ import annotations
 
 from numbers import Integral
-from typing import Any
+from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
@@ -18,6 +18,36 @@ from tensordev.core.capabilities import _WORDWISE_SIGNATURE_PROTOCOL
 
 
 _SUPPORTED_DTYPES = frozenset((np.dtype("float32"), np.dtype("float64")))
+
+
+def _validate_execution(execution: str) -> str:
+    """Validate the execution policy shared by signature entry points."""
+    if not isinstance(execution, str) or execution not in (
+        "auto", "jax", "wordwise"
+    ):
+        raise ValueError("execution must be 'auto', 'jax', or 'wordwise'.")
+    return execution
+
+
+def _select_wordwise_execution(
+        execution: str,
+        unsupported_reason: Callable[..., str | None],
+        *args: Any,
+        **kwargs: Any,
+) -> bool:
+    """Apply selection policy without checking candidates on portable calls."""
+    _validate_execution(execution)
+    if execution == "jax" or (
+        execution == "auto" and not _automatic_wordwise_release_eligible()
+    ):
+        return False
+    reason = unsupported_reason(*args, **kwargs)
+    if reason is not None and execution == "wordwise":
+        raise ValueError(
+            f"execution='wordwise' {reason} "
+            "Use execution='jax' or 'auto' for portable execution."
+        )
+    return reason is None
 
 
 def _concrete_single_device(value: Any) -> Any | None:
@@ -89,7 +119,7 @@ def _normalized_compute_capability(device: Any) -> tuple[int, int] | None:
 
 
 def _supported_cuda_device(device: Any) -> bool:
-    """Whether ``device`` can be considered for native validation."""
+    """Whether ``device`` satisfies the wordwise CUDA requirements."""
     if getattr(device, "platform", None) not in {"cuda", "gpu"}:
         return False
     kind = str(getattr(device, "device_kind", "")).lower()
@@ -100,12 +130,10 @@ def _supported_cuda_device(device: Any) -> bool:
 
 
 def _automatic_wordwise_release_eligible() -> bool:
-    """Whether benchmark-derived automatic-dispatch regions are installed.
+    """Whether automatic wordwise selection is enabled.
 
-    Automatic selection remains closed until real-GPU correctness and paired
-    performance results identify exact software, architecture, and workload
-    regions.  Private validation and benchmark runners bypass this gate while
-    retaining every structural and resource check in their executor layers.
+    Explicit ``execution="wordwise"`` is independent of automatic selection
+    and retains all input and resource checks.
     """
     return False
 
@@ -122,51 +150,72 @@ def _eager_accelerator_colocation_eligible(
     return not _contains_tracer(differentiable_inputs)
 
 
-def ordinary_wordwise_candidate_eligible(call: Any) -> bool:
-    """Return whether an ordinary call is a native-validation candidate.
-
-    This is intentionally conservative.  Traced calls, sharded arrays, tree
-    scans, non-JAX cores, and targets whose CUDA capability cannot be inspected
-    are excluded before planning or lowering.
-    """
-    if call.parallel or call.accumulate_in_tree:
-        return False
-    if _contains_tracer(
-        (
-            call.increments,
-            call.neutral,
-            call.seed_policy.canonical_start,
-        )
-    ):
-        return False
+def _wordwise_input_unsupported_reason(
+        *,
+        core: Any,
+        seq_core: Any,
+        reference: Any,
+        differentiable_inputs: Any,
+) -> str | None:
+    """Check the core, transform, dtype, and device contract before planning."""
+    if _contains_tracer((reference, differentiable_inputs)):
+        return "does not support calls under jax.jit, jax.grad, or jax.vmap."
     if (
-        type(call.core).__dict__.get("_wordwise_signature_protocol")
+        type(core).__dict__.get("_wordwise_signature_protocol")
         is not _WORDWISE_SIGNATURE_PROTOCOL
     ):
-        return False
+        return "requires a supported JAX tensor core."
     if (
-        type(call.seq_core).__dict__.get("_wordwise_signature_protocol")
+        type(seq_core).__dict__.get("_wordwise_signature_protocol")
         is not _WORDWISE_SIGNATURE_PROTOCOL
     ):
-        return False
-    grading = getattr(call.core, "grading", None)
+        return "requires a supported JAX sequential core."
+    grading = getattr(core, "grading", None)
     if grading not in {"total_degree", "bidegree"}:
-        return False
-    if grading == "bidegree" and getattr(call.core, "plan_store", None) is None:
-        return False
+        return "requires total-degree or bidegree truncation."
+    if grading == "bidegree" and getattr(core, "plan_store", None) is None:
+        return "requires a bounded bidegree core with precomputed plans."
+    try:
+        dtype = np.dtype(reference.dtype)
+    except (AttributeError, TypeError):
+        return "requires float32 or float64 input."
+    if dtype not in _SUPPORTED_DTYPES:
+        return "requires float32 or float64 input."
+    device = _concrete_single_device(reference)
+    if device is None or not _supported_cuda_device(device):
+        return (
+            "requires input on a single NVIDIA GPU with CUDA compute "
+            "capability 8.0 or newer."
+        )
+    return None
+
+
+def _ordinary_wordwise_unsupported_reason(call: Any) -> str | None:
+    if call.parallel or call.accumulate_in_tree:
+        return "requires parallel=False and accumulate_in_tree=False."
     if len(call.increments) != 1:
-        return False
-    increment = call.increments[0]
-    if np.dtype(increment.dtype) not in _SUPPORTED_DTYPES:
-        return False
-    return _supported_cuda_device(_concrete_single_device(increment))
+        return "requires a single level-1 path."
+    return _wordwise_input_unsupported_reason(
+        core=call.core,
+        seq_core=call.seq_core,
+        reference=call.increments[0],
+        differentiable_inputs=(
+            call.increments, call.neutral, call.seed_policy.canonical_start
+        ),
+    )
 
 
-def ordinary_wordwise_device_eligible(call: Any) -> bool:
-    """Whether a prepared ordinary signature may use automatic native code."""
-    return (
-        _automatic_wordwise_release_eligible()
-        and ordinary_wordwise_candidate_eligible(call)
+def ordinary_wordwise_candidate_eligible(call: Any) -> bool:
+    """Whether an ordinary call satisfies the wordwise execution contract."""
+    return _ordinary_wordwise_unsupported_reason(call) is None
+
+
+def ordinary_wordwise_device_eligible(
+        call: Any, *, execution: str = "auto"
+) -> bool:
+    """Select ordinary wordwise execution, rejecting unsupported explicit use."""
+    return _select_wordwise_execution(
+        execution, _ordinary_wordwise_unsupported_reason, call
     )
 
 
@@ -179,32 +228,22 @@ def _contains_tracer(value: Any) -> bool:
     return any(isinstance(leaf, jax.core.Tracer) for leaf in leaves)
 
 
-def _fssk_q1_candidate_eligible(
+def _fssk_q1_wordwise_unsupported_reason(
         *,
         core: Any,
+        seq_core: Any,
         q: int,
         reference: Any,
         differentiable_inputs: Any,
-) -> bool:
-    if q != 1 or _contains_tracer(differentiable_inputs):
-        return False
-    if (
-        type(core).__dict__.get("_wordwise_signature_protocol")
-        is not _WORDWISE_SIGNATURE_PROTOCOL
-    ):
-        return False
-    grading = getattr(core, "grading", None)
-    if grading not in {"total_degree", "bidegree"}:
-        return False
-    if grading == "bidegree" and getattr(core, "plan_store", None) is None:
-        return False
-    try:
-        dtype = np.dtype(reference.dtype)
-    except (AttributeError, TypeError):
-        return False
-    if dtype not in _SUPPORTED_DTYPES:
-        return False
-    return _supported_cuda_device(_concrete_single_device(reference))
+) -> str | None:
+    if q != 1:
+        return "requires an FSSK kernel or coefficients with q=1."
+    return _wordwise_input_unsupported_reason(
+        core=core,
+        seq_core=seq_core,
+        reference=reference,
+        differentiable_inputs=differentiable_inputs,
+    )
 
 
 def fssk_q1_wordwise_candidate_eligible(
@@ -215,30 +254,20 @@ def fssk_q1_wordwise_candidate_eligible(
         reference: Any,
         differentiable_inputs: Any,
 ) -> bool:
-    """Return whether a scalar-FSSK call is a native-validation candidate.
+    """Whether a scalar-FSSK call satisfies the wordwise execution contract.
 
     This check intentionally consumes only the unresolved public inputs.  It
     therefore runs before coefficient construction, layout planning, or any
-    Pallas import.  Every transformed call remains on the established portable
-    implementation, including transformations with respect to kernel,
-    coefficient, seed, or readout inputs rather than the path itself.
+    Pallas import. Transformations with respect to paths, kernels,
+    coefficients, seeds, or readout inputs are excluded.
     """
-    if not _fssk_q1_candidate_eligible(
+    return _fssk_q1_wordwise_unsupported_reason(
         core=core,
+        seq_core=seq_core,
         q=q,
         reference=reference,
         differentiable_inputs=differentiable_inputs,
-    ):
-        return False
-    if (
-        type(seq_core).__dict__.get("_wordwise_signature_protocol")
-        is not _WORDWISE_SIGNATURE_PROTOCOL
-    ):
-        return False
-    grading = getattr(core, "grading", None)
-    return not (
-        grading == "bidegree" and getattr(core, "plan_store", None) is None
-    )
+    ) is None
 
 
 def fssk_q1_wordwise_device_eligible(
@@ -248,17 +277,17 @@ def fssk_q1_wordwise_device_eligible(
         q: int,
         reference: Any,
         differentiable_inputs: Any,
+        execution: str = "auto",
 ) -> bool:
-    """Whether an eager scalar-FSSK call may use automatic native code."""
-    return (
-        _automatic_wordwise_release_eligible()
-        and fssk_q1_wordwise_candidate_eligible(
-            core=core,
-            seq_core=seq_core,
-            q=q,
-            reference=reference,
-            differentiable_inputs=differentiable_inputs,
-        )
+    """Select scalar-FSSK wordwise execution under the shared policy."""
+    return _select_wordwise_execution(
+        execution,
+        _fssk_q1_wordwise_unsupported_reason,
+        core=core,
+        seq_core=seq_core,
+        q=q,
+        reference=reference,
+        differentiable_inputs=differentiable_inputs,
     )
 
 

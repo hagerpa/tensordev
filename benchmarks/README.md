@@ -63,11 +63,10 @@ and dtype with any reported numbers.
 
 # NVIDIA wordwise benchmark
 
-`wordwise_gpu.py` validates and compares the private wordwise candidates with
-the forced portable JAX implementation. It requires a JAX-visible NVIDIA GPU
-with CUDA compute capability 8.0 or newer. Public automatic native dispatch is
-disabled until correctness and performance gates pass on explicitly recorded
-targets and workloads.
+`wordwise_gpu.py` validates and compares the alpha wordwise kernels with
+portable JAX. It requires a JAX-visible NVIDIA GPU with CUDA compute capability
+8.0 or newer. Public signature and scalar-FSSK calls opt in with
+`execution="wordwise"`; automatic wordwise selection is disabled.
 
 Run a small validation matrix with:
 

@@ -10,19 +10,23 @@ Volterra signatures, and free and higher-order signature kernels.
 JAX is the supported backend. PyTorch, TensorFlow, and Numba backends are not
 available.
 
-The implemented JAX components are end-to-end differentiable — from elementary tensor operations and path signatures through to signature-kernel evaluations and Volterra kernel parameters.
+With the default execution policy, the JAX components are end-to-end differentiable — from elementary tensor operations and path signatures through to signature-kernel evaluations and Volterra kernel parameters.
 
 ## Requirements
 
 `tensordev` requires Python 3.11+ and JAX 0.10.0–0.11.x.
-
-The package is developed and tested primarily with the JAX backend.
 
 ## Installation
 
 ```bash
 pip install tensordev
 ```
+
+Linux (x86_64/aarch64, glibc 2.28+) and macOS Apple Silicon wheels include
+native CPU kernels. Other platforms and source installations use portable
+JAX; no C++ compiler is required. See the
+[native build instructions](https://github.com/hagerpa/tensordev/tree/main/native)
+to enable native kernels when installing from source.
 
 For the latest development version:
 
@@ -67,11 +71,7 @@ X_gpu = jax.device_put(X, gpu)
 sig_gpu = td.path_signature(X_gpu, trunc=4)
 ```
 
-Public calls use the portable JAX implementation on the selected device.
-Specialized wordwise executors for ordinary and exact scalar-FSSK signatures
-are included, but automatic selection remains closed until exact NVIDIA
-targets and profitable workload regions pass the bundled real-GPU benchmark.
-No device or execution-method option is part of the core API.
+GPU computations use JAX on the selected device.
 
 ## Package structure
 
@@ -175,19 +175,6 @@ Set defaults before tracing JAX functions. Signatures, free developments, and
 Volterra signatures support configured cores. `reset_default_core()` restores
 the environment-selected default.
 
-The repository includes an optional
-[native CPU companion](https://github.com/hagerpa/tensordev/tree/main/native)
-for sufficiently large CPU Horner steps with standard-coordinate, partially
-symmetrized bidegree cores and `dims=(1, q)`, `q > 1`. It is not included in
-the TensorDev wheel and is not separately published for 0.1.0. After cloning
-the repository, install it from source with `python -m pip install ./native`.
-
-The construction is described in Hager and Pelizzari,
-[*Expected signatures via partial integration, coordinate change and
-symmetrization*](https://arxiv.org/abs/2607.29534).  Precomputation and storage
-details are collected in the
-[*technical implementation note*](https://github.com/hagerpa/tensordev/tree/main/academia/bidegree).
-
 ### `tensordev.development` — signature development
 
 Compute truncated signatures with optional blocking. `block_size` splits the path into chunks and chains them via Chen's identity internally. This is useful for long sequences where the full path does not fit in memory at once.
@@ -237,6 +224,13 @@ np.testing.assert_allclose(
     atol=1e-6,
 )  # ✓
 ```
+
+Wordwise execution (`execution="wordwise"`) parallelizes over words and paths
+for ordinary signatures and `q=1` FSSK signatures, across all supported core
+types. This alpha option requires eager float32/float64 calls on one NVIDIA
+GPU (compute capability 8.0+); it is not yet validated on GPU. Defaults are
+unchanged, and unsupported requests raise; see the function docstrings for
+restrictions.
 
 `free_development` generalises this to tensor-valued paths and adds block-level control. The example below computes per-block signatures and their tensor logarithms — the piecewise log-linear approximation that `HigherOrderKernel` uses internally:
 
@@ -502,7 +496,7 @@ seq_core = td.get_default_seq_core()
 - [`pySigLib`](https://github.com/daniil-shmelev/pySigLib): a high-performance CPU/GPU library for signatures and signature kernels, whose CUDA and JAX support provides an important contemporary reference point for accelerator-aware signature computation.
 - [`sigkernel`](https://github.com/crispitagorico/sigkernel): inspired parts of the signature-kernel API and the second-order finite-difference stencil used for the standard signature kernel.
 - [`high-order-sigkernel`](https://github.com/maudl3116/high-order-sigkernel): inspired the predictor-corrector schemes for higher-order signature-kernel PDE systems, which are adapted and further developed in this package.
-- [`pathsig`](https://github.com/tobiasny12/pathsig), by Tobias Nygaard: inspired the word-parallel approach to GPU signature computation over prefix-closed word sets.
+- [`pathsig`](https://github.com/tobiasny12/pathsig): introduced the word-parallel approach to GPU signature computation over prefix-closed word sets.
 
 The main theoretical background for the algorithms implemented here is:
 

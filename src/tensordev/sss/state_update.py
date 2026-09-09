@@ -14,6 +14,7 @@ from tensordev._backend import (
     get_default_core_pair,
     get_default_seq_core,
 )
+from tensordev._wordwise.dispatch import _validate_execution
 from tensordev.core.bigraded.jax import JaxBigraded
 from tensordev.core.bigraded.symmetrized.jax import (
     JaxPartiallySymmetrizedBigraded,
@@ -157,6 +158,7 @@ def _fssk_q1_wordwise_eligible(
         q: int,
         reference: Any,
         differentiable_inputs: Any,
+        execution: str = "auto",
 ) -> bool:
     """Run the cheap device/transform check without loading an executor."""
     from tensordev._wordwise.dispatch import (
@@ -169,6 +171,7 @@ def _fssk_q1_wordwise_eligible(
         q=q,
         reference=reference,
         differentiable_inputs=differentiable_inputs,
+        execution=execution,
     )
 
 
@@ -752,6 +755,40 @@ def _prepared_fssk_q1_wordwise_eligible(
     return not _contains_tracer((call.y_time, call.coef, call.seed))
 
 
+def _dispatch_fssk_q1_wordwise(
+        call: _PreparedFSSKStateCall,
+        *,
+        execution: str,
+        weights: Array | None = None,
+) -> Any | None:
+    """Execute an eligible call, allowing portable fallback only in auto mode."""
+    if not _prepared_fssk_q1_wordwise_eligible(call):
+        if execution == "wordwise":
+            raise ValueError(
+                "execution='wordwise' requires eager inputs outside JAX "
+                "transformations (jit, grad, and vmap)."
+            )
+        return None
+    if execution != "wordwise":
+        if weights is None:
+            return _try_fssk_q1_wordwise(call)
+        return _try_fssk_q1_wordwise_readout(call, weights)
+
+    from tensordev._wordwise.fssk import (
+        run_fssk_q1_wordwise,
+        run_fssk_q1_wordwise_readout,
+    )
+
+    adapted = _fssk_q1_wordwise_adapter(call)
+    if weights is None:
+        result = run_fssk_q1_wordwise(adapted)
+    else:
+        result = run_fssk_q1_wordwise_readout(adapted, weights)
+    if result is None:
+        raise RuntimeError("execution='wordwise' did not produce an FSSK result.")
+    return result
+
+
 @partial(jax.jit, static_argnames=("batch_shape", "dtype"))
 def _canonicalize_fssk_q1_readout_weights(
         kernel: FSSK,
@@ -899,6 +936,7 @@ def fssk_state(
         increment_input: bool = False,
         core: Any = None,
         seq_core: Any = None,
+        execution: str = "auto",
 ) -> Any:
     """
     Compute hidden FSSK recursion states from path nodes or increments.
@@ -935,7 +973,14 @@ def fssk_state(
     core, seq_core:
         Algebra and sequential JAX cores. Both default to the configured core
         pair. Non-standard cores require ``kernel.q == 1``.
+    execution:
+        ``"auto"`` uses the default implementation; ``"jax"`` forces portable
+        JAX. ``"wordwise"`` requests the alpha implementation for
+        ``kernel.q == 1`` and raises if unsupported. It requires eager
+        float32/float64 inputs on one NVIDIA GPU with CUDA compute capability
+        8.0 or newer, outside ``jit``, ``grad``, and ``vmap``.
     """
+    execution = _validate_execution(execution)
     core, seq_core = _resolve_fssk_core_pair(core, seq_core)
     active = core.normalize_truncation(trunc)
     _validate_fssk_core(
@@ -954,6 +999,7 @@ def fssk_state(
         q=kernel.q,
         reference=X,
         differentiable_inputs=differentiable_inputs,
+        execution=execution,
     )
     if wordwise_eligible or _fssk_accelerator_colocation_eligible(
         reference=X,
@@ -981,9 +1027,7 @@ def fssk_state(
             core=core,
             seq_core=seq_core,
         )
-        if not _prepared_fssk_q1_wordwise_eligible(call):
-            return _execute_portable_prepared_fssk_state(call)
-        states = _try_fssk_q1_wordwise(call)
+        states = _dispatch_fssk_q1_wordwise(call, execution=execution)
         if states is None:
             return _execute_portable_prepared_fssk_state(call)
         return _finalize_wordwise_prepared_fssk_state(call, states)
@@ -1068,6 +1112,7 @@ def fssk_state_from_coef(
         output_starting_state: bool = False,
         core: Any = None,
         seq_core: Any = None,
+        execution: str = "auto",
 ) -> Any:
     """
     Compute hidden FSSK recursion states from projected increments and coefficients.
@@ -1096,7 +1141,10 @@ def fssk_state_from_coef(
         Prepend seed state to the output.
     core, seq_core:
         Algebra and sequential JAX cores. Both default to the configured pair.
+    execution:
+        ``"auto"``, ``"jax"``, or ``"wordwise"``; see :func:`fssk_state`.
     """
+    execution = _validate_execution(execution)
     core, seq_core = _resolve_fssk_core_pair(core, seq_core)
     if trunc is None and getattr(core, "grading", None) == "total_degree":
         trunc = coef.trunc
@@ -1117,6 +1165,7 @@ def fssk_state_from_coef(
         q=coef.q,
         reference=y,
         differentiable_inputs=differentiable_inputs,
+        execution=execution,
     )
     if wordwise_eligible or _fssk_accelerator_colocation_eligible(
         reference=y,
@@ -1141,9 +1190,7 @@ def fssk_state_from_coef(
             core=core,
             seq_core=seq_core,
         )
-        if not _prepared_fssk_q1_wordwise_eligible(call):
-            return _execute_portable_prepared_fssk_state(call)
-        states = _try_fssk_q1_wordwise(call)
+        states = _dispatch_fssk_q1_wordwise(call, execution=execution)
         if states is None:
             return _execute_portable_prepared_fssk_state(call)
         return _finalize_wordwise_prepared_fssk_state(call, states)
@@ -1234,6 +1281,7 @@ def fssk_vsig(
         increment_input: bool = False,
         core: Any = None,
         seq_core: Any = None,
+        execution: str = "auto",
 ) -> Any:
     """
     Compute the Volterra signature of a path via the FSSK recursion.
@@ -1274,6 +1322,8 @@ def fssk_vsig(
     core, seq_core:
         Algebra and sequential JAX cores. Both default to the configured pair.
         Non-standard cores require ``kernel.q == 1``.
+    execution:
+        ``"auto"``, ``"jax"``, or ``"wordwise"``; see :func:`fssk_state`.
 
     Returns
     -------
@@ -1281,6 +1331,7 @@ def fssk_vsig(
         Volterra signature in the selected core's native layout and
         coordinates. With blocking, an emitted block axis appears at ``axis``.
     """
+    execution = _validate_execution(execution)
     core, seq_core = _resolve_fssk_core_pair(core, seq_core)
     active = core.normalize_truncation(trunc)
     _validate_fssk_core(
@@ -1305,6 +1356,7 @@ def fssk_vsig(
         q=kernel.q,
         reference=X,
         differentiable_inputs=differentiable_inputs,
+        execution=execution,
     )
     if wordwise_eligible or _fssk_accelerator_colocation_eligible(
         reference=X,
@@ -1333,19 +1385,15 @@ def fssk_vsig(
             core=core,
             seq_core=seq_core,
         )
-        if not _prepared_fssk_q1_wordwise_eligible(call):
-            return _execute_portable_prepared_fssk_vsig(
-                call,
-                kernel,
-                tau_dt,
-            )
         weights = _prepare_fssk_q1_wordwise_readout_weights(
             call,
             kernel,
             tau_dt,
         )
         if weights is not None:
-            signature = _try_fssk_q1_wordwise_readout(call, weights)
+            signature = _dispatch_fssk_q1_wordwise(
+                call, execution=execution, weights=weights
+            )
             if signature is None:
                 return _execute_portable_prepared_fssk_vsig(
                     call,
@@ -1356,7 +1404,7 @@ def fssk_vsig(
                 call,
                 signature,
             )
-        states = _try_fssk_q1_wordwise(call)
+        states = _dispatch_fssk_q1_wordwise(call, execution=execution)
         if states is None:
             return _execute_portable_prepared_fssk_vsig(
                 call,

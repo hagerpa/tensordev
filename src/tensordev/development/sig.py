@@ -33,7 +33,8 @@ def path_signature(
         accumulate_in_tree: bool = False,
         parallel: bool = False,
         core: Any = None,
-        seq_core: SequentialCore = None
+        seq_core: SequentialCore = None,
+        execution: str = "auto",
 ) -> DenseElem | BigradedTensor:
     """
     Truncated signature of a scalar path.
@@ -74,6 +75,14 @@ def path_signature(
         Tensor algebra backend.
     seq_core : SequentialCore
         Sequential operations backend.
+    execution : {"auto", "jax", "wordwise"}, default "auto"
+        ``"auto"`` retains the default execution policy; ``"jax"`` forces
+        portable JAX. ``"wordwise"`` explicitly requests the alpha NVIDIA
+        GPU kernels for float32/float64 input on one device with CUDA compute
+        capability 8.0 or newer. Wordwise execution requires eager calls with
+        ``parallel=False`` and ``accumulate_in_tree=False``; it does not
+        support outer ``jit``, ``grad``, or ``vmap`` transformations.
+        Unsupported explicit requests raise instead of falling back.
 
     Returns
     -------
@@ -81,6 +90,12 @@ def path_signature(
         Tensor element in the selected core's native format.  With blocking,
         its arrays carry a block axis at ``axis``.
     """
+    from tensordev._wordwise.dispatch import (
+        _validate_execution,
+        ordinary_wordwise_device_eligible,
+    )
+
+    _validate_execution(execution)
     call = _prepare_free_development_call(
         (x,),
         increment_input=increment_input,
@@ -99,14 +114,21 @@ def path_signature(
 
     # Check concrete device placement before importing an executor or
     # constructing a wordwise plan.
-    from tensordev._wordwise.dispatch import ordinary_wordwise_device_eligible
-
-    if not ordinary_wordwise_device_eligible(call):
+    if not ordinary_wordwise_device_eligible(call, execution=execution):
         return _execute_portable_free_development_call(call)
-    from tensordev._wordwise.ordinary import try_ordinary_wordwise
+    from tensordev._wordwise.ordinary import (
+        run_ordinary_wordwise,
+        try_ordinary_wordwise,
+    )
 
-    result = try_ordinary_wordwise(call)
+    result = (
+        run_ordinary_wordwise(call)
+        if execution == "wordwise"
+        else try_ordinary_wordwise(call)
+    )
     if result is None:
+        if execution == "wordwise":
+            raise RuntimeError("Wordwise signature execution produced no result.")
         return _execute_portable_free_development_call(call)
     return _finalize_free_development_call(
         call,
@@ -169,6 +191,7 @@ class Signature:
             parallel: bool = False,
             accumulate_in_tree: bool = False,
             increment_input: bool = False,
+            execution: str = "auto",
     ) -> DenseElem | BigradedTensor:
         """Compute the signature of ``x``.
 
@@ -188,6 +211,7 @@ class Signature:
             parallel=parallel,
             core=self.core,
             seq_core=self.seq_core,
+            execution=execution,
         )
 
 

@@ -1,9 +1,8 @@
 # TensorDev native CPU kernels
 
-`tensordev-native-cpu` is an optional platform wheel containing TensorDev's
-CPU XLA FFI kernels. It is separate from the pure Python `tensordev` package;
-eligible partially symmetrized signature steps use it automatically when it
-is installed, while unsupported workloads retain the JAX implementation.
+TensorDev's Linux x86_64/aarch64 (glibc 2.28+) and macOS Apple Silicon wheels
+include CPU XLA FFI kernels. Eligible partially symmetrized signature steps
+use them automatically, while unsupported workloads retain the JAX implementation.
 The current fused Horner path targets sufficiently large `float32`/`float64`
 workloads in standard coordinates with `partially_symmetrized=True`
 and `dims=(1, q)`, `q > 1`.
@@ -15,35 +14,52 @@ host-specific instruction flags.
 The ragged Horner handler derives its grade count and layout from metadata, so
 its compiled interface is independent of the truncation.
 
-Install the companion directly from the repository root with:
+## Source builds
+
+Source installations and the universal wheel use portable JAX without a C++
+compiler. To include native kernels when installing from the repository root,
+use:
 
 ```bash
-python -m pip install ./native
+TENSORDEV_BUILD_NATIVE=1 python -m pip install .
 ```
 
-Build the wheel from the repository root with:
+This requires a C++17 compiler. The isolated build environment obtains CMake
+and the JAX 0.10.0 headers used for the supported JAX 0.10--0.11 runtime range.
+Native build failures are reported rather than silently producing a pure wheel.
+
+Build a platform wheel from the repository root with:
 
 ```bash
-python -m pip wheel ./native --wheel-dir dist --no-deps
+TENSORDEV_BUILD_NATIVE=1 python -m pip wheel . --wheel-dir dist --no-deps
 ```
 
 For a distributable macOS wheel, set the platform tag to the same deployment
 target used by CMake:
 
 ```bash
-MACOSX_DEPLOYMENT_TARGET=11.0 \
-  python -m pip wheel ./native --wheel-dir dist --no-deps
+TENSORDEV_BUILD_NATIVE=1 MACOSX_DEPLOYMENT_TARGET=11.0 \
+  python -m pip wheel . --wheel-dir dist --no-deps
 ```
 
-The Python package retains the loaded shared-library handle and exposes the
-handler capsules without registering them:
+Without `TENSORDEV_BUILD_NATIVE`, `python -m build` produces the source
+distribution and the compiler-free `py3-none-any` wheel. The source distribution
+contains the native sources, so either wheel can be built from it.
 
-```python
-import tensordev_native_cpu
+The standalone companion remains source-installable with
+`python -m pip install ./native`. It is unnecessary with a native-enabled
+TensorDev wheel and is not published separately. Bundled kernels take precedence;
+the two installations use separate module paths and do not overwrite each other.
 
-capsules = tensordev_native_cpu.registrations()
-```
+## Binary interface
 
-The companion must be built against a JAX installation compatible with the
-JAX version used at runtime. Source, binary, and distribution metadata are
-licensed under the repository's Apache-2.0 license.
+The bundled loader lives in the private `tensordev._native_cpu` module. It shares
+its source with the standalone `tensordev_native_cpu` loader and retains the
+shared-library handle for the lifetime of its FFI registrations. The library
+does not use the CPython extension ABI, so one platform wheel serves all
+supported Python versions.
+
+The binary must be built against a JAX installation compatible with the JAX
+version used at runtime. Release wheels are tested with both supported JAX
+minor versions. Source, binary, and distribution metadata are licensed under
+the repository's Apache-2.0 license.

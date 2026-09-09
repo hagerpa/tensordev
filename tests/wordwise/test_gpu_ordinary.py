@@ -131,18 +131,20 @@ def _assert_tensors_close(actual, expected, *, dtype):
     ],
 )
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("execution", ["auto", "wordwise"])
 @pytest.mark.parametrize(
     ("block_size", "accumulate"),
     [(None, False), (2, True), (2, False)],
 )
 def test_real_gpu_candidate_public_forced_and_portable_agree(
-    monkeypatch, family, dtype, block_size, accumulate
+    monkeypatch, family, dtype, execution, block_size, accumulate
 ):
-    monkeypatch.setattr(
-        dispatch_module,
-        "_automatic_wordwise_release_eligible",
-        lambda: True,
-    )
+    if execution == "auto":
+        monkeypatch.setattr(
+            dispatch_module,
+            "_automatic_wordwise_release_eligible",
+            lambda: True,
+        )
     core, truncation = _case(family)
     increments = _increments(dtype)
     call = _prepare_free_development_call(
@@ -154,14 +156,6 @@ def test_real_gpu_candidate_public_forced_and_portable_agree(
         accumulate=accumulate,
         core=core,
     )
-    portable = _execute_portable_free_development_call(call)
-    raw_forced = run_ordinary_wordwise(call)
-    forced = _finalize_free_development_call(
-        call,
-        raw_forced,
-        runner_applied_seed=False,
-        runner_emitted_starting_point=False,
-    )
 
     calls = []
     original = ordinary.run_ordinary_wordwise
@@ -171,7 +165,7 @@ def test_real_gpu_candidate_public_forced_and_portable_agree(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(ordinary, "run_ordinary_wordwise", observed_wordwise)
-    automatic = td.path_signature(
+    portable = td.path_signature(
         increments,
         trunc=truncation,
         increment_input=True,
@@ -179,11 +173,31 @@ def test_real_gpu_candidate_public_forced_and_portable_agree(
         block_size=block_size,
         accumulate=accumulate,
         core=core,
+        execution="jax",
+    )
+    assert not calls, "execution='jax' attempted wordwise execution"
+    raw_forced = run_ordinary_wordwise(call)
+    forced = _finalize_free_development_call(
+        call,
+        raw_forced,
+        runner_applied_seed=False,
+        runner_emitted_starting_point=False,
+    )
+
+    public = td.path_signature(
+        increments,
+        trunc=truncation,
+        increment_input=True,
+        axis=-2,
+        block_size=block_size,
+        accumulate=accumulate,
+        core=core,
+        execution=execution,
     )
 
     assert calls, "the concrete supported GPU call did not enter wordwise execution"
     _assert_tensors_close(forced, portable, dtype=dtype)
-    _assert_tensors_close(automatic, portable, dtype=dtype)
+    _assert_tensors_close(public, portable, dtype=dtype)
 
 
 def _portable_signature(increments, *, core, truncation):

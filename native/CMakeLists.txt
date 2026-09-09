@@ -9,6 +9,11 @@ endif()
 
 project(tensordev_native_cpu LANGUAGES CXX)
 
+set(
+  TENSORDEV_NATIVE_PACKAGE_DIR "tensordev_native_cpu"
+  CACHE STRING "Wheel-relative directory for the native loader and library"
+)
+
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
    NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   message(FATAL_ERROR
@@ -56,6 +61,12 @@ set_target_properties(
 
 install(
   TARGETS _tensordev_native_cpu
-  LIBRARY DESTINATION tensordev_native_cpu
-  RUNTIME DESTINATION tensordev_native_cpu
+  LIBRARY DESTINATION "${TENSORDEV_NATIVE_PACKAGE_DIR}"
+  RUNTIME DESTINATION "${TENSORDEV_NATIVE_PACKAGE_DIR}"
+)
+install(
+  DIRECTORY src/tensordev_native_cpu/
+  DESTINATION "${TENSORDEV_NATIVE_PACKAGE_DIR}"
+  FILES_MATCHING PATTERN "*.py"
+  PATTERN "__pycache__" EXCLUDE
 )

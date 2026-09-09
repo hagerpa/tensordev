@@ -1,0 +1,192 @@
+name: Build and test TensorDev distributions
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  pure:
+    name: Pure wheel and source distribution
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TENSORDEV_BUILD_NATIVE: "0"
+      JAX_PLATFORMS: cpu
+      XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Build and check distributions
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+          python -m build
+          python -m twine check dist/*
+          python tools/check_distribution.py dist/*
+
+      - name: Smoke-test the pure wheel in a clean environment
+        run: |
+          python -m venv "$RUNNER_TEMP/tensordev-wheel-smoke"
+          "$RUNNER_TEMP/tensordev-wheel-smoke/bin/python" -m pip install \
+            dist/tensordev-*-py3-none-any.whl
+          "$RUNNER_TEMP/tensordev-wheel-smoke/bin/python" - <<'PY'
+          import importlib.util
+          import pathlib
+
+          import jax
+          import jax.numpy as jnp
+          import numpy as np
+          import tensordev as td
+
+          assert "site-packages" in pathlib.Path(td.__file__).parts
+          assert importlib.util.find_spec("tensordev._native_cpu") is None
+          path = jnp.asarray(
+              [[0.0, 0.0], [0.2, -0.1], [-0.1, 0.25], [0.15, 0.3]],
+              dtype=jnp.float32,
+          )
+          ordered = td.make_core(dims=(1, 1), max_trunc=(3, 2))
+          standard = td.symmetrize_core(ordered)
+          standard_signature = td.path_signature(
+              path,
+              trunc=(3, 2),
+              core=standard,
+          )
+          core = td.shear_core(
+              standard,
+              precompute_shuffle=True,
+          )
+          trunc = (1, 1)
+          left = core.tensor_densify(
+              {(1, 0): jnp.asarray([0.4], dtype=jnp.float32)},
+              trunc=trunc,
+              include_scalar=True,
+          )
+          right = core.tensor_densify(
+              {(0, 1): jnp.asarray([-0.3], dtype=jnp.float32)},
+              trunc=trunc,
+              include_scalar=True,
+          )
+          product = core.tensor_shuffle_product(left, right, trunc=trunc)
+          product_pairing = core.tensor_shear_pairing(
+              product,
+              standard_signature,
+          )
+          factor_pairing = (
+              core.tensor_shear_pairing(left, standard_signature)
+              * core.tensor_shear_pairing(
+                  right,
+                  standard_signature,
+              )
+          )
+          jax.block_until_ready(product_pairing)
+          np.testing.assert_allclose(
+              product_pairing,
+              factor_pairing,
+              atol=2e-5,
+              rtol=2e-5,
+          )
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tensordev-dists-pure
+          path: dist/*
+          if-no-files-found: error
+
+  native:
+    name: Native wheel / ${{ matrix.platform }}
+    needs: pure
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux-x86_64
+            arch: x86_64
+            tag: manylinux_2_28_x86_64
+          - runner: ubuntu-24.04-arm
+            platform: linux-aarch64
+            arch: aarch64
+            tag: manylinux_2_28_aarch64
+          - runner: macos-14
+            platform: macos-arm64
+            arch: arm64
+            tag: macosx_11_0_arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Retrieve source distribution
+        uses: actions/download-artifact@v4
+        with:
+          name: tensordev-dists-pure
+          path: source-dist/
+
+      - name: Install wheel build tools
+        run: python -m pip install cibuildwheel==4.2.1 twine
+
+      - name: Build, repair, and test native wheels
+        run: python -m cibuildwheel source-dist/tensordev-*.tar.gz
+        env:
+          CIBW_BUILD: "cp311-* cp312-* cp313-*"
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_ARCHS: ${{ matrix.arch }}
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
+          CIBW_ENVIRONMENT: >-
+            TENSORDEV_BUILD_NATIVE=1
+            JAX_PLATFORMS=cpu
+            XLA_PYTHON_CLIENT_PREALLOCATE=false
+            MACOSX_DEPLOYMENT_TARGET=11.0
+          CIBW_TEST_REQUIRES: "pytest>=7.0 jaxtyping>=0.2"
+          # JAX 0.11 requires Python 3.12; each supported interpreter tests the
+          # same repaired py3-none wheel against its supported JAX versions.
+          CIBW_TEST_COMMAND: >-
+            python -c "import pathlib; import tensordev as td; from tensordev import _native_cpu; assert 'site-packages' in pathlib.Path(td.__file__).parts; assert _native_cpu.library_path().is_file()" &&
+            tensordev_versions="$(python -c "import sys; print('0.10.0 0.11.1' if sys.version_info >= (3, 12) else '0.10.0')")" &&
+            for tensordev_jax in $tensordev_versions; do
+              python -m pip install "jax==$tensordev_jax" "jaxlib==$tensordev_jax" &&
+              python -m pytest -q --import-mode=importlib {project}/native/tests &&
+              python -m pytest -q --import-mode=importlib {project}/tests/core/symmetrized/test_optional_cpu_horner.py &&
+              python -m pytest -q --import-mode=importlib {project}/tests/development/test_symmetrized_jax_native.py || exit 1;
+            done
+
+      - name: Check native wheel tags and metadata
+        env:
+          EXPECTED_PLATFORM_TAG: ${{ matrix.tag }}
+        run: |
+          python -m twine check wheelhouse/*
+          python tools/check_distribution.py wheelhouse/*
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from packaging.utils import parse_wheel_filename
+
+          wheels = list(Path("wheelhouse").glob("*.whl"))
+          assert len(wheels) == 1, wheels
+          name, _, _, tags = parse_wheel_filename(wheels[0].name)
+          assert name == "tensordev", name
+          assert all(tag.interpreter == "py3" and tag.abi == "none" for tag in tags)
+          assert os.environ["EXPECTED_PLATFORM_TAG"] in {tag.platform for tag in tags}
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tensordev-dists-${{ matrix.platform }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error

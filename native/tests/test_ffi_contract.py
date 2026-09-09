@@ -4,14 +4,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tensordev_native_cpu import registrations, type_registrations
-
-
 jax.config.update("jax_enable_x64", True)
 
 
-def _register(test_name: str, registration_name: str) -> str:
-    state_types = type_registrations()
+def _register(extension, test_name: str, registration_name: str) -> str:
+    state_types = extension.type_registrations()
     jax.devices("cpu")
     try:
         jax.ffi.register_ffi_type(
@@ -22,7 +19,7 @@ def _register(test_name: str, registration_name: str) -> str:
     except ValueError as error:
         if "already registered" not in str(error):
             raise
-    capsule = registrations()[registration_name]
+    capsule = extension.registrations()[registration_name]
     jax.ffi.register_ffi_target(
         test_name,
         capsule,
@@ -49,8 +46,9 @@ def _minimal_horner_metadata() -> np.ndarray:
     return metadata
 
 
-def test_ragged_horner_dynamic_arity_and_nested_vmap():
+def test_ragged_horner_dynamic_arity_and_nested_vmap(native_extension):
     target = _register(
+        native_extension,
         "tensordev_native_test_horner_f64",
         "tensordev_cpu_sym_horner_f64_v2",
     )

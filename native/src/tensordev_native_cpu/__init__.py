@@ -1,4 +1,4 @@
-"""Capsules exported by the optional TensorDev CPU kernel library."""
+"""Capsules exported by the TensorDev CPU kernel library."""
 
 from ._loader import library_path, registrations, type_registrations
 

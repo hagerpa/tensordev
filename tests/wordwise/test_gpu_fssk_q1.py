@@ -12,6 +12,7 @@ import pytest
 
 import tensordev as td
 import tensordev._wordwise.dispatch as dispatch_module
+from tensordev._wordwise import fssk as wordwise_fssk
 from tensordev._wordwise.dispatch import _supported_cuda_device
 from tensordev._wordwise.layout import build_layout_plan
 from tensordev.sss import FSSK
@@ -204,16 +205,19 @@ def _tree_square_norm(value):
 
 @pytest.mark.parametrize("family", _FAMILIES)
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("execution", ["auto", "wordwise"])
 def test_candidate_public_q1_apis_match_forced_portable(
     monkeypatch,
     family,
     dtype,
+    execution,
 ):
-    monkeypatch.setattr(
-        dispatch_module,
-        "_automatic_wordwise_release_eligible",
-        lambda: True,
-    )
+    if execution == "auto":
+        monkeypatch.setattr(
+            dispatch_module,
+            "_automatic_wordwise_release_eligible",
+            lambda: True,
+        )
     gpu = GPU_DEVICES[0]
     core, truncation, block_size, accumulate = _case(family)
     varying = dtype == np.float64
@@ -249,30 +253,28 @@ def test_candidate_public_q1_apis_match_forced_portable(
         assert _device(tau_dt) == CPU_DEVICE
 
         native_results = []
-        original_try = state_update_module._try_fssk_q1_wordwise
-        original_try_readout = (
-            state_update_module._try_fssk_q1_wordwise_readout
-        )
+        original_run = wordwise_fssk.run_fssk_q1_wordwise
+        original_run_readout = wordwise_fssk.run_fssk_q1_wordwise_readout
 
         def observed_native(*args, **kwargs):
-            result = original_try(*args, **kwargs)
+            result = original_run(*args, **kwargs)
             native_results.append(result is not None)
             return result
 
         monkeypatch.setattr(
-            state_update_module,
-            "_try_fssk_q1_wordwise",
+            wordwise_fssk,
+            "run_fssk_q1_wordwise",
             observed_native,
         )
 
         def observed_native_readout(*args, **kwargs):
-            result = original_try_readout(*args, **kwargs)
+            result = original_run_readout(*args, **kwargs)
             native_results.append(result is not None)
             return result
 
         monkeypatch.setattr(
-            state_update_module,
-            "_try_fssk_q1_wordwise_readout",
+            wordwise_fssk,
+            "run_fssk_q1_wordwise_readout",
             observed_native_readout,
         )
         state_kwargs = dict(
@@ -284,50 +286,58 @@ def test_candidate_public_q1_apis_match_forced_portable(
             output_starting_state=output_starting_state,
             core=core,
         )
-        automatic_state = fssk_state(
+        public_state = fssk_state(
             increments,
             kernel=kernel,
             dt=dt,
             increment_input=True,
+            execution=execution,
             **state_kwargs,
         )
-        automatic_from_coef = fssk_state_from_coef(
+        public_from_coef = fssk_state_from_coef(
             increments,
             coef=coef,
+            execution=execution,
             **state_kwargs,
         )
-        automatic_vsig = fssk_vsig(
+        public_vsig = fssk_vsig(
             increments,
             kernel=kernel,
             dt=dt,
             increment_input=True,
             tau_dt=tau_dt,
+            execution=execution,
             **state_kwargs,
         )
 
         assert len(native_results) >= 3
         assert all(native_results)
 
+        def unexpected_native(*args, **kwargs):
+            raise AssertionError("execution='jax' attempted wordwise execution")
+
         monkeypatch.setattr(
-            state_update_module,
-            "_try_fssk_q1_wordwise",
-            lambda *args, **kwargs: None,
+            wordwise_fssk,
+            "run_fssk_q1_wordwise",
+            unexpected_native,
         )
         monkeypatch.setattr(
-            state_update_module,
-            "_try_fssk_q1_wordwise_readout",
-            lambda *args, **kwargs: None,
+            wordwise_fssk,
+            "run_fssk_q1_wordwise_readout",
+            unexpected_native,
         )
         portable_state = fssk_state(
             increments,
             kernel=kernel,
             dt=dt,
             increment_input=True,
+            execution="jax",
             **state_kwargs,
         )
         portable_from_coef = fssk_state_from_coef(
             increments,
             coef=coef,
+            execution="jax",
             **state_kwargs,
         )
         portable_vsig = fssk_vsig(
@@ -336,16 +346,17 @@ def test_candidate_public_q1_apis_match_forced_portable(
             dt=dt,
             increment_input=True,
             tau_dt=tau_dt,
+            execution="jax",
             **state_kwargs,
         )
 
-    _assert_tensors_close(automatic_state, portable_state, dtype=dtype)
-    _assert_tensors_close(automatic_from_coef, portable_from_coef, dtype=dtype)
-    _assert_tensors_close(automatic_vsig, portable_vsig, dtype=dtype)
-    _assert_tensors_close(automatic_state, automatic_from_coef, dtype=dtype)
-    _assert_on_gpu(automatic_state)
-    _assert_on_gpu(automatic_from_coef)
-    _assert_on_gpu(automatic_vsig)
+    _assert_tensors_close(public_state, portable_state, dtype=dtype)
+    _assert_tensors_close(public_from_coef, portable_from_coef, dtype=dtype)
+    _assert_tensors_close(public_vsig, portable_vsig, dtype=dtype)
+    _assert_tensors_close(public_state, public_from_coef, dtype=dtype)
+    _assert_on_gpu(public_state)
+    _assert_on_gpu(public_from_coef)
+    _assert_on_gpu(public_vsig)
 
 
 def test_outer_jit_vmap_and_grad_remain_on_the_portable_route(monkeypatch):

@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=77", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=1.0"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "tensordev"
@@ -56,11 +56,43 @@ Homepage = "https://github.com/hagerpa/tensordev"
 Repository = "https://github.com/hagerpa/tensordev"
 Issues = "https://github.com/hagerpa/tensordev/issues"
 
-[tool.setuptools]
-package-dir = {"" = "src"}
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.source-dir = "native"
+cmake.version = ">=3.20"
+wheel.cmake = false
+wheel.packages = ["src/tensordev"]
+wheel.py-api = "py3"
+sdist.inclusion-mode = "explicit"
+sdist.include = [
+    "pyproject.toml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "src/tensordev/**/*.py",
+    "tests/**/*.py",
+    "native/CMakeLists.txt",
+    "native/cpp/*.cc",
+    "native/src/tensordev_native_cpu/*.py",
+    "native/tests/*.py",
+    "native/pyproject.toml",
+    "native/README.md",
+    "native/LICENSE",
+    "tools/check_distribution.py",
+]
+wheel.exclude = [
+    "**/.DS_Store",
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "**/*.nbc",
+    "**/*.nbi",
+]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[[tool.scikit-build.overrides]]
+if.env.TENSORDEV_BUILD_NATIVE = true
+wheel.cmake = true
+build.requires = ["jax==0.10.0", "jaxlib==0.10.0"]
+cmake.define.TENSORDEV_NATIVE_PACKAGE_DIR = "tensordev/_native_cpu"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

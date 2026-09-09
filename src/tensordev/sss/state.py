@@ -163,6 +163,7 @@ class StateSpaceSignature:
             dt: Array | float,
             axis: int = -2,
             increment_input: bool = False,
+            execution: str = "auto",
     ) -> StateSpaceSignature:
         """Process a multi-step path ``X`` and return a new instance with the terminal hidden state.
 
@@ -184,6 +185,8 @@ class StateSpaceSignature:
         increment_input:
             Pass ``True`` if ``X`` already contains increments rather than
             path nodes (skips the internal :func:`jnp.diff`).
+        execution:
+            ``"auto"``, ``"jax"``, or ``"wordwise"``; see :func:`fssk_state`.
 
         Returns
         -------
@@ -204,6 +207,7 @@ class StateSpaceSignature:
             increment_input=increment_input,
             core=self.core,
             seq_core=self.seq_core,
+            execution=execution,
         )
         return replace(self, state=terminal)
 
@@ -212,6 +216,7 @@ class StateSpaceSignature:
             dx: Array,
             *,
             dt: Array | float,
+            execution: str = "auto",
     ) -> StateSpaceSignature:
         """Advance the state by a single increment ``dx``.
 
@@ -225,6 +230,8 @@ class StateSpaceSignature:
             match ``self.kernel.path_dim``. No step axis is expected.
         dt:
             Scalar step size for this increment.
+        execution:
+            ``"auto"``, ``"jax"``, or ``"wordwise"``; see :func:`fssk_state`.
 
         Returns
         -------
@@ -238,6 +245,7 @@ class StateSpaceSignature:
             dt=dt,
             axis=-2,
             increment_input=True,
+            execution=execution,
         )
 
     # ------------------------------------------------------------------
@@ -304,6 +312,7 @@ class StateSpaceSignature:
             initial_state: Any = None,
             output_starting_state: bool = True,
             increment_input: bool = False,
+            execution: str = "auto",
     ) -> Any:
         """Return the hidden-state trajectory over ``X``.
 
@@ -329,6 +338,8 @@ class StateSpaceSignature:
             Prepend the seed state to the output (default ``True``).
         increment_input:
             ``True`` if ``X`` already contains increments.
+        execution:
+            ``"auto"``, ``"jax"``, or ``"wordwise"``; see :func:`fssk_state`.
 
         Returns
         -------
@@ -349,6 +360,7 @@ class StateSpaceSignature:
             increment_input=increment_input,
             core=self.core,
             seq_core=self.seq_core,
+            execution=execution,
         )
 
     def vsig(
@@ -363,6 +375,7 @@ class StateSpaceSignature:
             output_starting_state: bool = False,
             tau_dt: Array | float = 0.0,
             increment_input: bool = False,
+            execution: str = "auto",
     ) -> Any:
         """Compute the Volterra signature of ``X``.
 
@@ -394,6 +407,8 @@ class StateSpaceSignature:
             Non-negative readout lag ``tau - t``; broadcasts against batch axes.
         increment_input:
             ``True`` if ``X`` already contains increments.
+        execution:
+            ``"auto"``, ``"jax"``, or ``"wordwise"``; see :func:`fssk_state`.
 
         Returns
         -------
@@ -416,6 +431,7 @@ class StateSpaceSignature:
             increment_input=increment_input,
             core=self.core,
             seq_core=self.seq_core,
+            execution=execution,
         )
 
 

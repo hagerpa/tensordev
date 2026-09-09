@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import importlib
+from types import SimpleNamespace
 
 import jax
 from jax import config
@@ -15,6 +15,7 @@ from tensordev.core.bigraded.symmetrized.jax import (
     JaxPartiallySymmetrizedBigraded,
 )
 from tensordev.core.bigraded.types import BigradedTensor
+from tensordev.development import path_signature
 
 
 config.update("jax_enable_x64", True)
@@ -70,14 +71,77 @@ def _assert_tensor_close(actual, expected, *, atol, rtol):
 
 
 def _native_extension_or_skip():
-    try:
-        extension = importlib.import_module("tensordev_native_cpu")
-        registrations = extension.registrations()
-    except (ImportError, OSError, AttributeError) as error:
-        pytest.skip(f"optional TensorDev CPU extension is unavailable: {error}")
-    if not frozenset(_cpu_horner._TARGETS.values()).issubset(registrations):
-        pytest.skip("optional TensorDev CPU extension lacks Horner targets")
-    return extension
+    if _cpu_horner._native_registrations() is None:
+        pytest.skip(
+            "TensorDev CPU extension with compatible Horner targets is unavailable"
+        )
+
+
+def _registration_module():
+    registrations = {name: object() for name in _cpu_horner._TARGETS.values()}
+    type_registrations = {_cpu_horner._STATE_TYPE_NAME: object()}
+    return SimpleNamespace(
+        registrations=lambda: registrations,
+        type_registrations=lambda: type_registrations,
+    )
+
+
+def test_bundled_native_extension_takes_precedence(monkeypatch):
+    extension = _registration_module()
+    attempted = []
+
+    def bundled_extension(name):
+        attempted.append(name)
+        assert name == "tensordev._native_cpu"
+        return extension
+
+    monkeypatch.setattr(_cpu_horner.importlib, "import_module", bundled_extension)
+    registrations = _cpu_horner._native_registrations()
+
+    assert attempted == ["tensordev._native_cpu"]
+    assert registrations == (
+        extension.registrations(),
+        extension.type_registrations(),
+    )
+
+
+@pytest.mark.parametrize("unavailable", ("missing", "unloadable", "incompatible"))
+def test_standalone_native_extension_fallback(unavailable, monkeypatch):
+    extension = _registration_module()
+    attempted = []
+
+    def missing_library():
+        raise OSError("shared library cannot be loaded")
+
+    def standalone_extension(name):
+        attempted.append(name)
+        if name == "tensordev._native_cpu":
+            if unavailable == "missing":
+                raise ModuleNotFoundError(name)
+            if unavailable == "unloadable":
+                return SimpleNamespace(registrations=missing_library)
+            return SimpleNamespace(registrations=dict, type_registrations=dict)
+        assert name == "tensordev_native_cpu"
+        return extension
+
+    monkeypatch.setattr(_cpu_horner.importlib, "import_module", standalone_extension)
+    registrations = _cpu_horner._native_registrations()
+
+    assert attempted == ["tensordev._native_cpu", "tensordev_native_cpu"]
+    assert registrations == (
+        extension.registrations(),
+        extension.type_registrations(),
+    )
+
+
+@pytest.mark.parametrize("attribute", ("registrations", "type_registrations"))
+def test_invalid_native_registration_mapping_raises(attribute, monkeypatch):
+    extension = _registration_module()
+    setattr(extension, attribute, lambda: None)
+    monkeypatch.setattr(_cpu_horner.importlib, "import_module", lambda _: extension)
+
+    with pytest.raises(TypeError, match="must return a mapping"):
+        _cpu_horner._native_registrations()
 
 
 def test_selector_rejects_ineligible_actions_before_native_registration(
@@ -148,7 +212,7 @@ def test_missing_native_extension_falls_back_exactly(monkeypatch):
     attempted = []
 
     def missing_extension(name, *args, **kwargs):
-        if name == "tensordev_native_cpu":
+        if name in ("tensordev._native_cpu", "tensordev_native_cpu"):
             attempted.append(name)
             raise ModuleNotFoundError(name)
         return real_import(name, *args, **kwargs)
@@ -161,9 +225,90 @@ def test_missing_native_extension_falls_back_exactly(monkeypatch):
     )
     actual = core._fmexp_first_level(left, generator, trunc=_TRUNCATION)
 
-    assert attempted == ["tensordev_native_cpu"]
+    assert attempted == ["tensordev._native_cpu", "tensordev_native_cpu"]
     assert _cpu_horner._REGISTRATION_STATE is False
     _assert_tensor_close(actual, expected, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.parametrize("platforms", ("gpu", "cuda", "rocm", "tpu", "cuda,rocm"))
+@pytest.mark.parametrize("registration_state", (None, True))
+def test_cpu_excluded_skips_registration_and_plan_preparation(
+    platforms,
+    registration_state,
+    monkeypatch,
+):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("CPU-disabled dispatch must not prepare native execution")
+
+    monkeypatch.setattr(
+        _cpu_horner,
+        "jax",
+        SimpleNamespace(
+            config=SimpleNamespace(jax_platforms=platforms),
+            devices=forbidden,
+        ),
+    )
+    monkeypatch.setattr(_cpu_horner, "_REGISTRATION_STATE", registration_state)
+    monkeypatch.setattr(_cpu_horner.importlib, "import_module", forbidden)
+    monkeypatch.setattr(_cpu_horner, "_compile_plan", forbidden)
+    core = SimpleNamespace(
+        coordinates="standard",
+        dims=(1, 2),
+        plan_store=SimpleNamespace(resolve=forbidden),
+    )
+    left = SimpleNamespace(spec=SimpleNamespace(include_scalar=True))
+
+    assert _cpu_horner._register_targets() is False
+    assert _cpu_horner._REGISTRATION_STATE is registration_state
+    assert _cpu_horner.try_fused_horner(core, left, None, _TRUNCATION) is None
+
+
+@pytest.mark.parametrize("platforms", (None, "", "cpu", "cuda,cpu", "cpu,tpu"))
+def test_cpu_enabled_platform_configurations(platforms, monkeypatch):
+    monkeypatch.setattr(
+        _cpu_horner,
+        "jax",
+        SimpleNamespace(config=SimpleNamespace(jax_platforms=platforms)),
+    )
+    assert _cpu_horner._cpu_backend_enabled()
+
+
+def test_cpu_excluded_falls_back_exactly_eager_and_jit(monkeypatch):
+    core = _core()
+    left = _random_tensor(
+        core,
+        jr.PRNGKey(822),
+        batch=(_NATIVE_BATCH,),
+        dtype=jnp.float64,
+    )
+    generator = jr.normal(
+        jr.PRNGKey(823),
+        (_NATIVE_BATCH, 3),
+        dtype=jnp.float64,
+    )
+
+    def forbidden_registration():
+        raise AssertionError("CPU-disabled dispatch must not register native targets")
+
+    monkeypatch.setattr(_cpu_horner, "_cpu_backend_enabled", lambda: False)
+    monkeypatch.setattr(_cpu_horner, "_register_targets", forbidden_registration)
+    native = lambda current, increment: core._fmexp_first_level(
+        current, increment, trunc=_TRUNCATION
+    )
+    portable = lambda current, increment: _portable(core, current, increment)
+
+    _assert_tensor_close(
+        native(left, generator), portable(left, generator), atol=0.0, rtol=0.0
+    )
+    lowered = jax.jit(native).lower(left, generator)
+    hlo = lowered.compiler_ir(dialect="hlo").as_hlo_text()
+    assert not any(target in hlo for target in _cpu_horner._TARGETS.values())
+    _assert_tensor_close(
+        lowered.compile()(left, generator),
+        jax.jit(portable)(left, generator),
+        atol=0.0,
+        rtol=0.0,
+    )
 
 
 @pytest.mark.parametrize(
@@ -218,6 +363,47 @@ def test_native_horner_matches_portable_eager_and_jit(
         expected,
         atol=atol,
         rtol=rtol,
+    )
+
+
+def test_native_path_signature_matches_portable_horner_scan(monkeypatch):
+    _native_extension_or_skip()
+    monkeypatch.setattr(_cpu_horner, "_REGISTRATION_STATE", None)
+    core = _core()
+    paths = 0.05 * jr.normal(
+        jr.PRNGKey(834), (_NATIVE_BATCH, 5, 3), dtype=jnp.float64
+    )
+
+    def signature(values):
+        return path_signature(
+            values,
+            trunc=_TRUNCATION,
+            axis=-2,
+            accumulate=False,
+            parallel=False,
+            core=core,
+        )
+
+    def portable_signature(values):
+        increments = jnp.diff(values, axis=-2)
+        neutral = core.development_neutral(
+            (increments,), trunc=_TRUNCATION, axis=-2
+        )
+        terminal, _ = jax.lax.scan(
+            lambda carry, increment: (_portable(core, carry, increment), None),
+            neutral,
+            jnp.moveaxis(increments, -2, 0),
+        )
+        return terminal
+
+    lowered = jax.jit(signature).lower(paths)
+    target = _cpu_horner._TARGETS[np.dtype(jnp.float64)]
+    assert target in lowered.compiler_ir(dialect="hlo").as_hlo_text()
+    _assert_tensor_close(
+        lowered.compile()(paths),
+        jax.jit(portable_signature)(paths),
+        atol=2e-12,
+        rtol=2e-12,
     )
 
 

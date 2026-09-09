@@ -17,12 +17,14 @@
 - Replace the separate shuffle core with optional shuffle precomputation on
   each bounded core and provide one public memory estimator,
   `core_expected_memory`.
-- Add source-installable native CPU companion code for partially symmetrized
-  bidegree signature evaluation. The companion is not separately published as
-  a package or wheel in this release.
-- Add candidate NVIDIA wordwise executors and release benchmarks for ordinary
-  and exact scalar-FSSK signatures. Public calls retain portable JAX execution
-  until exact target and workload regions pass the release gates.
+- Bundle native CPU kernels for partially symmetrized bidegree signature
+  evaluation in Linux x86_64/aarch64 and macOS Apple Silicon wheels. Retain
+  compiler-free pure-Python wheels and source installations, with automatic
+  JAX fallback for unsupported workloads and CPU-excluded configurations.
+- Add alpha NVIDIA wordwise execution for ordinary and scalar-FSSK signatures
+  through `execution="wordwise"`. The default `"auto"` policy retains portable
+  JAX on GPUs; `"jax"` explicitly selects portable execution. Explicit wordwise
+  requests report unsupported calls instead of falling back.
 
 ### Migration from 0.0.3
 

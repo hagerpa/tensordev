@@ -55,36 +55,49 @@ def _readonly_int32(values) -> np.ndarray:
     return result
 
 
+def _cpu_backend_enabled() -> bool:
+    platforms = jax.config.jax_platforms
+    return not platforms or "cpu" in platforms.split(",")
+
+
+def _native_registrations():
+    required = frozenset(_TARGETS.values())
+    for module_name in ("tensordev._native_cpu", "tensordev_native_cpu"):
+        try:
+            extension = importlib.import_module(module_name)
+            registrations = extension.registrations()
+            type_registrations = extension.type_registrations()
+        except (ImportError, OSError, AttributeError):
+            continue
+        if not isinstance(registrations, Mapping):
+            raise TypeError(f"{module_name}.registrations() must return a mapping")
+        if not isinstance(type_registrations, Mapping):
+            raise TypeError(
+                f"{module_name}.type_registrations() must return a mapping"
+            )
+        if not required.issubset(registrations):
+            continue
+        if type_registrations.get(_STATE_TYPE_NAME) is None:
+            continue
+        return registrations, type_registrations
+    return None
+
+
 def _register_targets() -> bool:
     global _REGISTRATION_STATE
+    if not _cpu_backend_enabled():
+        return False
     if _REGISTRATION_STATE is not None:
         return _REGISTRATION_STATE
     with _REGISTRATION_LOCK:
         if _REGISTRATION_STATE is not None:
             return _REGISTRATION_STATE
-        try:
-            extension = importlib.import_module("tensordev_native_cpu")
-            registrations = extension.registrations()
-            type_registrations = extension.type_registrations()
-        except (ImportError, OSError, AttributeError):
+        registration_maps = _native_registrations()
+        if registration_maps is None:
             _REGISTRATION_STATE = False
             return False
-        if not isinstance(registrations, Mapping):
-            raise TypeError(
-                "tensordev_native_cpu.registrations() must return a mapping"
-            )
-        if not isinstance(type_registrations, Mapping):
-            raise TypeError(
-                "tensordev_native_cpu.type_registrations() must return a mapping"
-            )
-        required = frozenset(_TARGETS.values())
-        if not required.issubset(registrations):
-            _REGISTRATION_STATE = False
-            return False
-        state_type = type_registrations.get(_STATE_TYPE_NAME)
-        if state_type is None:
-            _REGISTRATION_STATE = False
-            return False
+        registrations, type_registrations = registration_maps
+        state_type = type_registrations[_STATE_TYPE_NAME]
         jax.devices("cpu")
         try:
             jax.ffi.register_ffi_type(
@@ -95,7 +108,7 @@ def _register_targets() -> bool:
         except ValueError as error:
             if "already registered" not in str(error):
                 raise
-        for name in required:
+        for name in frozenset(_TARGETS.values()):
             try:
                 jax.ffi.register_ffi_target(
                     name,
@@ -331,6 +344,8 @@ def try_fused_horner(core, g, z, truncation):
     if core.coordinates != "standard" or not g.spec.include_scalar:
         return None
     if core.dims[0] != 1 or core.dims[1] <= 1:
+        return None
+    if not _cpu_backend_enabled():
         return None
     try:
         layout = core.plan_store.resolve(
