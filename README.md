@@ -502,6 +502,7 @@ seq_core = td.get_default_seq_core()
 - [`pySigLib`](https://github.com/daniil-shmelev/pySigLib): a high-performance CPU/GPU library for signatures and signature kernels, whose CUDA and JAX support provides an important contemporary reference point for accelerator-aware signature computation.
 - [`sigkernel`](https://github.com/crispitagorico/sigkernel): inspired parts of the signature-kernel API and the second-order finite-difference stencil used for the standard signature kernel.
 - [`high-order-sigkernel`](https://github.com/maudl3116/high-order-sigkernel): inspired the predictor-corrector schemes for higher-order signature-kernel PDE systems, which are adapted and further developed in this package.
+- [`pathsig`](https://github.com/tobiasny12/pathsig), by Tobias Nygaard: inspired the word-parallel approach to GPU signature computation over prefix-closed word sets.
 
 The main theoretical background for the algorithms implemented here is:
 

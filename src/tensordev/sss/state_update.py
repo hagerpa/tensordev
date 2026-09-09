@@ -602,7 +602,7 @@ def _finalize_prepared_fssk_state(
 def _execute_portable_prepared_fssk_state(
         call: _PreparedFSSKStateCall,
 ) -> Any:
-    """Portable oracle/fallback for a call whose preparation already ran."""
+    """Execute and finalize a prepared FSSK call with portable JAX."""
     return _finalize_prepared_fssk_state(
         call,
         _run_portable_prepared_fssk_state(call),

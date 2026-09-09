@@ -1,7 +1,7 @@
 """Small pure-JAX reference recurrences for wordwise implementations.
 
-These routines are mathematical oracles and derivation aids.  They are not a
-third production executor and deliberately favour directness over throughput.
+These routines provide independent numerical checks and favour directness
+over throughput.
 """
 
 from __future__ import annotations
@@ -416,8 +416,9 @@ def fssk_q1_state_reference(
 
     if plan.partially_symmetrized:
         raise ValueError(
-            "the scalar-FSSK quotient recurrence is not yet established; "
-            "use an ordered plan as the independent oracle."
+            "fssk_q1_state_reference requires an ordered plan; "
+            "use fssk_q1_quotient_graph_state_reference for partially "
+            "symmetrized states."
         )
     y = jnp.asarray(y)
     if len(plan.blocks) <= 1:

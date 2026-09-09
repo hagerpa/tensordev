@@ -86,7 +86,7 @@ def main():
             pkl_path = max(candidates, key=lambda p: p.stat().st_mtime)
             print(f"Auto-detected input: {pkl_path.name}")
         else:
-            # Fallback to medium (old behavior) for error message
+            # Fallback to medium for error message
             pkl_path = args.output_dir / "kernel_flop_scaling_medium.pkl"
 
     if not pkl_path.exists():
@@ -336,4 +336,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

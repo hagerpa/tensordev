@@ -161,7 +161,7 @@ def _check_resources(
             )
 
     # Prefixes, decoded letters, the current word increments, and the Horner
-    # accumulator are simultaneously live in the initial Triton kernel.
+    # accumulator are simultaneously live in the Triton kernel.
     local_bytes = tile_words * (
         (degree + 1) * itemsize
         + degree * np.dtype(np.int32).itemsize

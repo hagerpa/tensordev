@@ -179,17 +179,8 @@ def main():
         )
 
 
-        # ── Compute Jordan block sizes for expected-cost comparison ───────────
-        # For a near-Jordan matrix with super-diagonal coupling, we assume the
-        # block structure can be recovered from consecutive-eigenvalue grouping.
-        # For simplicity, we upper-bound by R itself (single block) or use the
-        # exact formula if we track block boundaries.  Here we store R and let
-        # the analysis script compute sum(block_sizes^2).
-        #
-        # Simple upper bound: sum(block_sizes^2) ≤ R^2 (one block).
-        # Naive multiple blocks: ≈ R  (many 1×1 blocks).
-        # For now we just store R and let the fit determine the empirical exponent.
-        jordan_block_metric = R  # placeholder; analysis will fit the exponent
+        # Record the state dimension for the empirical R-scaling fit.
+        jordan_block_metric = R
 
         # ── Abstract input specs ───────────────────────────────────────────────
         dt = 1.0 / (J - 1)
@@ -339,4 +330,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

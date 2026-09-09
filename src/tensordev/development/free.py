@@ -156,7 +156,7 @@ def _prepare_free_development_call(
 def _run_portable_free_development(
         call: _PreparedFreeDevelopmentCall,
 ) -> TensorElement:
-    """Execute a prepared call through the existing sequential core."""
+    """Execute a prepared call through its sequential core."""
     return call.seq_core.tensor_abra(
         call.increments,
         reduce_op=call.reduce_op,
