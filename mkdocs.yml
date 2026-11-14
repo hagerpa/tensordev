@@ -1,0 +1,130 @@
+site_name: tensordev
+site_description: JAX tensor algebra for signatures, free developments, Volterra signatures and signature kernels
+site_url: https://hagerpa.github.io/tensordev/
+repo_url: https://github.com/hagerpa/tensordev
+repo_name: hagerpa/tensordev
+edit_uri: ""
+copyright: Copyright 2026 Paul Hager, Julian Pachschwoell, Luca Pelizzari · Apache License 2.0
+
+theme:
+  name: material
+  custom_dir: docs/overrides
+  font:
+    text: Inter
+    code: Fira Code
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
+  features:
+    - navigation.tabs
+    - navigation.top
+    - navigation.footer
+    - navigation.instant
+    - toc.follow
+    - toc.integrate
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+
+extra_css:
+  - stylesheets/extra.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/hagerpa/tensordev
+      name: GitHub
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/tensordev/
+      name: PyPI
+
+nav:
+  - Home: index.md
+  - Tensor algebra: tensor-algebra.md
+  - Signatures: signatures.md
+  - Volterra signatures: volterra.md
+  - State-space signatures: state-space.md
+  - Signature kernels: kernels.md
+  - Performance: performance.md
+  - API reference: api.md
+  - Background: background.md
+
+markdown_extensions:
+  - tables
+  - admonition
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js
+
+hooks:
+  - docs/hooks.py
+
+watch:
+  - README.md
+  - src
+
+plugins:
+  - search
+  - privacy:
+      assets_exclude:
+        - cdn.jsdelivr.net/*
+        - unpkg.com/*   # Material's mermaid.js; no page has a diagram
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            extensions:
+              - docs/griffe_rst.py
+            docstring_style: numpy
+            show_source: false
+            show_root_heading: true
+            show_root_full_path: false
+            members_order: source
+            separate_signature: true
+            show_signature_annotations: true
+            merge_init_into_class: true
+            heading_level: 3
+            show_symbol_type_heading: true
+
+exclude_docs: |
+  /scripts/
+  /generated/
+  /hooks.py
+  /griffe_rst.py
+  /requirements.txt
+  /overrides/
+  __pycache__/
+
+validation:
+  links:
+    anchors: warn

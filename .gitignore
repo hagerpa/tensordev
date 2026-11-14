@@ -40,6 +40,10 @@ tdvenv/
 *.swp
 *.swo
 
+# Documentation build (mkdocs build) and the MkDocs privacy plugin cache
+/site/
+/.cache/
+
 # Local scratch
 tmp/
 temp/
@@ -56,3 +60,6 @@ temp/
 
 # Recycle bin
 recycle_bin/
+
+# Local benchmark output (contains machine paths)
+/benchmarks/results/

@@ -1,6 +1,10 @@
 # tensordev
 
+Documentation: <https://hagerpa.github.io/tensordev/>
+
+<!-- --8<-- [start:tagline] -->
 JAX-based tensor algebra library for signatures, free developments, Volterra signatures and inner product-kernels thereof.
+<!-- --8<-- [end:tagline] -->
 
 ## Status
 
@@ -10,8 +14,9 @@ Volterra signatures, and free and higher-order signature kernels.
 JAX is the supported backend. PyTorch, TensorFlow, and Numba backends are not
 available.
 
-With the default execution policy, the JAX components are end-to-end differentiable — from elementary tensor operations and path signatures through to signature-kernel evaluations and Volterra kernel parameters.
+With the default execution policy, the JAX components are differentiable — from elementary tensor operations and path signatures through to signature-kernel evaluations — with respect to the paths, the kernel matrices, and the Volterra kernel parameters `beta`, `scale`, and `rate`. Gradients with respect to the state-space operator Λ currently need forward mode ([#5](https://github.com/hagerpa/tensordev/issues/5)).
 
+<!-- --8<-- [start:install] -->
 ## Requirements
 
 `tensordev` requires Python 3.11+ and JAX 0.10.0–0.11.x.
@@ -23,8 +28,8 @@ pip install tensordev
 ```
 
 Linux (x86_64/aarch64, glibc 2.28+) and macOS Apple Silicon wheels include
-native CPU kernels. Other platforms and source installations use portable
-JAX; no C++ compiler is required. See the
+native CPU kernels. Other platforms and source installations contain no native
+kernels and run the JAX implementation throughout; no C++ compiler is required. See the
 [native build instructions](https://github.com/hagerpa/tensordev/tree/main/native)
 to enable native kernels when installing from source.
 
@@ -33,13 +38,17 @@ For the latest development version:
 ```bash
 pip install git+https://github.com/hagerpa/tensordev.git
 ```
+<!-- --8<-- [end:install] -->
 
 ## License
 
+<!-- --8<-- [start:license] -->
 `tensordev` is released under the Apache License 2.0.
 See the [license](https://github.com/hagerpa/tensordev/blob/main/LICENSE) for
 details.
+<!-- --8<-- [end:license] -->
 
+<!-- --8<-- [start:quickstart] -->
 ## Quick start
 
 ```python
@@ -57,13 +66,16 @@ ip = td.tensor_inner_product(sig, sig)
 print(td.tensor_to_flat(sig).shape)
 print(ip.shape)
 ```
+<!-- --8<-- [end:quickstart] -->
 
 ### Device placement
 
+<!-- --8<-- [start:device_placement] -->
 With a CUDA-enabled JAX installation, device placement follows JAX. To compute
 only a signature on a GPU, move the path and leave the rest of the application
 on the CPU:
 
+<!-- check_snippets: skip (needs a GPU) -->
 ```python
 gpu = jax.devices("gpu")[0]
 X_gpu = jax.device_put(X, gpu)
@@ -72,9 +84,11 @@ sig_gpu = td.path_signature(X_gpu, trunc=4)
 ```
 
 GPU computations use JAX on the selected device.
+<!-- --8<-- [end:device_placement] -->
 
 ## Package structure
 
+<!-- --8<-- [start:package_structure] -->
 ```text
 tensordev/
 ├── core/           # Tensor algebra backends
@@ -84,14 +98,20 @@ tensordev/
 ├── kernel/         # Signature kernels: classical, free, FSSK, higher-order
 └── util/           # Path generators and combinatorics
 ```
+<!-- --8<-- [end:package_structure] -->
 
 ### `tensordev.core` — tensor algebra operations
 
+<!-- --8<-- [start:core_overview] -->
 A core provides the tensor-algebra operations exposed on the `tensordev`
 module. The default JAX core is dimension-free and accepts any total-degree
 truncation. The same module-level operations work with bounded total-degree,
 bidegree, partially symmetrized, and shear cores, including products, series,
-inner products, and coordinate conversions.
+inner products, and coordinate conversions. Each core multiplies in the
+coordinates it stores: its signatures satisfy Chen's identity with its
+`tensor_product` and the shuffle identity with its `tensor_shuffle_product`.
+On shear and partially symmetrized cores these products are therefore not the
+concatenation and shuffle of the stored arrays.
 
 Use `make_core` to construct a core without changing the background default.
 `set_default_core` accepts the same construction arguments and installs the
@@ -107,7 +127,9 @@ result, or it can install an already constructed core:
 `max_trunc` fixes the capacity, while `default_trunc` may select a smaller
 degree or bidegree rectangle. Module-level operations use the installed core;
 pass `core=...` to a development to override it locally.
+<!-- --8<-- [end:core_overview] -->
 
+<!-- --8<-- [start:core_example] -->
 ```python
 import jax.numpy as jnp
 import tensordev as td
@@ -127,7 +149,9 @@ low_bidegrees = bisig[:2, :2]          # structural truncation (1, 1)
 first_two = td.tensor_slice(bisig)[:2]  # first two paths in every block
 td.reset_default_core()
 ```
+<!-- --8<-- [end:core_example] -->
 
+<!-- --8<-- [start:bigraded_tensor] -->
 A `BigradedTensor` stores one unpadded array per bidegree. `A[n, m]` selects a
 block and `A[:N, :M]` selects an upper-exclusive bidegree prefix. Use
 `td.tensor_slice(A)[key]` instead to apply `key` to the batch or time axes of
@@ -135,15 +159,20 @@ every block. The core methods `tensor_from_total` and `tensor_to_total`
 convert ordered tensors between bidegree and dense total layouts;
 `tensor_to_ordered` expands partially symmetrized words into ordered words. It
 is the adjoint of partial symmetrization, not an inverse reconstruction.
+<!-- --8<-- [end:bigraded_tensor] -->
 
+<!-- --8<-- [start:core_plans] -->
 Set `precompute_shuffle` to `False`, `"generator"` (the first-level shuffles
 needed by multi-component Volterra methods), or `True` (all shuffles within
 capacity). Use `td.core_expected_memory(...)` before constructing large
 capacities; it reports retained plan memory in MiB by default.
 
 `shear_core(core, ...)` and `symmetrize_core(core, ...)` derive a matching core
-from an existing one and inherit its compatible configuration and plans.
+from an existing one and inherit its compatible configuration; `shear_core` also
+reuses the plan stores of a bidegree source.
+<!-- --8<-- [end:core_plans] -->
 
+<!-- --8<-- [start:shear_pairing] -->
 Use `tensor_shear_pairing` to pair words in shear coordinates with a tensor in
 standard coordinates. Partially symmetrized cores accept either an ordered or
 a partially symmetrized standard tensor; the compact case is contracted
@@ -164,21 +193,30 @@ words = shear.tensor_shuffle_product(alpha, beta, trunc=2)
 values = shear.tensor_shear_pairing(words, standard_sig)
 ```
 
+With `dims=(2, 1)`, `alpha` is the letter 0 of the first group and `beta` the letter 2 of the
+second. On a shear core, `tensor_shuffle_product` is the product $\bullet$ dual to the shear
+pairing, and $0 \bullet 2$ is the single word $02$, not the shuffle $02 + 20$. Its shear coordinate
+is the product of the two increments, so `values` is $0.2 \cdot 0.3 = 0.06$.
+
 `tensor_inner_product` is the Euclidean pairing for tensors in the same
 coordinates. When tuple operands omit the scalar level,
 `tensor_shear_pairing` accepts `words_first_on=True` or
 `standard_first_on=True` as appropriate. For homogeneous partially
 symmetrized standard blocks, pass
 `standard_partially_symmetrized=True` explicitly.
+<!-- --8<-- [end:shear_pairing] -->
 
+<!-- --8<-- [start:core_defaults] -->
 Set defaults before tracing JAX functions. Signatures, free developments, and
 Volterra signatures support configured cores. `reset_default_core()` restores
 the environment-selected default.
+<!-- --8<-- [end:core_defaults] -->
 
 ### `tensordev.development` — signature development
 
-Compute truncated signatures with optional blocking. `block_size` splits the path into chunks and chains them via Chen's identity internally. This is useful for long sequences where the full path does not fit in memory at once.
+Compute truncated signatures with optional blocking. `block_size` splits the path into blocks of steps and returns one signature per block. With the default `accumulate=True`, consecutive blocks are chained by Chen's identity, so each output is the signature from the start of the path to the end of its block; with `accumulate=False`, each output is the signature of its own block.
 
+<!-- --8<-- [start:signature_identities] -->
 ```python
 import numpy as np
 import jax
@@ -207,8 +245,9 @@ np.testing.assert_allclose(
     atol=1e-6,
 )  # ✓
 
-# shuffle identity via tensor_shuffle_product and tensor_inner_product
-# a, b are fixed basis vectors — broadcast over the batch dimension
+# shuffle identity via tensor_shuffle_product and tensor_inner_product, on the
+# first block: the full trigonometric paths are closed loops, the first half is not
+# e1, e2 are the letters 0 and 1 (basis vectors), broadcast over the batch dimension
 e1 = td.tensor_densify((None, jnp.array([1., 0.])))
 e2 = td.tensor_densify((None, jnp.array([0., 1.])))
 core = td.make_core(
@@ -218,21 +257,25 @@ core = td.make_core(
 )
 
 np.testing.assert_allclose(
-    td.tensor_inner_product(sig, core.tensor_shuffle_product(e1, e2, trunc=4)),
-    td.tensor_inner_product(sig, e1) * td.tensor_inner_product(sig, e2),
+    td.tensor_inner_product(sig_a, core.tensor_shuffle_product(e1, e2, trunc=4)),
+    td.tensor_inner_product(sig_a, e1) * td.tensor_inner_product(sig_a, e2),
     rtol=1e-5,
     atol=1e-6,
 )  # ✓
 ```
+<!-- --8<-- [end:signature_identities] -->
 
+<!-- --8<-- [start:wordwise] -->
 Wordwise execution (`execution="wordwise"`) parallelizes over words and paths
 for ordinary signatures and `q=1` FSSK signatures, across all supported core
 types. This alpha option requires eager float32/float64 calls on one NVIDIA
 GPU (compute capability 8.0+); it is not yet validated on GPU. Defaults are
 unchanged, and unsupported requests raise; see the function docstrings for
 restrictions.
+<!-- --8<-- [end:wordwise] -->
 
-`free_development` generalises this to tensor-valued paths and adds block-level control. The example below computes per-block signatures and their tensor logarithms — the piecewise log-linear approximation that `HigherOrderKernel` uses internally:
+<!-- --8<-- [start:free_development] -->
+`free_development` extends `path_signature` to tensor-valued paths, with the same blocking options. The example below computes per-block signatures and their tensor logarithms, the increments of the piecewise log-linear path that `HigherOrderKernel` uses internally. At the same truncation, this path reproduces the signature exactly:
 
 ```python
 from tensordev.development import free_development
@@ -256,17 +299,22 @@ np.testing.assert_allclose(
     atol=1e-6,
 )  # ✓
 ```
+<!-- --8<-- [end:free_development] -->
 
 ### `tensordev.sss` — state-space signatures
 
+<!-- --8<-- [start:sss_overview] -->
 State-space signatures are Volterra signatures whose convolution kernel is a *finite state-space kernel* (FSSK), i.e. a matrix-exponential kernel of the form
 
 $$K_{A,b}^\Lambda(t,s) = \sum_{r=1}^q \bigl(\mathbf{1}^\top e^{-\Lambda(t-s)} b_r\bigr) A_r,$$
 
 with dense or Jordan state-space operators $\Lambda$. This package propagates
-and reads out the ODE hidden state, making online evaluation of these
-Volterra signatures exact and efficient.
+and reads out a hidden state, which makes online evaluation of these
+Volterra signatures efficient and, for piecewise-linear paths, exact up to the
+contour quadrature of the per-step coefficients.
+<!-- --8<-- [end:sss_overview] -->
 
+<!-- --8<-- [start:sss_example] -->
 ```python
 import jax
 import jax.numpy as jnp
@@ -288,13 +336,20 @@ sss = StateSpaceSignature.from_jordan(
 )
 
 result = sss.vsig(X, dt=1.0 / 32)
+```
+<!-- --8<-- [end:sss_example] -->
 
+<!-- --8<-- [start:sss_gpu] -->
+<!-- check_snippets: skip (needs a GPU) -->
+```python
 # Moving only X selects GPU execution while the surrounding workflow stays
 # on the CPU.
 gpu = jax.devices("gpu")[0]
 result_gpu = sss.vsig(jax.device_put(X, gpu), dt=1.0 / 32)
 ```
+<!-- --8<-- [end:sss_gpu] -->
 
+<!-- --8<-- [start:sss_streaming] -->
 `StateSpaceSignature` carries an optional persistent hidden state for streaming/online evaluation:
 
 ```python
@@ -315,12 +370,16 @@ np.testing.assert_allclose(
     atol=0,
 )  # ✓
 ```
+<!-- --8<-- [end:sss_streaming] -->
 
 ### `tensordev.volterra` — Volterra signature
 
+<!-- --8<-- [start:volterra_overview] -->
 Volterra signatures for fractional, gamma, and finite state-space kernels,
 computed by a quadratic recursion or, on uniform grids, by FFT acceleration.
+<!-- --8<-- [end:volterra_overview] -->
 
+<!-- --8<-- [start:volterra_example] -->
 ```python
 import jax.numpy as jnp
 import tensordev as td
@@ -354,13 +413,17 @@ rectangular = vsig(X, kernel=kernel, core=bicore, dt=dt)
 # Use the core's default truncation.
 rectangular_vsig = VolterraSignature(kernel=kernel, core=bicore)
 ```
+<!-- --8<-- [end:volterra_example] -->
 
+<!-- --8<-- [start:volterra_schemes] -->
 The quadratic, FFT, and fractional Adams schemes all return tensors in the
 format selected by `core`.  Scalar-component kernels (`q=1`) do not
 need shuffle plans.  For multi-component kernels above total depth one,
 construct the bidegree core with `precompute_shuffle="generator"`; full
 shuffle-product plans are unnecessary for Volterra evaluation.
+<!-- --8<-- [end:volterra_schemes] -->
 
+<!-- --8<-- [start:volterra_kernels] -->
 Available kernel constructors:
 
 | Constructor | Formula | Parameters |
@@ -369,10 +432,12 @@ Available kernel constructors:
 | `ConvolutionKernel.gamma` | $k(t,s) = \mathrm{scale}\cdot e^{-\mathrm{rate}(t-s)}\cdot\Gamma(\beta)^{-1}(t-s)^{\beta-1}$ | `beta`, `rate`, `scale`, `A` |
 | `ConvolutionKernel.fssk` | finite state-space kernel | `fssk` |
 
-Setting `beta=1` with `ConvolutionKernel.fractional` recovers the classical iterated-integral signature.
+Setting every entry of `beta` to 1 with `ConvolutionKernel.fractional` gives $k_p\equiv 1$ and $K\equiv\sum_p A_p$, so `vsig` returns the classical iterated-integral signature of the path $\bigl(\sum_p A_p\bigr)x$, which is the signature of $x$ when $\sum_p A_p$ is the identity.
+<!-- --8<-- [end:volterra_kernels] -->
 
 ### `tensordev.kernel` — signature kernels
 
+<!-- --8<-- [start:kernels_overview] -->
 Kernel objects for empirical statistics: batchwise values, Gram matrices, MMD, and scoring rules. All inherit from `BaseKernel`.
 
 | Class | Description |
@@ -381,8 +446,10 @@ Kernel objects for empirical statistics: batchwise values, Gram matrices, MMD, a
 | `FreeKernel` | Free signature kernel for tensor-valued paths |
 | `FSSKSigKernel` | Kernel induced by the FSSK Volterra signature |
 | `HigherOrderKernel` | Higher-order kernel via piecewise log-linear approximation |
-| `LinearKernel`, `RBFKernel`, `RBF_CEXP_Kernel`, `RBF_SQR_Kernel` | Static pointwise kernels used as increment kernels |
+| `LinearKernel`, `RBFKernel` | Static kernels on path values; their mixed differences replace the increment inner product |
+<!-- --8<-- [end:kernels_overview] -->
 
+<!-- --8<-- [start:kernels_example] -->
 ```python
 import numpy as np
 import jax
@@ -403,11 +470,13 @@ mmd  = k.compute_mmd(X, Y)                     # scalar — empirical MMD²
 esr  = k.compute_expected_scoring_rule(X, Y)   # scalar — E_Y[S(X, y)]
 sr   = k.compute_scoring_rule(X, Y[0])         # scalar — S(X, y) for a single y
 
-# RBF increment kernel — replaces the default ⟨dx, dy⟩ inner product
+# RBF static kernel on path values — its mixed differences replace the default ⟨dx, dy⟩
 k_rbf = SigKernel(dyadic_order=0, static_kernel=RBFKernel(sigma=1.0))
 gram_rbf = k_rbf.compute_Gram(X, Y)            # (4, 4)
 ```
+<!-- --8<-- [end:kernels_example] -->
 
+<!-- --8<-- [start:kernels_dropin] -->
 `FreeKernel`, `HigherOrderKernel`, and `FSSKSigKernel` share the same empirical API and are drop-in replacements for `SigKernel`:
 
 ```python
@@ -425,9 +494,11 @@ mmd_ho = k_ho.compute_mmd(X, Y)                # scalar
 k_fssk = FSSKSigKernel(kernel=sss.kernel, dt_x=1.0 / 32, dt_y=1.0 / 32)
 mmd_fssk = k_fssk.compute_mmd(X, Y)            # scalar
 ```
+<!-- --8<-- [end:kernels_dropin] -->
 
 ### `tensordev.util` — utilities
 
+<!-- --8<-- [start:util] -->
 ```python
 from tensordev.util import (
     path_to_increments,
@@ -440,6 +511,7 @@ from tensordev.util import (
     velocity_to_increments,
 )
 ```
+<!-- --8<-- [end:util] -->
 
 ## Tests
 
@@ -459,6 +531,7 @@ tests/kernel/
 
 ## Backends
 
+<!-- --8<-- [start:backends] -->
 The core abstraction supports multiple array frameworks; JAX is the only fully
 implemented backend.
 
@@ -485,9 +558,11 @@ import tensordev as td
 core = td.get_default_core()
 seq_core = td.get_default_seq_core()
 ```
+<!-- --8<-- [end:backends] -->
 
 ## Acknowledgements and theoretical background
 
+<!-- --8<-- [start:acknowledgements] -->
 `tensordev` is an independent implementation, but it was influenced by several excellent open-source projects in the signature-computation ecosystem:
 
 - [`iisignature`](https://github.com/bottler/iisignature): a gold-standard reference for efficient signature and logsignature computation.
@@ -497,7 +572,9 @@ seq_core = td.get_default_seq_core()
 - [`sigkernel`](https://github.com/crispitagorico/sigkernel): inspired parts of the signature-kernel API and the second-order finite-difference stencil used for the standard signature kernel.
 - [`high-order-sigkernel`](https://github.com/maudl3116/high-order-sigkernel): inspired the predictor-corrector schemes for higher-order signature-kernel PDE systems, which are adapted and further developed in this package.
 - [`pathsig`](https://github.com/tobiasny12/pathsig): introduced the word-parallel approach to GPU signature computation over prefix-closed word sets.
+<!-- --8<-- [end:acknowledgements] -->
 
+<!-- --8<-- [start:references] -->
 The main theoretical background for the algorithms implemented here is:
 
 - J. Reizenstein and B. Graham,
@@ -518,10 +595,10 @@ The main theoretical background for the algorithms implemented here is:
 
 - M. Lemercier, T. Lyons and C. Salvi,
   [*Log-PDE Methods for Rough Signature Kernels*](https://arxiv.org/abs/2404.02926),
-  arXiv preprint, 2024.
+  SIAM Journal on Numerical Analysis, 2026.
 
 - P. K. Friz and P. P. Hager,
-  [*Expected Signature Kernels for Lévy Rough Paths*](https://arxiv.org/abs/2509.07893),
+  [*Expected Signature Kernels for Rough Paths*](https://arxiv.org/abs/2509.07893),
   arXiv preprint, 2025.
 
 - P. P. Hager, F. N. Harang, L. Pelizzari and S. Tindel,
@@ -539,3 +616,4 @@ The main theoretical background for the algorithms implemented here is:
 - P. P. Hager and L. Pelizzari,
   [*A Technical Note on Signature Computations with Bidegree Truncation, Coordinate Changes, and Symmetrization*](https://github.com/hagerpa/tensordev/tree/main/academia/bidegree),
   technical note, 2026.
+<!-- --8<-- [end:references] -->
