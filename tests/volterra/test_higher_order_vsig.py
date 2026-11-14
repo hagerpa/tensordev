@@ -112,6 +112,28 @@ def test_higher_order_vsig_matches_fft_gamma(order, trunc):
     _assert_allclose(got, ref, atol=1e-6, label=f"order={order} trunc={trunc}")
 
 
+@pytest.mark.parametrize("fn", [vsig, vsig_fft], ids=["vsig", "vsig_fft"])
+@pytest.mark.parametrize("order", [1, 2])
+@pytest.mark.parametrize("beta", [0.6, 1.3])
+def test_higher_order_vsig_gamma_rate_zero_matches_fractional(fn, order, beta):
+    """A gamma kernel with ``rate=0, scale=1`` is the fractional kernel.
+
+    Unlike the vsig/vsig_fft comparison above, this pins the rho-weighted
+    gamma coefficients to an independent closed form.
+    """
+    X = jnp.array(
+        [[0.0, 0.0], [0.2, -0.1], [0.4, 0.3], [0.1, 0.5], [-0.2, 0.2]],
+        dtype=jnp.float64,
+    )
+    A = jnp.eye(2, dtype=jnp.float64)[None, :, :]
+    gamma = GammaKernel(beta=jnp.array([beta]), A=A, scale=jnp.array([1.0]), rate=jnp.array([0.0]))
+    frac = FractionalKernel(beta=jnp.array([beta]), A=A)
+
+    got = fn(X, kernel=gamma, dt=0.25, trunc=2, order=order)
+    ref = fn(X, kernel=frac, dt=0.25, trunc=2, order=order)
+    _assert_allclose(got, ref, atol=1e-12, label=f"order={order} beta={beta}")
+
+
 # ---------------------------------------------------------------------------
 # output_starting_point consistency
 # ---------------------------------------------------------------------------

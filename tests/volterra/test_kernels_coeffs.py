@@ -12,6 +12,7 @@ import pytest
 
 from tensordev.volterra import VolterraCoefficients, ConvolutionKernel, FractionalKernel, GammaKernel
 from tensordev.volterra.coeffs import validate_volterra_coefficients
+from tensordev.volterra.kernel import _gamma_series_x_max
 
 
 def _np(x):
@@ -143,3 +144,311 @@ def test_kernel_constructor_validation():
 
     with pytest.raises(ValueError, match="gamma kernels are scalar"):
         GammaKernel(beta=1.0, scale=1.0, rate=0.0, A=jnp.ones((2, 1, 1)))
+
+    with pytest.raises(ValueError, match="quad_order must be positive"):
+        GammaKernel(beta=1.0, scale=1.0, rate=0.0, A=jnp.ones((1, 1, 1)), quad_order=0)
+
+
+# ---------------------------------------------------------------------------
+# GammaKernel coefficients
+# ---------------------------------------------------------------------------
+
+def _gamma_kernel(beta, *, scale=1.0, rate=0.0, quad_order=64, dtype=jnp.float64):
+    return GammaKernel(
+        beta=jnp.asarray(beta, dtype=dtype),
+        scale=jnp.asarray(scale, dtype=dtype),
+        rate=jnp.asarray(rate, dtype=dtype),
+        A=jnp.ones((1, 1, 1), dtype=dtype),
+        quad_order=quad_order,
+    )
+
+
+# alpha_n(s, t, tau; rho) for n = 1..5, keyed by (s, t, tau, beta, scale, rate, rho);
+# see test_gamma_series_matches_high_precision_reference for the generator.
+_GAMMA_SERIES_REFERENCE = [
+    ((0.1, 0.6, 0.6, 0.15, 1.3, 0.7, 0.0),
+     (2.4066926558575722, 5.6691131458111761, 13.100213553555704,
+      29.752883136747423, 66.519710518755617)),
+    ((0.1, 0.6, 0.6, 0.3, 1.3, 5.0, 0.3),
+     (1.237454495427373, 1.8635463537831203, 2.7699956735885033,
+      4.0593527635119044, 5.8604737431244638)),
+    ((0.0, 1.0, 1.0, 0.8, 0.9, 13.0, 2.0),
+     (0.10238794253478435, 0.010409089131478886, 0.0010499452366101238,
+      0.00010498993500365884, 1.0398124506665693e-5)),
+    ((0.1, 0.6, 0.85, 0.3, 1.3, 5.0, 0.0),
+     (0.090540938326657564, 0.13888460550554663, 0.20953902553253364,
+      0.31065501367409051, 0.45237004303057693)),
+    ((0.1, 0.6, 0.85, 1.7, 1.3, 2.0, 2.7),
+     (0.013914131944185471, 0.00055616703867027124, 1.4908126172114212e-5,
+      2.8647563448766887e-7, 4.1480109374801412e-9)),
+    ((0.2, 0.3, 2.0, 0.6, 1.1, 3.0, 0.6),
+     (0.0005066804986009882, 0.00079857356921377977, 0.0011134578521612747,
+      0.0014010577328147334, 0.0016141859936498306)),
+    ((0.0, 1.0, 1.001, 0.3, 1.0, 4.0, 0.3),
+     (0.50182600147531291, 0.32039875504083937, 0.20349705142393981,
+      0.12845810796437384, 0.080524139528642856)),
+    ((0.0, 0.25, 0.25, 1.0, 1.0, 2.0, 1.0),
+     (0.10653065971263342, 0.032653298563167118, 0.0077558852584514895,
+      0.0014987900665763897, 0.00024373005385932697)),
+]
+
+# Same generator; rate * (t - s) is beyond the series range, so these use the
+# tanh-sinh fallback.
+_GAMMA_FALLBACK_REFERENCE = [
+    ((0.0, 0.5, 0.5, 0.3, 1.3, 60.0, 0.0),
+     (0.76125116952361052, 0.57950334310105886, 0.44114759767850405,
+      0.33582412466524622, 0.25564650765556368)),
+    ((0.0, 0.5, 0.55, 0.8, 1.3, 400.0, 0.8),
+     (1.1871720966310522e-11, 2.5494050434107767e-13, 5.4746748307698409e-15,
+      1.175633898596249e-16, 2.5245275036817789e-18)),
+    ((0.0, 1.0, 1.5, 0.6, 1.0, 20.0, 2.0),
+     (1.7615492593050145e-6, 2.7434214255063819e-7, 4.2646138216084505e-8,
+      6.6162244348637842e-9, 1.0243170982035009e-9)),
+    ((0.0, 0.5, 0.5, 1.7, 1.0, 40.0, 1.7),
+     (0.00100350277745681, 3.228196768504896e-6, 1.022107987458877e-8,
+      3.1752036923316876e-11, 9.6400931107545515e-14)),
+]
+
+
+@pytest.mark.parametrize("beta", [0.15, 0.6, 1.0, 1.7])
+def test_gamma_rate_zero_matches_fractional(beta):
+    """``rate=0, scale=1`` is the fractional kernel, for every basis exponent."""
+    s = jnp.array([0.1, 0.1, 0.0, 0.2, 0.0])
+    t = jnp.array([0.6, 0.6, 0.25, 0.3, 1.0])
+    tau = jnp.array([0.6, 0.85, 0.25, 2.0, 1.001])
+    gamma = _gamma_kernel(beta)
+    frac = FractionalKernel(beta=jnp.array([beta]), A=jnp.ones((1, 1, 1)))
+    for rho in (0.0, beta, 1.0, beta + 1.0, 2.0):
+        got = gamma.coef(s, t, tau, trunc=5, rho=rho)
+        ref = frac.coef(s, t, tau, trunc=5, rho=rho)
+        _assert_allclose(got.alpha, ref.alpha, atol=0.0, rtol=1e-12)
+
+
+@pytest.mark.parametrize("case, expected", _GAMMA_SERIES_REFERENCE)
+def test_gamma_series_matches_high_precision_reference(case, expected):
+    """Exact series against 40-digit quadrature of the defining integral.
+
+    The references were generated with mpmath 1.3.0 by::
+
+        import mpmath as mp
+
+        mp.mp.dps = 40
+
+        def alpha(s, t, tau, n, beta, scale, rate, rho):
+            s, t, tau, beta, scale, rate, rho = map(mp.mpf, (s, t, tau, beta, scale, rate, rho))
+            h, d = t - s, tau - t
+
+            def f(v):  # v = t - u
+                val = (h - v) ** rho * mp.exp(-rate * (d + v)) * (d + v) ** (n * beta - 1)
+                if n > 1:
+                    val *= mp.betainc((n - 1) * beta, beta, 0, v / (d + v), regularized=True)
+                return val
+
+            # split geometrically towards v = 0, then remove the v^(q-1) endpoint
+            # behaviour on the first piece with v = w^(1/q)
+            pts = [h]
+            while pts[-1] > min(q for q in (d, 1 / rate, h) if q > 0) / 8:
+                pts.append(pts[-1] / 2)
+            q = n * beta if d == 0 else (n - 1) * beta + 1
+            head = mp.quad(lambda w: f(w ** (1 / q)) * w ** (1 / q - 1) / q, [0, pts[-1] ** q])
+            integral = head + mp.quad(f, pts[::-1])
+            return scale**n * integral / (mp.gamma(n * beta) * h**n)
+
+        for case in CASES:
+            print(case, [mp.nstr(alpha(*case[:3], n, *case[3:]), 17) for n in range(1, 6)])
+
+    They agree with the exact series summed in mpmath to 1e-28.  The cases
+    cover ``tau == t`` with ``n * beta < 1`` endpoint singularities, a far
+    lag, ``(tau - t) / (t - s) = 1e-3``, and ``rate * (t - s) = 13`` at the
+    edge of the series range.
+    """
+    s, t, tau, beta, scale, rate, rho = case
+    assert rate * (t - s) <= _gamma_series_x_max(64, "float64")
+    coeffs = _gamma_kernel(beta, scale=scale, rate=rate).coef(s, t, tau, trunc=5, rho=rho)
+    _assert_allclose(coeffs.alpha[0], expected, atol=0.0, rtol=1e-12)
+
+
+@pytest.mark.parametrize("case, expected", _GAMMA_FALLBACK_REFERENCE)
+def test_gamma_fallback_matches_high_precision_reference(case, expected):
+    """Tanh-sinh fallback for ``rate * (t - s)`` beyond the series range."""
+    s, t, tau, beta, scale, rate, rho = case
+    assert rate * (t - s) > _gamma_series_x_max(64, "float64")
+    default = _gamma_kernel(beta, scale=scale, rate=rate).coef(s, t, tau, trunc=5, rho=rho)
+    _assert_allclose(default.alpha[0], expected, atol=0.0, rtol=1e-6)
+    fine = _gamma_kernel(beta, scale=scale, rate=rate, quad_order=128)
+    _assert_allclose(fine.coef(s, t, tau, trunc=5, rho=rho).alpha[0], expected, atol=0.0, rtol=1e-10)
+
+
+def test_gamma_series_range_and_fallback_are_continuous():
+    """Coefficients just inside and just outside the series range agree."""
+    x_max = _gamma_series_x_max(64, "float64")
+    assert 13.8 < x_max < 13.9
+    assert 18.9 < _gamma_series_x_max(64, "float32") < 19.0
+    h = 0.5
+    rates = jnp.array([x_max * (1.0 - 1e-12), x_max * (1.0 + 1e-12)]) / h
+    for beta, tau in [(0.3, h), (1.7, h), (0.6, 1.5 * h)]:
+        inside, outside = (
+            _gamma_kernel(beta, rate=rate, quad_order=128).coef(0.0, h, tau, trunc=5, rho=beta).alpha
+            for rate in rates
+        )
+        _assert_allclose(outside, inside, atol=0.0, rtol=1e-10)
+
+
+def _gamma_coef_sum(scale, rate, s, t, tau, *, beta, rho):
+    kernel = GammaKernel(beta=beta, scale=scale, rate=rate, A=jnp.ones((1, 1, 1)))
+    weights = jnp.array([1.0, 0.7, -0.3, 0.2, 0.5])
+    return jnp.sum(kernel.coef(s, t, tau, trunc=5, rho=rho).alpha[..., 0, :] * weights)
+
+
+def _central_difference(f, x, eps=1e-6):
+    return (f(x + eps) - f(x - eps)) / (2.0 * eps)
+
+
+@pytest.mark.parametrize("beta", [0.3, 1.7])
+@pytest.mark.parametrize(
+    "s, t, tau, rate",
+    [(0.1, 0.6, 0.85, 2.5), (0.0, 0.5, 0.7, 40.0)],
+    ids=["series", "fallback"],
+)
+def test_gamma_gradients_match_finite_differences(beta, s, t, tau, rate):
+    """Gradients w.r.t. scale, rate, s, t and tau."""
+    scale, rho = 1.3, beta
+    args = (scale, rate, s, t, tau)
+    grads = jax.grad(
+        lambda *a: _gamma_coef_sum(*a, beta=beta, rho=rho), argnums=(0, 1, 2, 3, 4)
+    )(*args)
+    for i, grad in enumerate(grads):
+        def partial(v, i=i):
+            shifted = list(args)
+            shifted[i] = v
+            return _gamma_coef_sum(*shifted, beta=beta, rho=rho)
+
+        np.testing.assert_allclose(
+            float(grad), float(_central_difference(partial, args[i])), rtol=1e-6, atol=1e-9
+        )
+
+
+@pytest.mark.parametrize("beta", [0.3, 1.7])
+@pytest.mark.parametrize("tau", [0.6, 0.85])
+def test_gamma_rate_gradient_at_zero(beta, tau):
+    """d alpha_n / d rate at rate 0 is scale^n (alpha^frac(rho+1) - (tau-s) alpha^frac(rho))."""
+    s, t, scale = 0.1, 0.6, 1.3
+    frac = FractionalKernel(beta=jnp.array([beta]), A=jnp.ones((1, 1, 1)))
+    n = jnp.arange(1.0, 6.0)
+    for rho in (0.0, beta):
+        got = jax.jacfwd(
+            lambda rate: _gamma_kernel(beta, scale=scale, rate=rate)
+            .coef(s, t, tau, trunc=5, rho=rho)
+            .alpha[0]
+        )(0.0)
+        expected = scale**n * (
+            frac.coef(s, t, tau, trunc=5, rho=rho + 1.0).alpha[0]
+            - (tau - s) * frac.coef(s, t, tau, trunc=5, rho=rho).alpha[0]
+        )
+        _assert_allclose(got, expected, atol=0.0, rtol=1e-12)
+
+
+@pytest.mark.parametrize("beta", [0.3, 1.0, 1.7])
+@pytest.mark.parametrize("rate", [0.0, 2.5, 40.0])
+def test_gamma_gradients_are_finite_on_diagonal_and_invalid_triples(beta, rate):
+    """``tau == t`` and masked triples give finite gradients; the diagonal direction is exact."""
+    f = lambda *a: _gamma_coef_sum(*a, beta=beta, rho=beta)
+    on_diag = jax.grad(f, argnums=(0, 1, 2, 3, 4))(1.3, rate, 0.1, 0.6, 0.6)
+    assert all(np.isfinite(float(g)) for g in on_diag)
+
+    along = jax.grad(lambda c: f(1.3, rate, 0.1, c, c))(0.6)
+    np.testing.assert_allclose(
+        float(along),
+        float(_central_difference(lambda c: f(1.3, rate, 0.1, c, c), 0.6)),
+        rtol=1e-6,
+    )
+
+    invalid = jax.grad(f, argnums=(0, 1, 2, 3, 4))(1.3, rate, 0.1, 0.6, 0.5)
+    assert all(float(g) == 0.0 for g in invalid)
+
+
+def test_gamma_float32_matches_float64():
+    """float32 coefficients are finite and close to float64, including far lags."""
+    times = np.linspace(0.0, 1.0, 9)
+    tau = np.array([0.125, 0.5, 1.0, 40.0])
+    # rate 400 puts rate * (t - s) = 50 beyond the float32 series range.
+    for beta, rate in [(0.3, 0.0), (0.6, 1.5), (1.7, 3.0), (0.6, 400.0)]:
+        got, ref = (
+            _gamma_kernel(beta, scale=1.3, rate=rate, dtype=dtype)
+            .coef_grid(jnp.asarray(times, dtype), trunc=5, rho=beta, tau=jnp.asarray(tau, dtype))
+            .alpha
+            for dtype in (jnp.float32, jnp.float64)
+        )
+        assert got.dtype == jnp.float32
+        got, ref = _np(got).astype(np.float64), _np(ref)
+        assert np.all(np.isfinite(got))
+        representable = np.abs(ref) > 1e-30
+        np.testing.assert_allclose(got[representable], ref[representable], rtol=5e-5)
+        assert np.all(got[~representable] < 1e-30)
+
+    # z^a ~ 1e-41 underflows a linear-space float32 closed form at this lag.
+    far32 = _gamma_kernel(2.0, dtype=jnp.float32).coef(0.0, 1e-3, 30.0, trunc=6, rho=2.0)
+    far64 = _gamma_kernel(2.0).coef(0.0, 1e-3, 30.0, trunc=6, rho=2.0)
+    assert np.all(_np(far32.alpha) > 0.0)
+    _assert_allclose(_np(far32.alpha).astype(np.float64), far64.alpha, atol=0.0, rtol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Derivatives with respect to the kernel parameters, including beta
+# ---------------------------------------------------------------------------
+
+# name -> (parameters, kernel built from them); beta is always params[0].
+_PARAM_KERNELS = {
+    "fractional": (
+        (0.3,),
+        lambda p: FractionalKernel(beta=jnp.stack([p[0]]), A=jnp.ones((1, 1, 1))),
+    ),
+    "fractional_q2": (
+        (0.45, 1.3),
+        lambda p: FractionalKernel(beta=jnp.stack([p[0], p[1]]), A=jnp.ones((2, 1, 1))),
+    ),
+    # (beta, scale, rate); rate * (t - s) is 1.25 (series) and 20 (fallback).
+    "gamma_series": (
+        (0.3, 1.3, 2.5),
+        lambda p: GammaKernel(beta=p[0], scale=p[1], rate=p[2], A=jnp.ones((1, 1, 1))),
+    ),
+    "gamma_fallback": (
+        (0.3, 1.3, 40.0),
+        lambda p: GammaKernel(beta=p[0], scale=p[1], rate=p[2], A=jnp.ones((1, 1, 1))),
+    ),
+}
+
+
+def _weighted_coef_sum(params, s, t, tau, *, kernel, rho):
+    """Mixed-sign weighted sum of all coefficients; ``rho="beta"`` ties rho to beta."""
+    rho_value = params[0] if rho == "beta" else rho
+    alpha = _PARAM_KERNELS[kernel][1](params).coef(s, t, tau, trunc=4, rho=rho_value).alpha
+    weights = jnp.cos(jnp.arange(alpha.size, dtype=alpha.dtype)).reshape(alpha.shape)
+    return jnp.sum(weights * alpha)
+
+
+@pytest.mark.parametrize("rho", [0.0, "beta", 1.0], ids=["rho0", "rho_beta", "rho1"])
+@pytest.mark.parametrize("tau", [0.6, 0.85], ids=["tau_eq_t", "tau_gt_t"])
+@pytest.mark.parametrize("kernel", list(_PARAM_KERNELS))
+def test_parameter_gradients_match_finite_differences(kernel, tau, rho):
+    """Gradients w.r.t. beta (and scale, rate) of the coefficients."""
+    params = jnp.asarray(_PARAM_KERNELS[kernel][0])
+    f = lambda p: _weighted_coef_sum(p, 0.1, 0.6, tau, kernel=kernel, rho=rho)
+    grad = _np(jax.grad(f)(params))
+    assert np.all(np.isfinite(grad))
+    for i in range(params.shape[0]):
+        unit = jnp.zeros_like(params).at[i].set(1.0)
+        expected = _central_difference(lambda v: f(params + v * unit), 0.0)
+        np.testing.assert_allclose(grad[i], float(expected), rtol=1e-7, atol=1e-9)
+
+
+@pytest.mark.parametrize("kernel", list(_PARAM_KERNELS))
+def test_parameter_gradients_vanish_on_invalid_triples(kernel):
+    """Masked triples (t == s, t < s, tau < t) contribute exactly zero, not NaN."""
+    params = jnp.asarray(_PARAM_KERNELS[kernel][0])
+    s = jnp.array([0.5, 0.6, 0.3])
+    t = jnp.array([0.5, 0.4, 0.7])
+    tau = jnp.array([1.0, 0.9, 0.5])
+    for rho in (0.0, "beta"):
+        grad = jax.grad(lambda p: _weighted_coef_sum(p, s, t, tau, kernel=kernel, rho=rho))(params)
+        np.testing.assert_array_equal(_np(grad), 0.0)

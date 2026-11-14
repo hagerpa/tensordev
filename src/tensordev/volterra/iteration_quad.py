@@ -406,36 +406,40 @@ def _basis_rhos_multicomp(
     order=0: ``{0}``
     order=1: ``{0} | {beta_p} | {1}``
     order=2: ``{0} | {beta_p} | {1} | {beta_p + 1} | {2}``
+
+    Deduplication and ordering need the concrete value of ``betas``, which
+    may be a JVP tracer but not a ``jit`` tracer.  The fractional exponents
+    are returned as expressions in ``betas`` so the scheme is differentiable
+    in them.  A fractional exponent equal to an integer one, or to another
+    component's, is not differentiated as a separate basis element.
     """
     zero = jnp.asarray(0.0, dtype=dtype)
     if order == 0:
         return (zero,)
-
-    # Use numpy to extract concrete float values — jnp indexing inside a jit
-    # trace produces abstract tracers, which cannot be converted to Python float.
-    betas_np = np.asarray(betas).reshape(-1).astype(float)
-    q = int(betas_np.shape[0])
-
-    # Collect candidates as Python floats so exact deduplication via a set works.
-    beta_vals = [float(betas_np[p]) for p in range(q)]
-    candidates: list[float] = [0.0] + beta_vals + [1.0]
-    if order == 2:
-        candidates += [b + 1.0 for b in beta_vals] + [2.0]
-    elif order != 1:
+    if order not in (1, 2):
         raise NotImplementedError(
             "Basis-expansion scheme supports order=1 or order=2, "
             f"got order={order}."
         )
 
-    seen: set[float] = set()
-    unique: list[float] = []
-    for v in candidates:
-        if v not in seen:
-            seen.add(v)
-            unique.append(v)
-    unique.sort()
+    # Read before any jnp op: under jit those are staged even on constants.
+    concrete = jax.lax.stop_gradient(betas) if isinstance(betas, jax.core.Tracer) else betas
+    beta_vals = np.asarray(concrete).reshape(-1).astype(dtype).astype(float)
+    betas = jnp.asarray(betas).reshape(-1).astype(dtype)
 
-    return tuple(jnp.asarray(v, dtype=dtype) for v in unique)
+    # (value, exponent) pairs; integer exponents come first so they win ties.
+    shifts = (0.0, 1.0) if order == 2 else (0.0,)
+    candidates = [(float(c), jnp.asarray(c, dtype=dtype)) for c in range(order + 1)]
+    candidates += [
+        (float(v) + shift, betas[p] + shift if shift else betas[p])
+        for shift in shifts
+        for p, v in enumerate(beta_vals)
+    ]
+
+    unique: dict[float, Array] = {}
+    for value, rho in candidates:
+        unique.setdefault(value, rho)
+    return tuple(unique[v] for v in sorted(unique))
 
 
 def _chebyshev_lobatto_thetas(

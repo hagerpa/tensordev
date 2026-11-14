@@ -285,3 +285,55 @@ def test_vsig_fft_q_gt_one_runs():
     assert result[0].shape == (1,)    # scalar unit
     assert result[1].shape == (2,)    # m = 2
     assert result[2].shape == (4,)    # m**2 = 4
+
+
+# ---------------------------------------------------------------------------
+# Gradients with respect to kernel parameters
+# ---------------------------------------------------------------------------
+
+def _parameter_kernel(name, params):
+    """Kernel from ``params``; beta is ``params[0]`` (and ``params[1]`` for q = 2)."""
+    A = jnp.eye(2, dtype=jnp.float64)[None]
+    if name == "fractional":
+        return FractionalKernel(beta=jnp.stack([params[0]]), A=A)
+    if name == "fractional_q2":
+        return FractionalKernel(
+            beta=jnp.stack([params[0], params[1]]), A=jnp.concatenate([A, A[:, ::-1]])
+        )
+    return GammaKernel(beta=params[0], scale=params[1], rate=params[2], A=A)
+
+
+_PARAMETER_GRADIENT_CASES = [
+    pytest.param(fn, name, params, order, id=f"{fn_id}-{name}-order{order}")
+    for fn, fn_id, name, params, order in [
+        (vsig, "vsig", "fractional", (0.7,), 0),
+        (vsig, "vsig", "fractional", (0.7,), 1),
+        (vsig, "vsig", "fractional_q2", (0.7, 1.3), 0),
+        (vsig, "vsig", "fractional_q2", (0.7, 1.3), 1),
+        (vsig, "vsig", "gamma", (0.7, 1.3, 1.5), 0),
+        (vsig, "vsig", "gamma", (0.7, 1.3, 1.5), 1),
+        (vsig_fft, "vsig_fft", "fractional", (0.7,), 1),
+    ]
+]
+
+
+@pytest.mark.parametrize("fn, name, params, order", _PARAMETER_GRADIENT_CASES)
+def test_vsig_parameter_gradients_match_finite_differences(fn, name, params, order):
+    """``jax.grad`` through vsig w.r.t. beta (and scale, rate) matches central differences."""
+    X = jnp.array(
+        [[0.0, 0.0], [0.2, -0.1], [0.4, 0.3], [0.1, 0.5], [-0.2, 0.2]], dtype=jnp.float64
+    )
+    params = jnp.asarray(params, dtype=jnp.float64)
+
+    def f(p):
+        levels = fn(X, kernel=_parameter_kernel(name, p), dt=0.25, trunc=2, order=order)
+        return sum(
+            jnp.sum(jnp.sin(jnp.arange(level.size) + 1.0) * level.ravel()) for level in levels
+        )
+
+    grad = _np(jax.grad(f)(params))
+    eps = 1e-5
+    for i in range(params.shape[0]):
+        step = jnp.zeros_like(params).at[i].set(eps)
+        expected = (f(params + step) - f(params - step)) / (2.0 * eps)
+        np.testing.assert_allclose(grad[i], float(expected), rtol=1e-7, atol=1e-9)

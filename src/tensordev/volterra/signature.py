@@ -552,6 +552,8 @@ def vsig(
     # Higher-order basis exponents and their deduplication are a static
     # interpolation schedule.  Specialize on beta *content* in that case;
     # all other kernel arrays (and beta for order zero/Adams) remain dynamic.
+    # A traced beta (e.g. under jax.grad) has no content key and takes the
+    # eager path below, which keeps it differentiable.
     static_leaf_fields = (
         ("beta",)
         if order > 0 and scheme != "adams"
