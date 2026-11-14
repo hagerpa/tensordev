@@ -383,9 +383,9 @@ incomplete beta function that is differentiable in all three arguments.
 
 !!! warning "Limits of the kernel-parameter gradients"
     - First derivatives work with `jax.grad`, `jax.jacfwd` and `jax.jacrev`. For second
-      derivatives use `jax.jacrev(jax.jacfwd(...))`: `jax.hessian` and `jax.grad(jax.grad(...))`
-      raise through `vsig`, because JAX drops the custom derivative rule of `betainc` when it
-      linearizes a loop.
+      derivatives use `jax.jacrev(jax.jacfwd(...))`, which works for both kernels:
+      `jax.hessian` raises for a `GammaKernel`, because JAX drops the custom derivative rule of
+      `betainc` when it linearizes a loop.
     - With `order > 0` and a scheme other than `"adams"`, the interpolation basis depends on the
       value of `beta`. A traced `beta` therefore runs the solver without its cached compilation,
       which is slower.
