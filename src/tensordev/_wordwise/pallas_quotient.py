@@ -209,12 +209,13 @@ def _check_resources(
                 f"{name} {value} exceeds signed int32 indexing."
             )
 
-    # ``old``, the Horner-stage state, and its destination update can be live
-    # together.  Prime letters and one edge action are the remaining dominant
-    # vectors.  This deliberately overestimates rather than risking a backend
+    # ``old``, the Horner-stage state, its destination update, and the
+    # predecessor rows selected for one edge slot can be live together.
+    # Prime letters and one edge action are the remaining dominant vectors.
+    # This deliberately overestimates rather than risking a backend
     # allocation failure.
     local_bytes = (
-        4 * node_capacity * tile_prime_words * itemsize
+        5 * node_capacity * tile_prime_words * itemsize
         + prime_degree * tile_prime_words * np.dtype(np.int32).itemsize
         + 2 * tile_prime_words * itemsize
         + node_capacity
@@ -266,6 +267,44 @@ def _resolve_letter(
             letter,
         )
     return letter
+
+
+# The Pallas Triton backend cannot lower value scatter, slice, or gather, so
+# node-indexed state access below uses splits and selects.  Every helper is
+# bit-exact.
+
+
+def _with_row(values, node_positions, index: int, row) -> Array:
+    """Return ``values`` with row ``index`` replaced from ``row``.
+
+    ``row`` broadcasts against ``values``; a full stack supplies its own row.
+    """
+    mask = (node_positions == index).reshape(
+        (-1,) + (1,) * (values.ndim - 1)
+    )
+    return jnp.where(mask, row, values)
+
+
+def _node_rows(values) -> tuple[Array, ...]:
+    """Split a node-stacked state into its rows."""
+    return tuple(
+        row.reshape(row.shape[1:])
+        for row in jnp.split(values, values.shape[0], axis=0)
+    )
+
+
+def _take_rows(rows: tuple[Array, ...], indices) -> Array:
+    """Return ``stack(rows)[indices]`` for a scalar or vector of node indices.
+
+    Indices outside ``range(len(rows))`` select row zero.
+    """
+    mask_shape = indices.shape + (1,) * rows[0].ndim
+    selected = jnp.broadcast_to(rows[0], indices.shape + rows[0].shape)
+    for index, row in enumerate(rows[1:], start=1):
+        selected = jnp.where(
+            (indices == index).reshape(mask_shape), row, selected
+        )
+    return selected
 
 
 @lru_cache(maxsize=128)
@@ -373,19 +412,23 @@ def _quotient_call(
             )
             valid_edge_slots.append(valid_edges)
 
-        prefixes = jnp.zeros(
-            (node_capacity, tile_prime_words), dtype=dtype
+        prefixes = _with_row(
+            jnp.zeros((node_capacity, tile_prime_words), dtype=dtype),
+            node_positions,
+            0,
+            1,
         )
-        prefixes = prefixes.at[0].set(1)
 
         def time_step(time_index, old):
-            previous = jnp.zeros_like(old).at[0].set(old[0])
+            # Keep only the root row of ``old``.
+            previous = _with_row(jnp.zeros_like(old), node_positions, 0, old)
             for denominator in range(total_degree, 0, -1):
                 active_degree = total_degree - denominator + 1
                 active_nodes = valid_nodes & (
                     node_total_degrees <= active_degree
                 )
                 action = jnp.zeros_like(previous)
+                previous_rows = _node_rows(previous)
                 for predecessor, code, valid_edges in zip(
                     predecessor_slots,
                     letter_code_slots,
@@ -406,7 +449,9 @@ def _quotient_call(
                         mask=edge_mask,
                         other=0,
                     )
-                    contribution = previous[predecessor, :] * increments
+                    contribution = (
+                        _take_rows(previous_rows, predecessor) * increments
+                    )
                     action = action + jnp.where(
                         valid_edges[:, None], contribution, 0
                     )
@@ -421,7 +466,7 @@ def _quotient_call(
             prefixes = jax.lax.fori_loop(0, steps, time_step, prefixes)
             pltriton.store(
                 output_ref.at[batch_index, graph_rank, word_positions],
-                prefixes[terminal_index],
+                _take_rows(_node_rows(prefixes), terminal_index),
                 mask=valid_words,
             )
             return
@@ -445,7 +490,7 @@ def _quotient_call(
                     graph_rank,
                     word_positions,
                 ],
-                current[terminal_index],
+                _take_rows(_node_rows(current), terminal_index),
                 mask=valid_words,
             )
             return current

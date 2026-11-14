@@ -40,9 +40,12 @@ from tensordev._wordwise.pallas_ordinary import (
     _require_integer,
 )
 from tensordev._wordwise.pallas_quotient import (
+    _node_rows,
     _prime_letters,
     _resolve_letter,
+    _take_rows,
     _validate_packed_plan,
+    _with_row,
 )
 from tensordev.core.utils.precompute import _readonly
 
@@ -246,9 +249,10 @@ def _check_kernel_resources(
     vector_elements = node_capacity * tile_prime_words * state_dim
     # E and the active phi/psi coefficients are loaded as tuples before the
     # degree loop.  Include their complete footprint in the pre-lowering
-    # guard rather than assuming only two matrices remain live.
+    # guard rather than assuming only two matrices remain live.  One stacked
+    # vector covers the predecessor rows selected for an edge slot.
     local_bytes = (
-        6 * vector_elements * itemsize
+        7 * vector_elements * itemsize
         + total_degree * state_dim * state_dim * itemsize
         + total_degree * state_dim * itemsize
         + (state_dim * itemsize if emit_readout else 0)
@@ -420,7 +424,7 @@ def _quotient_fssk_call(
             mask=initial_mask,
             other=0,
         )
-        prefixes = prefixes.at[0].set(0)
+        prefixes = _with_row(prefixes, node_positions, 0, 0)
 
         local_edge_starts = pltriton.load(
             node_edge_offsets_ref.at[csr_start + node_positions],
@@ -462,6 +466,7 @@ def _quotient_fssk_call(
 
         def right_action(values, time_index):
             action = jnp.zeros_like(values)
+            rows = _node_rows(values)
             for predecessor, letters, valid_edges in zip(
                 predecessor_slots,
                 resolved_letter_slots,
@@ -473,7 +478,9 @@ def _quotient_fssk_call(
                     mask=edge_mask,
                     other=0,
                 )
-                contribution = values[predecessor, :, :] * increments[..., None]
+                contribution = (
+                    _take_rows(rows, predecessor) * increments[..., None]
+                )
                 action = action + jnp.where(
                     valid_edges[:, None, None], contribution, 0
                 )
@@ -514,12 +521,13 @@ def _quotient_fssk_call(
             old_E = _right_matrix(old, E_step)
             new = old
             for target_degree in range(total_degree, 0, -1):
-                horner = jnp.zeros_like(old)
                 root_value = jnp.broadcast_to(
                     psi_step[target_degree - 1],
                     (tile_prime_words, state_dim),
                 )
-                horner = horner.at[0].set(root_value)
+                horner = _with_row(
+                    jnp.zeros_like(old), node_positions, 0, root_value
+                )
                 for degree in range(1, target_degree):
                     incoming = right_action(horner, time_index)
                     memory = _right_matrix(
@@ -541,7 +549,7 @@ def _quotient_fssk_call(
             return new
 
         def store(block_index, state):
-            terminal = state[terminal_index]
+            terminal = _take_rows(_node_rows(state), terminal_index)
             if readout_batch:
                 weights_batch_index = 0 if readout_batch == 1 else batch_index
                 weights = pltriton.load(

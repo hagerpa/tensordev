@@ -212,8 +212,11 @@ def _initialize_program_state(
     letters = tuple(
         (codes // divisor) % alphabet_dim for divisor in divisors
     )
-    prefixes = jnp.zeros((degree + 1, tile_words), dtype=dtype)
-    prefixes = prefixes.at[0].set(1)
+    # One tile per prefix length: Triton lowers neither value scatter nor
+    # value slicing, and degree + 1 rows need not be a power of two.
+    prefixes = (jnp.ones((tile_words,), dtype=dtype),) + tuple(
+        jnp.zeros((tile_words,), dtype=dtype) for _ in range(degree)
+    )
     return batch_index, word_positions, letters, prefixes
 
 
@@ -235,6 +238,7 @@ def _advance_prefixes(
         )
         for letter in letters
     )
+    prefixes = list(prefixes)
     for prefix_length in range(degree, 0, -1):
         horner = jnp.zeros((tile_words,), dtype=dtype)
         for prefix_index in range(prefix_length):
@@ -243,8 +247,8 @@ def _advance_prefixes(
                 * (prefixes[prefix_index] + horner)
                 / jnp.asarray(prefix_length - prefix_index, dtype=dtype)
             )
-        prefixes = prefixes.at[prefix_length].add(horner)
-    return prefixes
+        prefixes[prefix_length] = prefixes[prefix_length] + horner
+    return tuple(prefixes)
 
 
 @lru_cache(maxsize=128)

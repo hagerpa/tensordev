@@ -497,7 +497,9 @@ def _ordered_fssk_call(
                     other=0,
                 )
             )
-        initial_prefixes = jnp.stack(initial_prefixes, axis=0)
+        # A tuple of tiles, not a stacked array: Triton lowers neither value
+        # scatter nor value slicing, and the degree need not be a power of two.
+        initial_prefixes = tuple(initial_prefixes)
 
         def time_step(time_index, prefixes):
             coefficient_time = 0 if coefficient_steps == 1 else time_index
@@ -540,6 +542,7 @@ def _ordered_fssk_call(
                 for order in range(max(degree - 1, 0))
             )
 
+            prefixes = list(prefixes)
             for prefix_length in range(degree, 0, -1):
                 horner = jnp.broadcast_to(
                     psi_step[prefix_length - 1][None, :],
@@ -557,8 +560,8 @@ def _ordered_fssk_call(
                     _right_matrix(prefixes[prefix_length - 1], E_step)
                     + horner * word_increments[prefix_length - 1][..., None]
                 )
-                prefixes = prefixes.at[prefix_length - 1].set(updated)
-            return prefixes
+                prefixes[prefix_length - 1] = updated
+            return tuple(prefixes)
 
         def store(block_index, prefixes):
             terminal = prefixes[degree - 1]
