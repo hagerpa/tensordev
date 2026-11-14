@@ -508,18 +508,27 @@ def test_bidegree_g_horner_retains_the_active_rectangle():
 
 
 def test_direct_fssk_vsig_uses_one_outer_compilation():
-    state_update_module._fssk_vsig_impl.clear_cache()
-    state_update_module._fssk_state_impl.clear_cache()
-    state_update_module._fssk_readout_impl.clear_cache()
+    # Count backend compilations by name: jitted._cache_size() drifts out of
+    # sync late in a long test session.
+    compiled = []
 
-    result = fssk_vsig(
-        _path(), kernel=_nontrivial_kernel(), dt=0.1, trunc=2
-    )
-    jax.block_until_ready(result)
+    def record(event, duration, **kwargs):
+        if event == "/jax/core/compile/backend_compile_duration":
+            compiled.append(kwargs.get("fun_name"))
 
-    assert state_update_module._fssk_vsig_impl._cache_size() == 1
-    assert state_update_module._fssk_state_impl._cache_size() == 0
-    assert state_update_module._fssk_readout_impl._cache_size() == 0
+    jax.clear_caches()
+    jax.monitoring.register_event_duration_secs_listener(record)
+    try:
+        result = fssk_vsig(
+            _path(), kernel=_nontrivial_kernel(), dt=0.1, trunc=2
+        )
+        jax.block_until_ready(result)
+    finally:
+        jax.monitoring.unregister_event_duration_listener(record)
+
+    assert compiled.count("jit(_fssk_vsig_impl)") == 1
+    assert "jit(_fssk_state_impl)" not in compiled
+    assert "jit(_fssk_readout_impl)" not in compiled
 
 
 def test_core_dimension_and_zero_bound_state_are_rejected():
