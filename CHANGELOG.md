@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.1.1 (unreleased)
+
+### Fixed
+
+- `GammaKernel` coefficients use the unnormalised basis weight
+  `(u - s)**rho`, as `FractionalKernel` and the interpolation basis do.
+  Order-1 and order-2 `vsig` and `vsig_fft` results for Gamma kernels were
+  wrong before.
+- `GammaKernel` coefficients are exact. A positive series in the fractional
+  closed form replaces Gauss-Legendre quadrature, which lost accuracy at the
+  endpoint singularity (up to 8% relative error for small `beta`). Beyond
+  the series range (`rate * (t - s) > 13.8` in float64) a tanh-sinh rule
+  with `quad_order` nodes is used; its default is now 64. Gradients on
+  masked time triples are zero instead of NaN.
+- Derivatives with respect to `beta`: the new
+  `tensordev.util.special.betainc` is differentiable in all arguments, and
+  the higher-order basis exponents follow `beta`. `jax.grad` now works
+  through `FractionalKernel`, `GammaKernel`, `vsig` and `vsig_fft` for
+  `order` 0, 1 and 2.
+- The alpha wordwise kernels (`execution="wordwise"`) failed to compile on
+  NVIDIA GPUs with JAX 0.10, because the Triton backend rejects value-level
+  scatter and slicing. The kernels now lower on JAX 0.10 and 0.11 with
+  unchanged results, and a CPU-runnable test exports every kernel family for
+  CUDA.
+
 ## 0.1.0
 
 ### Added and changed
