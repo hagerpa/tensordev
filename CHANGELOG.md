@@ -24,6 +24,13 @@
   scatter and slicing. The kernels now lower on JAX 0.10 and 0.11 with
   unchanged results, and a CPU-runnable test exports every kernel family for
   CUDA.
+- Keep dense state-space matrix functions and shifted solves connected to the
+  current matrix parameter, including under JAX transformations.
+- Support reverse-mode and higher derivatives of state-space phi functions,
+  with stable values near zero and correct Jordan exponential derivatives at
+  zero time.
+- Preserve explicit working precision for state-space time increments and
+  allow dense and oscillatory Jordan construction under JIT.
 
 ## 0.1.0
 
