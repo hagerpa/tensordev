@@ -80,14 +80,25 @@ On a GPU, the default `execution="auto"` runs the portable JAX implementation; t
 kernels of the next section are opt-in. `jax.devices()` lists the devices that JAX sees, and
 `JAX_PLATFORMS=cpu` keeps a process on the CPU.
 
+On NVIDIA GPUs of the Ampere generation and newer, XLA runs `float32` matrix products in TF32
+by default, which keeps about three significant digits. tensordev requests full `float32`
+precision for its own matrix products, so its results do not depend on this setting. Your own
+JAX code around tensordev still follows it; to change it for the whole process:
+
+```python
+import jax
+
+jax.config.update("jax_default_matmul_precision", "highest")
+```
+
 ## Wordwise GPU execution
 
 --8<-- "README.md:wordwise"
 
 !!! warning "Alpha"
 
-    Wordwise execution is alpha and not yet validated on GPU. Check its results against
-    `execution="jax"` before you rely on them.
+    Wordwise execution is alpha. Its test suite passes on an NVIDIA A40, but it has seen
+    little use; check its results against `execution="jax"` before you rely on them.
 
 The `execution` argument is accepted by [`path_signature`][tensordev.path_signature], calls of a
 [`Signature`][tensordev.Signature], [`fssk_vsig`][tensordev.fssk_vsig],

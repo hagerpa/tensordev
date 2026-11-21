@@ -14,7 +14,7 @@ Volterra signatures, and free and higher-order signature kernels.
 JAX is the supported backend. PyTorch, TensorFlow, and Numba backends are not
 available.
 
-With the default execution policy, the JAX components are differentiable — from elementary tensor operations and path signatures through to signature-kernel evaluations — with respect to the paths, the kernel matrices, and the Volterra kernel parameters `beta`, `scale`, and `rate`. Gradients with respect to the state-space operator Λ currently need forward mode ([#5](https://github.com/hagerpa/tensordev/issues/5)).
+With the default execution policy, the JAX components are differentiable — from elementary tensor operations and path signatures through to signature-kernel evaluations — with respect to the paths, the kernel matrices, the state-space operator Λ, and the Volterra kernel parameters `beta`, `scale`, and `rate`.
 
 <!-- --8<-- [start:install] -->
 ## Requirements
@@ -269,7 +269,7 @@ np.testing.assert_allclose(
 Wordwise execution (`execution="wordwise"`) parallelizes over words and paths
 for ordinary signatures and `q=1` FSSK signatures, across all supported core
 types. This alpha option requires eager float32/float64 calls on one NVIDIA
-GPU (compute capability 8.0+); it is not yet validated on GPU. Defaults are
+GPU (compute capability 8.0+); its test suite passes on an NVIDIA A40. Defaults are
 unchanged, and unsupported requests raise; see the function docstrings for
 restrictions.
 <!-- --8<-- [end:wordwise] -->

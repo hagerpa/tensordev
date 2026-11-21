@@ -67,8 +67,8 @@ hide:
     ---
 
     Linux (x86_64, aarch64) and macOS Apple Silicon wheels include native CPU kernels for
-    eligible partially symmetrized signatures. Wordwise execution on NVIDIA GPUs is alpha and not
-    yet validated on GPU.
+    eligible partially symmetrized signatures. Wordwise execution on NVIDIA GPUs is alpha; its test
+    suite passes on an NVIDIA A40.
 
 </div>
 

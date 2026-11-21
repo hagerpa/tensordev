@@ -373,12 +373,9 @@ central = (k.compute_mmd(X + h * direction, Y) - k.compute_mmd(X - h * direction
 np.testing.assert_allclose(jnp.vdot(grad_X, direction), central, rtol=1e-6)
 ```
 
-!!! warning "Gradients with respect to the state-space operator"
-    Reverse-mode gradients of `FSSKSigKernel` with respect to the state-space operator $\Lambda$
-    are not available in `tensordev` 0.1.0. For an `FSSK` built with `from_jordan`, `jax.grad`
-    with respect to a rate, decay or frequency raises a `ValueError`, while `jax.jacfwd` works. For
-    `from_matrix`, derivatives with respect to the matrix raise a `NotImplementedError` in both
-    modes. Gradients with respect to `A`, `b` and the paths work.
+Gradients of `FSSKSigKernel` with respect to the state-space operator $\Lambda$ work in forward
+and reverse mode: the rates, decays and frequencies of an `FSSK` built with `from_jordan`, and the
+matrix of one built with `from_matrix`.
 
 ## Batching
 

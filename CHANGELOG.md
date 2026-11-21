@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.1 (unreleased)
+## 0.1.1
 
 ### Fixed
 
@@ -31,6 +31,16 @@
   zero time.
 - Preserve explicit working precision for state-space time increments and
   allow dense and oscillatory Jordan construction under JIT.
+- `float32` results on NVIDIA Ampere and newer GPUs lost about three digits
+  (state-space signatures up to 2% relative error), because XLA runs
+  `float32` matrix products in TF32 by default. All matrix products in
+  tensordev now request full `float32` precision. CPU results are unchanged.
+
+### Documentation
+
+- A documentation site, built with MkDocs from `docs/`: guides for tensor
+  algebra, signatures, state-space and Volterra signatures, signature kernels
+  and performance, and an API reference.
 
 ## 0.1.0
 

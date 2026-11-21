@@ -341,8 +341,6 @@ print([level.shape for level in online.state])
 ```
 
 `reset()` returns a copy with a zero state; `reset(saved)` restores a stored state, for
-example `sss.reset(sss_mid.state)`. The recursion is differentiable with `jax.grad` with
-respect to the path, `A` and `b`. With respect to $\Lambda$, reverse mode is not available: for a
-`JordanLambda`, `jax.grad` with respect to the rates, decays or frequencies raises a
-`ValueError`, while `jax.jacfwd` works; a `DenseLambda` matrix is not differentiable in either
-mode (`NotImplementedError`).
+example `sss.reset(sss_mid.state)`. The recursion is differentiable in forward and reverse mode with
+respect to the path, `A`, `b` and $\Lambda$: the rates, decays and frequencies of a
+`JordanLambda`, and the matrix of a `DenseLambda`.
