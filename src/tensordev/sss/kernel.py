@@ -13,6 +13,7 @@ from typing import Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from tensordev.util.combinatorics import build_multiindex_layout, num_multiindices_leq
 from tensordev.sss.coeffs import FSSKCoefficients
@@ -418,6 +419,69 @@ class FSSK:
         )
 
 
+# ``prepare_coef`` integrates on a parabola that crosses the real axis near 0.26 * quad_order and
+# the imaginary axis near 0.52 * quad_order. For quad_order=32 the coefficients of a step are
+# accurate to about 1e-12 while every eigenvalue mu of -Lambda * dt has Re mu <= _SAFE_RE and
+# |Im mu| <= _SAFE_IM; beyond _GUARD_RE or _GUARD_IM their error exceeds about 1e-5. The bounds
+# scale with quad_order / 32.
+_SAFE_RE, _SAFE_IM = 1.0, 4.0
+_GUARD_RE, _GUARD_IM = 5.0, 12.0
+
+
+def _concrete_eigenvalues(lam: Lambda) -> Optional[np.ndarray]:
+    """Eigenvalues of ``-Lambda`` from concrete parameters, or ``None`` while tracing."""
+    try:
+        if isinstance(lam, JordanLambda):
+            rates = np.asarray(lam.real_rates, dtype=float).ravel()
+            decays = np.asarray(lam.osc_decays, dtype=float).ravel()
+            freqs = np.asarray(lam.osc_freqs, dtype=float).ravel()
+            return np.concatenate([-rates + 0j, -decays + 1j * freqs])
+        if isinstance(lam, DenseLambda):
+            return -np.linalg.eigvals(np.asarray(lam.matrix, dtype=complex))
+    except (jax.errors.TracerArrayConversionError, jax.errors.ConcretizationTypeError):
+        return None
+    return None
+
+
+def contour_substeps(kernel: "FSSK", dt: Array | float) -> int:
+    """Number of equal sub-steps that keep the coefficients of every step accurate.
+
+    Splitting a step of a piecewise-linear path into ``k`` sub-steps does not change the path,
+    so the recursion over the sub-steps gives the same states. Returns 1 when ``Lambda`` or
+    ``dt`` is traced.
+    """
+    mu = _concrete_eigenvalues(kernel.Lambda)
+    try:
+        h = float(np.max(np.abs(np.asarray(dt, dtype=float)), initial=0.0))
+    except (jax.errors.TracerArrayConversionError, jax.errors.ConcretizationTypeError):
+        return 1
+    if mu is None or mu.size == 0 or not np.all(np.isfinite(mu)) or not np.isfinite(h):
+        return 1
+    scale = kernel.quad_order / 32
+    need = max(
+        float(np.max(mu.real)) * h / (_SAFE_RE * scale),
+        float(np.max(np.abs(mu.imag))) * h / (_SAFE_IM * scale),
+        1.0,
+    )
+    return int(np.ceil(need - 1e-9))
+
+
+def _contour_out_of_range(lam: Lambda, dt_flat: Array, quad_order: int) -> Optional[Array]:
+    """Mask of the steps whose coefficients the contour cannot resolve (Jordan ``Lambda`` only)."""
+    if not isinstance(lam, JordanLambda):
+        return None
+    re = jnp.concatenate([-jnp.ravel(lam.real_rates), -jnp.ravel(lam.osc_decays)])
+    im = jnp.abs(jnp.ravel(lam.osc_freqs))
+    scale = quad_order / 32
+    h = jnp.abs(jax.lax.stop_gradient(dt_flat))
+    bad = jnp.zeros(dt_flat.shape, dtype=bool)
+    if re.size:
+        bad = bad | (jax.lax.stop_gradient(jnp.max(re)) * h > _GUARD_RE * scale)
+    if im.size:
+        bad = bad | (jax.lax.stop_gradient(jnp.max(im)) * h > _GUARD_IM * scale)
+    return bad
+
+
 @partial(jax.jit, static_argnames=("quad_order", "dtype"))
 def prepare_coef(
         lam: Lambda,
@@ -474,6 +538,14 @@ def prepare_coef(
         beta[None, :, :, :] ** ell.astype(complex_dtype)[:, None, None, :],
         axis=-1,
     )  # (M, m, B)
+
+    bad = _contour_out_of_range(lam, dt_flat, quad_order)
+    if bad is not None:
+        # Unresolvable steps give NaN coefficients instead of silently wrong ones.
+        nan = jnp.asarray(jnp.nan, dtype=complex_dtype)
+        r = jnp.where(bad[None, :, None], nan, r)
+        u = jnp.where(bad[None, :, None, None], nan, u)
+        gamma = jnp.where(bad[None, None, :], nan, gamma)
 
     return zeta_c, slope, gamma, r, u
 
@@ -589,4 +661,4 @@ def _complex_dtype_for(dtype: jnp.dtype) -> jnp.dtype:
     return jnp.dtype(jnp.complex128)
 
 
-__all__ = ["FSSK", "prepare_coef", "eval_psi", "eval_phi"]
+__all__ = ["FSSK", "contour_substeps", "prepare_coef", "eval_psi", "eval_phi"]

@@ -9,6 +9,14 @@
   axis before, so `SigKernel` and `FreeKernel` returned one value for every
   pair of paths and `FSSKSigKernel` raised. Function-valued paths are passed
   flattened; the new `RBF_CEXP_Kernel(channels=...)` recovers their grid.
+- FSSK coefficients were silently wrong for steps beyond the reach of their
+  contour quadrature: weakly damped oscillations with `omega * dt` above
+  about 10 and growing modes with `|rate| * dt` above about 3 (up to 40%
+  relative error in `fssk_vsig`). `fssk_state`, `fssk_vsig` and
+  `StateSpaceSignature.vsig` now split such steps into equal sub-steps,
+  which is exact for piecewise-linear paths. When `Lambda` or `dt` is
+  traced, the coefficients of a `JordanLambda` are NaN beyond the contour
+  instead of wrong.
 
 ## 0.1.1
 

@@ -23,7 +23,7 @@ from tensordev.core.bigraded.types import BigradedTensor
 from tensordev.core.jax import Jax
 from tensordev.core.utils.pytrees import tree_first_leaf, tree_map
 from tensordev.sss.coeffs import FSSKCoefficients
-from tensordev.sss.kernel import FSSK
+from tensordev.sss.kernel import FSSK, contour_substeps
 from tensordev.sss.lambdas import _HIGHEST
 from tensordev.sss.recursion_scalar import update_state as update_state_scalar
 from tensordev.sss.recursion_general import update_state as update_state_general
@@ -925,6 +925,39 @@ def _prepare_fssk_state_from_coef_for_wordwise(
     )
 
 
+def _split_steps_for_coefficients(
+        X: Array,
+        *,
+        kernel: FSSK,
+        dt: Array | float,
+        axis: int,
+        block_size: int | None,
+        increment_input: bool,
+) -> tuple[Array, Array | float, int | None, bool]:
+    """Split every step into equal sub-steps when one step is too long for the coefficients.
+
+    The recursion is exact for piecewise-linear input, so ``k`` sub-steps of length ``dt / k``
+    with increments ``dX / k`` give the same states. Blocks keep their original steps.
+    """
+    k = contour_substeps(kernel, dt)
+    if k == 1:
+        return X, dt, block_size, increment_input
+    X = jnp.asarray(X)
+    axis_norm = axis % X.ndim
+    increments = X if increment_input else jnp.diff(X, axis=axis_norm)
+    increments = jnp.repeat(increments / k, k, axis=axis_norm)
+    dt = jnp.asarray(dt)
+    if dt.ndim == 0 or dt.size == 1:
+        dt = dt / k
+    elif dt.ndim == 1:
+        dt = jnp.repeat(dt / k, k)
+    elif dt.shape[axis_norm] == 1:
+        dt = dt / k
+    else:
+        dt = jnp.repeat(dt / k, k, axis=axis_norm)
+    return increments, dt, None if block_size is None else block_size * k, True
+
+
 def fssk_state(
         X: Array,
         *,
@@ -985,6 +1018,14 @@ def fssk_state(
     """
     execution = _validate_execution(execution)
     core, seq_core = _resolve_fssk_core_pair(core, seq_core)
+    X, dt, block_size, increment_input = _split_steps_for_coefficients(
+        X,
+        kernel=kernel,
+        dt=dt,
+        axis=axis,
+        block_size=block_size,
+        increment_input=increment_input,
+    )
     active = core.normalize_truncation(trunc)
     _validate_fssk_core(
         core,
@@ -1336,6 +1377,14 @@ def fssk_vsig(
     """
     execution = _validate_execution(execution)
     core, seq_core = _resolve_fssk_core_pair(core, seq_core)
+    X, dt, block_size, increment_input = _split_steps_for_coefficients(
+        X,
+        kernel=kernel,
+        dt=dt,
+        axis=axis,
+        block_size=block_size,
+        increment_input=increment_input,
+    )
     active = core.normalize_truncation(trunc)
     _validate_fssk_core(
         core,

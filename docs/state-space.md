@@ -48,14 +48,21 @@ integrals, evaluated by the trapezoidal rule on the parabolic contour of *Comput
 of the Volterra Signature*. `quad_order` (default 32) is the number of nodes in the upper
 half-plane ($m$ in that paper's algorithm EvalPhiPsi), so the rule uses $2\cdot$`quad_order`
 nodes in all. It is accurate only while the eigenvalues of $-\Lambda\,\mathrm{d}t$ lie well
-inside the contour, and nothing warns when they do not. With the default `quad_order`, decaying
-modes of any stiffness are exact to rounding. Weakly damped oscillations are exact to rounding
-for $\omega\,\mathrm{d}t\lesssim 5$, lose about seven digits at $\omega\,\mathrm{d}t\approx 10$
-and are wrong beyond $\omega\,\mathrm{d}t\approx 15$. A negative real rate $\lambda$ is exact to
-rounding for $|\lambda|\,\mathrm{d}t\lesssim 2$ and wrong beyond about 7. In these cases refine
-the grid: inserting nodes on the segments does not change a piecewise-linear path. Raising
-`quad_order` widens the contour but costs accuracy to rounding, because the weights grow like
-`exp(0.26 * quad_order)` (about $10^{-10}$ at 64 and $10^{-3}$ at 128).
+inside the contour. With the default `quad_order`, decaying modes of any stiffness are exact to
+rounding; weakly damped oscillations need $\omega\,\mathrm{d}t\lesssim 4$ and growing modes
+(a negative real rate $\lambda$) need $|\lambda|\,\mathrm{d}t\lesssim 1$. These bounds scale with
+`quad_order`.
+
+[`fssk_state`][tensordev.fssk_state], [`fssk_vsig`][tensordev.fssk_vsig] and
+[`StateSpaceSignature.vsig`][tensordev.StateSpaceSignature.vsig] split longer steps into equal
+sub-steps. Inserting nodes on the segments does not change a piecewise-linear path, so the result
+is exact; only the cost grows with the number of sub-steps. The split needs concrete values of
+$\Lambda$ and `dt`. When they are traced, for example under `jax.jit` or `jax.grad` with respect to
+$\Lambda$, steps are not split: oscillations up to $\omega\,\mathrm{d}t\approx 12$ and growing
+modes up to $|\lambda|\,\mathrm{d}t\approx 5$ then lose up to about five digits, and beyond that
+the coefficients of a `JordanLambda` are NaN instead of silently wrong. Refine the grid yourself in
+that case. Raising `quad_order` widens the contour but costs accuracy to rounding, because the
+weights grow like `exp(0.26 * quad_order)` (about $10^{-10}$ at 64 and $10^{-3}$ at 128).
 
 ## Constructing a kernel
 
