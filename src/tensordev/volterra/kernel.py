@@ -534,7 +534,7 @@ def _fractional_alpha(
     tau_s_safe = jnp.where(valid, tau_s, 1.0)
     z = jnp.clip(h_safe / tau_s_safe, 0.0, 1.0)
 
-    prefix = ell @ beta                      # (M,)
+    prefix = jnp.matmul(ell, beta, precision="highest")  # (M,)
     total = prefix[:, None] + beta[None, :]  # (M, n)
     a = rho + prefix[:, None] + 1.0
     b = beta[None, :]
@@ -1016,10 +1016,10 @@ class FSSKConvolutionKernel(ConvolutionKernel):
         )  # (B, R, R)
 
         # readout_flat[b, p, r] = (E_b b_p)_r
-        readout_flat = jnp.einsum("brs,ps->bpr", E_flat, b)  # (B, q, R)
+        readout_flat = jnp.einsum("brs,ps->bpr", E_flat, b, precision="highest")  # (B, q, R)
 
         # vals_flat[b, p, ell] = sum_r psi[b, ell, r] * readout[b, p, r]
-        vals_flat = jnp.einsum("bmR,bpR->bpm", psi_flat, readout_flat)
+        vals_flat = jnp.einsum("bmR,bpR->bpm", psi_flat, readout_flat, precision="highest")
 
         M = int(layout.ell.shape[0])
         vals = vals_flat.reshape(leading_shape + (self.q, M))

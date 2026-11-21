@@ -17,6 +17,7 @@ from tensordev.volterra.coeffs import VolterraCoefficients
 from tensordev.volterra.kernel import ConvolutionKernel
 from tensordev.volterra.eval_scalar import eval_vte as eval_vte_scalar
 from tensordev.volterra.eval_general import eval_vte as eval_vte_general
+from tensordev.core.utils.einsum import full_precision_einsum
 
 Array = jax.Array
 
@@ -109,7 +110,7 @@ def quadratic_iteration(
     if S == 0:
         raise ValueError("quadratic_iteration requires at least one increment.")
 
-    projected = xp.einsum("qmd,...d->...qm", kernel.A.astype(dtype), dX.astype(dtype))
+    projected = full_precision_einsum(xp, "qmd,...d->...qm", kernel.A.astype(dtype), dX.astype(dtype))
     y = projected[..., 0, :] if kernel.q == 1 else projected
 
     y_time = xp.moveaxis(y, axis_norm, 0)
@@ -181,7 +182,7 @@ def quadratic_iteration(
                 ),
                 axis=0,
             )
-            new_values = xp.einsum("bk,k...->b...", interp_inv, evals_packed)
+            new_values = full_precision_einsum(xp, "bk,k...->b...", interp_inv, evals_packed)
             old_diagonals = tuple(
                 tuple(algebra.block(component, grade) for grade in diagonal.grades)
                 for component in components_next

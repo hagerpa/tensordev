@@ -73,6 +73,7 @@ from tensordev.core.shuffle import (
     _precompute_shuffle_argument,
 )
 from tensordev.core.utils.precompute import _readonly, _unsigned_index_dtype
+from tensordev.core.utils.einsum import full_precision_einsum
 
 
 _COMPILED_SHEAR_SHUFFLE_ENTRY_THRESHOLD = 100_000
@@ -1204,7 +1205,7 @@ class ShearBigradedCore(BigradedShearCoordinateCore, StandardBigradedCore):
                     key.rank_matrix.T if transpose else key.rank_matrix,
                     dtype=block.dtype,
                 )
-                values = self.xp.einsum("oi,...id->...od", matrix, values)
+                values = full_precision_einsum(self.xp, "oi,...id->...od", matrix, values)
                 output = output + values.reshape(batch + plan.dense_shape)
                 continue
             values = self.xp.take(source, self.xp.asarray(input_ranks), axis=len(batch))

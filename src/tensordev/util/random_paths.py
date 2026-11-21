@@ -119,8 +119,8 @@ def random_trigonometric_polynomial_paths(
     cos_basis = jnp.cos(angles) - 1.0
 
     X = (
-        jnp.einsum("bdm,mt->bdt", sin_coeffs, sin_basis)
-        + jnp.einsum("bdm,mt->bdt", cos_coeffs, cos_basis)
+        jnp.einsum("bdm,mt->bdt", sin_coeffs, sin_basis, precision="highest")
+        + jnp.einsum("bdm,mt->bdt", cos_coeffs, cos_basis, precision="highest")
     )
 
     return jnp.swapaxes(X, 1, 2)

@@ -38,6 +38,7 @@ from tensordev.core.utils.segmented import (
     apply_segmented_rank_plan,
 )
 from tensordev.core.shuffle import _normalize_precompute_shuffle
+from tensordev.core.utils.einsum import full_precision_einsum
 
 
 class PartiallySymmetrizedBigradedCore(StandardBigradedCore):
@@ -474,7 +475,7 @@ class PartiallySymmetrizedBigradedCore(StandardBigradedCore):
         right, _, _ = self._canonicalize_matrix_axes(
             right, row_axis, col_axis
         )
-        pairs = self.xp.einsum("...rki,...klj->...rlij", left, right)
+        pairs = full_precision_einsum(self.xp, "...rki,...klj->...rlij", left, right)
         plan = self.plan_store.concat_plan(left_grade, right_grade)
         if plan.output_grade != output_grade:
             raise ValueError("matrix product plan/output grade mismatch")

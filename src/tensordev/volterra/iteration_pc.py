@@ -22,6 +22,7 @@ from tensordev.volterra.algebra import (
     resolve_volterra_core_pair,
 )
 from tensordev.volterra.kernel import ConvolutionKernel, FractionalKernel
+from tensordev.core.utils.einsum import full_precision_einsum
 
 Array = jax.Array
 
@@ -114,7 +115,7 @@ def pc_iteration(
 
     # Project: dY[..., a] = sum_d A[0, a, d] * dX[..., d]
     A_mat = kernel.A[0].astype(dX.dtype)           # (m, d)
-    dY = xp.einsum("md,...d->...m", A_mat, dX)     # (..., S, m)
+    dY = full_precision_einsum(xp, "md,...d->...m", A_mat, dX)     # (..., S, m)
     dY_time = xp.moveaxis(dY, axis_norm, 0)         # (S, *batch, m)
 
     S = int(dY_time.shape[0])

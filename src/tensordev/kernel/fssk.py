@@ -779,8 +779,8 @@ def _build_gamma_grid_static(X_nodes, Y_nodes, *, kernel, static_kernel, pairwis
     bx, by = X_flat.shape[0], Y_flat.shape[0]
 
     # Projected nodes: AX[b, i, n, :] = A[n] @ X_flat[b, i, :]
-    AX = jnp.einsum("qmd,bid->biqm", A, X_flat)  # (bx, s_nodes, n, m)
-    AY = jnp.einsum("qmd,bjd->bjqm", A, Y_flat)  # (by, t_nodes, n, m)
+    AX = jnp.einsum("qmd,bid->biqm", A, X_flat, precision="highest")  # (bx, s_nodes, n, m)
+    AY = jnp.einsum("qmd,bjd->bjqm", A, Y_flat, precision="highest")  # (by, t_nodes, n, m)
     AX_flat = AX.reshape(bx, s_nodes * q, m)
     AY_flat = AY.reshape(by, t_nodes * q, m)
 
@@ -800,7 +800,7 @@ def _build_gamma_grid_static(X_nodes, Y_nodes, *, kernel, static_kernel, pairwis
     K = K.reshape(bx * by if pairwise else bx, s_nodes, q, t_nodes, q)
     K = jnp.transpose(K, (0, 1, 3, 2, 4))             # (..., s_nodes, t_nodes, n, n)
     G = K[:, 1:, 1:] - K[:, :-1, 1:] - K[:, 1:, :-1] + K[:, :-1, :-1]  # (..., s_iv, t_iv, n, n)
-    gamma_cell = jnp.einsum("qR,bijqp,pS->bijRS", b, G, b)
+    gamma_cell = jnp.einsum("qR,bijqp,pS->bijRS", b, G, b, precision="highest")
     gamma_padded = jnp.pad(gamma_cell, ((0, 0), (0, 1), (0, 1), (0, 0), (0, 0)))
     return gamma_padded, batch_shape
 

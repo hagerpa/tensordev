@@ -277,9 +277,9 @@ def fssk_q1_word_state_reference(
             for a in range(1, p):
                 h = (
                     h * y_step[word[a - 1]]
-                    + prefixes[a - 1] @ phi_step[p - 1 - a]
+                    + jnp.matmul(prefixes[a - 1], phi_step[p - 1 - a], precision="highest")
                 )
-            updated = prefixes[p - 1] @ E_step + h * y_step[word[p - 1]]
+            updated = jnp.matmul(prefixes[p - 1], E_step, precision="highest") + h * y_step[word[p - 1]]
             prefixes = prefixes.at[p - 1].set(updated)
         return prefixes, None
 
@@ -386,14 +386,14 @@ def fssk_q1_quotient_graph_state_reference(
             )
             for degree in range(1, target_degree):
                 incoming = right_action(horner, increment)
-                memory = old @ phi_step[target_degree - 1 - degree]
+                memory = jnp.matmul(old, phi_step[target_degree - 1 - degree], precision="highest")
                 horner = jnp.where(
                     (degrees == degree)[:, None],
                     incoming + memory,
                     0,
                 )
             incoming = right_action(horner, increment)
-            updated = old @ E_step + incoming
+            updated = jnp.matmul(old, E_step, precision="highest") + incoming
             new = jnp.where(
                 (degrees == target_degree)[:, None],
                 updated,
@@ -477,7 +477,7 @@ def fssk_q1_readout_reference(
     for block in state_blocks:
         if block.shape[-2] != readout.shape[0]:
             raise ValueError("state-space dimension and readout length disagree.")
-        blocks.append(jnp.einsum("...rw,r->...w", block, readout))
+        blocks.append(jnp.einsum("...rw,r->...w", block, readout, precision="highest"))
     return plan.assemble_signature(blocks)
 
 

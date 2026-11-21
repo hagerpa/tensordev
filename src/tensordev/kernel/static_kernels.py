@@ -115,7 +115,7 @@ class LinearKernel(StaticKernel):
         X: ``batch + (length_X, dim)``  →  ``batch + (length_X, length_Y)``
         """
         # jnp.matmul broadcasts freely over any number of leading batch axes
-        return jnp.matmul(self.scale * X, (self.scale * Y).swapaxes(-1, -2))
+        return jnp.matmul(self.scale * X, (self.scale * Y).swapaxes(-1, -2), precision="highest")
 
     def Gram_matrix(self, X: Array, Y: Array) -> Array:
         """
@@ -123,7 +123,7 @@ class LinearKernel(StaticKernel):
         →  ``batch_X + batch_Y + (length_X, length_Y)``
         """
         X_b, Y_b = _expand_for_gram(self.scale * X, self.scale * Y)
-        return jnp.matmul(X_b, Y_b.swapaxes(-1, -2))
+        return jnp.matmul(X_b, Y_b.swapaxes(-1, -2), precision="highest")
 
 
 @jax.tree_util.register_dataclass
@@ -145,7 +145,7 @@ class RBFKernel(StaticKernel):
         """
         Xs = jnp.sum(X ** 2, axis=-1)                       # batch + (length_X,)
         Ys = jnp.sum(Y ** 2, axis=-1)                       # batch + (length_Y,)
-        dist = -2.0 * jnp.matmul(X, Y.swapaxes(-1, -2))    # batch + (length_X, length_Y)
+        dist = -2.0 * jnp.matmul(X, Y.swapaxes(-1, -2), precision="highest")    # batch + (length_X, length_Y)
         dist = dist + Xs[..., None] + Ys[..., None, :]
         return jnp.exp(-dist / self.sigma)
 
@@ -157,7 +157,7 @@ class RBFKernel(StaticKernel):
         X_b, Y_b = _expand_for_gram(X, Y)
         Xs = jnp.sum(X_b ** 2, axis=-1)                            # batch_X + (1,)*ny + (length_X,)
         Ys = jnp.sum(Y_b ** 2, axis=-1)                            # (1,)*nx + batch_Y + (length_Y,)
-        dist = -2.0 * jnp.matmul(X_b, Y_b.swapaxes(-1, -2))       # batch_X + batch_Y + (length_X, length_Y)
+        dist = -2.0 * jnp.matmul(X_b, Y_b.swapaxes(-1, -2), precision="highest")       # batch_X + batch_Y + (length_X, length_Y)
         dist = dist + Xs[..., None] + Ys[..., None, :]
         return jnp.exp(-dist / self.sigma)
 
@@ -291,7 +291,7 @@ def cexp(X: Array, n_freqs: int = 20, sigma: float = float(np.sqrt(10))) -> Arra
 
     # Swap last two axes: batch + (length_t, dim, length_x) then matmul with T_mat
     X_t = jnp.swapaxes(X, -1, -2)                             # batch + (length_t, dim, length_x)
-    cos_exp_X = (1.0 / length_x) * jnp.matmul(X_t, T_mat)    # batch + (length_t, dim, length_x)
+    cos_exp_X = (1.0 / length_x) * jnp.matmul(X_t, T_mat, precision="highest")    # batch + (length_t, dim, length_x)
 
     return jnp.swapaxes(cos_exp_X, -1, -2)                    # batch + (length_t, length_x, dim)
 
