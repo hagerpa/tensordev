@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import jax
 import jax.numpy as jnp
@@ -165,13 +165,17 @@ class RBFKernel(StaticKernel):
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class RBF_CEXP_Kernel(StaticKernel):
-    """RBF CEXP kernel k: H × H → R.
+    """RBF kernel on cos-exp features of function-valued path values.
 
-    First maps each function through the integral operator induced by the
-    cos-exp kernel (parameterised by ``sigma1`` and ``n_freqs``), then applies
-    an RBF kernel with bandwidth ``sigma2`` on the resulting feature vectors.
+    Each node value is a function sampled on a uniform grid over ``[0, 1]``,
+    stored as a vector of length ``length_x * channels`` in grid-major order
+    (``x.reshape(length_x, channels)`` recovers the samples). The kernel maps
+    each value through the integral operator of the cos-exp kernel
+    (``sigma1``, ``n_freqs``) and applies an RBF kernel with bandwidth
+    ``sigma2`` to the results.
 
-    Input shape: ``batch + (length_t, length_x, dim)``
+    A function-valued path of shape ``batch + (length_t, length_x, channels)``
+    is passed as ``X.reshape(X.shape[:-2] + (-1,))``.
 
     Parameters
     ----------
@@ -181,54 +185,55 @@ class RBF_CEXP_Kernel(StaticKernel):
         Bandwidth of the outer RBF kernel.
     n_freqs : int, default=20
         Number of frequencies used in the cos-exp kernel.
+    channels : int, default=1
+        Number of channels of the function values; the node dimension must be
+        a multiple of it.
     """
 
     sigma1: float = 1.0
     sigma2: float = 1.0
-    n_freqs: int = 20
+    n_freqs: int = field(default=20, metadata={"static": True})
+    channels: int = field(default=1, metadata={"static": True})
+
+    def _features(self, X: Array) -> Array:
+        """``batch + (length, length_x * channels)`` → same shape."""
+        dim = X.shape[-1]
+        if dim % self.channels:
+            raise ValueError(
+                f"The node dimension {dim} is not a multiple of channels={self.channels}."
+            )
+        F = X.reshape(X.shape[:-1] + (dim // self.channels, self.channels))
+        return cexp(F, self.n_freqs, self.sigma1).reshape(X.shape)
 
     def batch_kernel(self, X: Array, Y: Array) -> Array:
         """
-        X: ``batch + (length_X_t, length_x, dim)``
-        Y: ``batch + (length_Y_t, length_x, dim)``
-        →  ``batch + (length_X_t, length_Y_t)``
+        X: ``batch + (length_X, dim)``  →  ``batch + (length_X, length_Y)``
         """
-        CX = cexp(X, self.n_freqs, self.sigma1)   # batch + (length_X_t, length_x, dim)
-        CY = cexp(Y, self.n_freqs, self.sigma1)   # batch + (length_Y_t, length_x, dim)
-        # flatten last two axes: batch + (length_t, length_x × dim)
-        CX = CX.reshape(CX.shape[:-2] + (-1,))
-        CY = CY.reshape(CY.shape[:-2] + (-1,))
-        return RBFKernel(self.sigma2).batch_kernel(CX, CY)
+        return RBFKernel(self.sigma2).batch_kernel(self._features(X), self._features(Y))
 
     def Gram_matrix(self, X: Array, Y: Array) -> Array:
         """
-        X: ``batch_X + (length_X_t, length_x, dim)``
-        Y: ``batch_Y + (length_Y_t, length_x, dim)``
-        →  ``batch_X + batch_Y + (length_X_t, length_Y_t)``
+        X: ``batch_X + (length_X, dim)``,  Y: ``batch_Y + (length_Y, dim)``
+        →  ``batch_X + batch_Y + (length_X, length_Y)``
         """
-        CX = cexp(X, self.n_freqs, self.sigma1)
-        CY = cexp(Y, self.n_freqs, self.sigma1)
-        CX = CX.reshape(CX.shape[:-2] + (-1,))
-        CY = CY.reshape(CY.shape[:-2] + (-1,))
-        return RBFKernel(self.sigma2).Gram_matrix(CX, CY)
+        return RBFKernel(self.sigma2).Gram_matrix(self._features(X), self._features(Y))
 
 
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class RBF_SQR_Kernel(StaticKernel):
-    """RBF SQR kernel k: H × H → R.
+    """Product of an RBF kernel on the node values and one on their squares.
 
-    Product of two RBF kernels: one applied to the flattened inputs and one
-    applied to their element-wise squares.
-
-    Input shape: ``batch + (length_t, length_x, dim)``
+    ``k(x, y) = exp(-|x - y|^2 / sigma1) * exp(-|x**2 - y**2|^2 / sigma2)``,
+    with the squares taken elementwise. For function-valued paths, flatten the
+    samples of each value into the last axis, as for :class:`RBF_CEXP_Kernel`.
 
     Parameters
     ----------
     sigma1 : float, default=1.0
-        Bandwidth for the RBF kernel applied to the raw flattened inputs.
+        Bandwidth for the RBF kernel applied to the values.
     sigma2 : float, default=1.0
-        Bandwidth for the RBF kernel applied to the squared flattened inputs.
+        Bandwidth for the RBF kernel applied to the squared values.
     """
 
     sigma1: float = 1.0
@@ -236,24 +241,17 @@ class RBF_SQR_Kernel(StaticKernel):
 
     def batch_kernel(self, X: Array, Y: Array) -> Array:
         """
-        X: ``batch + (length_X_t, length_x, dim)``
-        Y: ``batch + (length_Y_t, length_x, dim)``
-        →  ``batch + (length_X_t, length_Y_t)``
+        X: ``batch + (length_X, dim)``  →  ``batch + (length_X, length_Y)``
         """
-        X = X.reshape(X.shape[:-2] + (-1,))  # batch + (length_X_t, length_x × dim)
-        Y = Y.reshape(Y.shape[:-2] + (-1,))  # batch + (length_Y_t, length_x × dim)
         rbf1 = RBFKernel(self.sigma1)
         rbf2 = RBFKernel(self.sigma2)
         return rbf1.batch_kernel(X, Y) * rbf2.batch_kernel(X ** 2, Y ** 2)
 
     def Gram_matrix(self, X: Array, Y: Array) -> Array:
         """
-        X: ``batch_X + (length_X_t, length_x, dim)``
-        Y: ``batch_Y + (length_Y_t, length_x, dim)``
-        →  ``batch_X + batch_Y + (length_X_t, length_Y_t)``
+        X: ``batch_X + (length_X, dim)``,  Y: ``batch_Y + (length_Y, dim)``
+        →  ``batch_X + batch_Y + (length_X, length_Y)``
         """
-        X = X.reshape(X.shape[:-2] + (-1,))
-        Y = Y.reshape(Y.shape[:-2] + (-1,))
         rbf1 = RBFKernel(self.sigma1)
         rbf2 = RBFKernel(self.sigma2)
         return rbf1.Gram_matrix(X, Y) * rbf2.Gram_matrix(X ** 2, Y ** 2)

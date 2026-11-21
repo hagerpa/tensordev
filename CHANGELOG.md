@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `RBF_SQR_Kernel` and `RBF_CEXP_Kernel` act on the node values
+  `batch + (length, dim)` like every static kernel. They flattened the time
+  axis before, so `SigKernel` and `FreeKernel` returned one value for every
+  pair of paths and `FSSKSigKernel` raised. Function-valued paths are passed
+  flattened; the new `RBF_CEXP_Kernel(channels=...)` recovers their grid.
+
 ## 0.1.1
 
 ### Fixed
