@@ -21,18 +21,20 @@ X = random_trigonometric_polynomial_paths(batch=4, steps=32, dim=2, key=0)
 
 The wheels for Linux (x86_64 and aarch64) and macOS on Apple Silicon contain compiled CPU kernels,
 which JAX calls through the XLA FFI. The Linux wheels are built and tested in `manylinux_2_28`
-containers, so glibc 2.28 is the tested baseline. The kernels implement one operation: the fused
-Horner update of a signature step for partially symmetrized bidegree cores. A step uses them when
+containers, so glibc 2.28 is the tested baseline. The kernels compute one operation, the
+signature step $g \mapsto g\otimes\exp_\otimes(\Delta)$ of
+[Path signatures](signatures.md#arguments), truncated at the bidegree $(N, M)$ of a partially
+symmetrized core. A step uses them when
 
 - the core is partially symmetrized (`partially_symmetrized=True`), in standard coordinates, with
   `dims=(1, q)` and `q > 1`;
 - the data are `float32` or `float64`;
-- the workload is large enough (a work threshold in the source decides);
+- the work per path $W=\sum_{(n,m)\neq(0,0)}(N+M-n-m+1)\,w_{n,m}$, with $w_{n,m}$ the number of
+  coordinates of block $(n, m)$, is at least 3000 for $q = 2$ and 1500 for $q \ge 3$, and $W$
+  times the number of paths is at least 32768;
 - JAX runs the computation on the CPU.
 
-Otherwise the same call runs the JAX implementation, without an error or a warning. The
-platform-independent wheel, which other platforms install, and source installations contain no
-native kernels; they use JAX throughout and need no C++ compiler.
+Otherwise the same call runs the JAX implementation, without an error or a warning.
 
 The kernels are part of the JAX program. They work inside `jax.jit`, and both `execution="auto"`
 and `execution="jax"` use them where they apply. Derivatives are computed by the JAX
@@ -76,9 +78,8 @@ the macOS deployment target and the binary interface. For the plain installation
 
 --8<-- "README.md:device_placement"
 
-On a GPU, the default `execution="auto"` runs the portable JAX implementation; the wordwise
-kernels of the next section are opt-in. `jax.devices()` lists the devices that JAX sees, and
-`JAX_PLATFORMS=cpu` keeps a process on the CPU.
+`jax.devices()` lists the devices that JAX sees, and `JAX_PLATFORMS=cpu` keeps a process on the
+CPU.
 
 On NVIDIA GPUs of the Ampere generation and newer, XLA runs `float32` matrix products in TF32
 by default, which keeps about three significant digits. tensordev requests full `float32`
@@ -97,21 +98,17 @@ jax.config.update("jax_default_matmul_precision", "highest")
 
 !!! warning "Alpha"
 
-    Wordwise execution is alpha. Its test suite passes on an NVIDIA A40, but it has seen
-    little use; check its results against `execution="jax"` before you rely on them.
+    Check the results of `execution="wordwise"` against `execution="jax"`.
 
 The `execution` argument is accepted by [`path_signature`][tensordev.path_signature], calls of a
 [`Signature`][tensordev.Signature], [`fssk_vsig`][tensordev.fssk_vsig],
 [`fssk_state`][tensordev.fssk_state], and the methods `vsig`, `states`, `update_with_path` and
-`update_with_increment` of [`StateSpaceSignature`][tensordev.StateSpaceSignature]. On this page,
-*portable JAX* means the JAX implementation, which on the CPU includes the
-[native CPU kernels](#native-cpu-kernels) where they apply; only the wordwise kernels are outside
-it.
+`update_with_increment` of [`StateSpaceSignature`][tensordev.StateSpaceSignature].
 
 | Value | Implementation |
 |---|---|
-| `"auto"` (default) | The default execution policy. Automatic wordwise selection is disabled in this release, so it runs portable JAX on every device, as `"jax"` does. |
-| `"jax"` | Portable JAX: never selects the wordwise kernels. |
+| `"auto"` (default) | The JAX implementation on every device, as with `"jax"`. |
+| `"jax"` | The JAX implementation; never selects the wordwise kernels. |
 | `"wordwise"` | The alpha NVIDIA kernels. A call that does not meet the requirements below raises `ValueError` instead of falling back. |
 
 Requirements of `execution="wordwise"`:
@@ -123,7 +120,7 @@ Requirements of `execution="wordwise"`:
 | Call | Eager: not inside `jax.jit`, `jax.grad` or `jax.vmap`. |
 | Options | For signatures, `parallel=False` and `accumulate_in_tree=False`, the defaults. |
 | Input | `float32` or `float64`, on one NVIDIA GPU with CUDA compute capability 8.0 or newer. |
-| Derivatives | Not supported. For gradients use `"auto"` or `"jax"`, which differentiate through portable JAX. |
+| Derivatives | Not supported. For gradients use `"auto"` or `"jax"`, which differentiate the JAX implementation. |
 
 On a CPU, a wordwise request raises, and `"auto"` agrees with `"jax"`:
 
@@ -143,9 +140,19 @@ np.testing.assert_allclose(td.tensor_to_flat(sig_auto), td.tensor_to_flat(sig_ja
 
 On a supported GPU the request is the same call with the path on that device, for example
 `td.path_signature(X_gpu, trunc=4, execution="wordwise")` with `X_gpu` as in
-[Device placement](#device-placement). The word-parallel approach was introduced by `pathsig` (see
-[Acknowledgements](background.md#acknowledgements)); the
-[technical note](background.md#technical-note) describes how it works with the bidegree layouts.
+[Device placement](#device-placement).
+
+For a piecewise linear path with increments $\Delta_k$ and $S_k=\pi_{\le N}\mathrm{Sig}(X)_{0,t_k}$,
+Chen's identity gives the coefficient of a word $w=i_1\cdots i_n$ after step $k$ as
+
+$$
+\langle w, S_k\rangle=\sum_{j=0}^{n}\langle i_1\cdots i_j, S_{k-1}\rangle\,
+\frac{\Delta_k^{i_{j+1}}\cdots\Delta_k^{i_n}}{(n-j)!} .
+$$
+
+A word needs only its own prefixes, so the wordwise kernels process the words and the paths in
+parallel. The approach is from `pathsig` ([Acknowledgements](background.md#acknowledgements)); the
+[technical note](background.md#technical-note) adapts it to the bidegree layouts.
 
 ## JIT and compilation
 
@@ -189,11 +196,8 @@ Set the default core before you trace, or pass `core=` explicitly. See
 
 ### Plans of bounded cores
 
-Bidegree, partially symmetrized and shear cores keep precomputed index plans in memory, and
-`precompute_shuffle=True` adds plans for every shuffle product within the capacity; a dense
-total-degree core keeps plans only then. This memory grows quickly with `max_trunc`.
-[`core_expected_memory`][tensordev.core_expected_memory] takes the configuration arguments of
-`make_core` except `default_trunc`, and computes the plan memory without building the core; see
+[`core_expected_memory`][tensordev.core_expected_memory] gives the plan memory of a core
+configuration without building the core; see
 [Shuffle plans and memory](tensor-algebra.md#shuffle-plans-and-memory).
 
 ### Long paths and gradients
@@ -248,17 +252,9 @@ Volterra signatures (`td.vsig` with a `FractionalKernel` with $\beta = 0.7$ and 
 
 A matched comparison sets total degree $2N$ against bidegree $(N, N)$: both keep words up to
 length $2N$, but the bidegree core drops the words with more than $N$ letters from either half of
-the alphabet. With $d = d' + d''$ letters, $d'$ in the first half and $d''$ in the second, total
-degree $K$ and bidegree $(N, M)$ keep
-
-$$
-\sum_{k=0}^{K} d^{k}
-\qquad \text{and} \qquad
-\sum_{n=0}^{N} \sum_{m=0}^{M} \binom{n+m}{n} (d')^{n} (d'')^{m}
-$$
-
-coordinates, counting the scalar. The payload column of the first table shows these counts for
-$d' = d'' = 2$. With `--include-mismatched` the script adds total degree 6 against bidegree
+the alphabet. The payload column of the first table shows the coordinate counts of
+[Bidegree tensors](tensor-algebra.md#bidegree-tensors) for $d' = d'' = 2$, counting the scalar.
+With `--include-mismatched` the script adds total degree 6 against bidegree
 $(4, 4)$, labelled non-equivalent: $(4, 4)$ also keeps words of lengths 7 and 8, so that row is no
 speed comparison.
 
@@ -293,23 +289,14 @@ The script also writes a CSV file next to the JSON file. `--dtype float32`,
 `--volterra-scheme fft` and `--clear-caches` (clear the JAX caches before every row, for cold
 starts) change the setup; `--help` lists all options.
 
-### Wordwise versus portable JAX
+### Wordwise versus JAX
 
-`benchmarks/wordwise_gpu.py` checks the alpha wordwise kernels against portable JAX and times both
-on one NVIDIA GPU with compute capability 8.0 or newer. It can cover ordinary signatures and
-`q = 1` FSSK recursions (hidden states and the readout), total-degree, bidegree and partially
-symmetrized cores in standard and shear coordinates, `float32` and `float64`, and terminal,
-accumulated and independent block outputs. Each case runs
-
-- the wordwise kernel and the portable implementation, both compiled with `jax.jit`, with their
-  warm calls alternating;
-- the public function, called eagerly with the default policy.
-
-Each wordwise result is compared with the portable result. The ratio of the median times gets a
-paired bootstrap 95% interval, and a gate records whether the kernel is clearly faster. Automatic
-selection is to be enabled only for targets and workloads that pass these checks; in this release
-it is disabled everywhere. Differentiation is not benchmarked, because transformed calls use
-portable JAX.
+`benchmarks/wordwise_gpu.py` checks the alpha wordwise kernels against the JAX implementation and
+times both on one NVIDIA GPU with compute capability 8.0 or newer. It can cover ordinary
+signatures and `q = 1` FSSK recursions (hidden states and the readout), total-degree, bidegree and
+partially symmetrized cores in standard and shear coordinates, `float32` and `float64`, and
+terminal, accumulated and independent block outputs. Differentiation is not benchmarked, because
+transformed calls use the JAX implementation.
 
 --8<-- "docs/generated/wordwise_gpu.md"
 

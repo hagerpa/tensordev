@@ -126,44 +126,44 @@ and describe the total-degree layout: a tuple of levels `(X_0, X_1, ..., X_N)` i
 implement `tensor_partially_symmetrize`, `tensor_partially_symmetrize_homogeneous` and
 `tensor_to_ordered`; other cores raise `RuntimeError`.
 
-| Group | Operation | Description |
-|---|---|---|
-| Sum, scaling | [`tensor_summation`][tensordev.core.universal.Universal.tensor_summation] | Level-wise sum `C = A + B` (with implicit zero-padding if degrees differ). |
-| | [`tensor_scalar_multiply`][tensordev.core.universal.Universal.tensor_scalar_multiply] | Uniform scalar multiply: `Y = a * X`. |
-| | [`tensor_dilation`][tensordev.core.universal.Universal.tensor_dilation] | Scale each homogeneous degree `k` by `c**k`. |
-| Tensor product | [`tensor_product`][tensordev.core.universal.Universal.tensor_product] | Graded (Cauchy-type) product `C = A ⊗ B` in the free tensor algebra. |
-| | [`tensor_product_homogeneous`][tensordev.core.universal.Universal.tensor_product_homogeneous] | Homogeneous-degree tensor (Chen) product on the last axis. |
-| Shuffle product | [`tensor_shuffle_vector`][tensordev.core.universal.Universal.tensor_shuffle_vector] | Graded shuffle product `C = A ⊔ v` where `v` is degree-1. |
-| | [`tensor_shuffle_vector_homogeneous`][tensordev.core.universal.Universal.tensor_shuffle_vector_homogeneous] | Homogeneous shuffle product `(A_i ⊔ v)_{i+1}` where `v` is degree-1. |
-| | [`tensor_shuffle_product`][tensordev.core.universal.Universal.tensor_shuffle_product] | Compute the truncated graded, commutative shuffle product. |
-| | [`tensor_shuffle_product_homogeneous`][tensordev.core.universal.Universal.tensor_shuffle_product_homogeneous] | Compute the homogeneous ordinary shuffle product. |
-| Exp, log | [`tensor_exponential`][tensordev.core.universal.Universal.tensor_exponential] | Algebra exponential for inputs starting at degree 1 (treat `X₀ ≡ 0`). |
-| | [`tensor_logarithm`][tensordev.core.universal.Universal.tensor_logarithm] | Algebra logarithm with input levels starting at 1. |
-| | [`tensor_fmexp`][tensordev.core.universal.Universal.tensor_fmexp] | Formal multiplicative exponential: compute `Y = g ⊗ exp(X)`. |
-| Pairing, adjoint | [`tensor_inner_product`][tensordev.core.universal.Universal.tensor_inner_product] | Canonical Euclidean inner product, summing level-wise dot products over the last axis. |
-| | [`tensor_inner_product_homogeneous`][tensordev.core.universal.Universal.tensor_inner_product_homogeneous] | Level-wise (homogeneous) Euclidean inner product over the last axis. |
-| | [`tensor_shear_pairing`][tensordev.core.universal.Universal.tensor_shear_pairing] | Pair words with a compatible standard-coordinate tensor. |
-| | [`tensor_shear_pairing_homogeneous`][tensordev.core.universal.Universal.tensor_shear_pairing_homogeneous] | Pair one word block with a standard-coordinate block. |
-| | [`tensor_adjoint_product`][tensordev.core.universal.Universal.tensor_adjoint_product] | Compute the graded adjoint product of two truncated tensor-algebra elements. |
-| | [`tensor_adjoint_left_homogeneous`][tensordev.core.universal.Universal.tensor_adjoint_left_homogeneous] | Homogeneous left-adjoint contraction for degree `i`. |
-| | [`tensor_adjoint_right_homogeneous`][tensordev.core.universal.Universal.tensor_adjoint_right_homogeneous] | Homogeneous right-adjoint contraction for degree `j`. |
-| Matrix-valued | [`tensor_matrix_product`][tensordev.core.universal.Universal.tensor_matrix_product] | Multiply two matrix-valued tensor-algebra elements. |
-| | [`tensor_matrix_product_homogeneous`][tensordev.core.universal.Universal.tensor_matrix_product_homogeneous] | Multiply two homogeneous matrix-valued tensor-algebra coefficients. |
-| | [`tensor_matrix_product_left`][tensordev.core.universal.Universal.tensor_matrix_product_left] | Left-multiply a matrix-valued tensor-algebra element by a numeric matrix. |
-| | [`tensor_matrix_product_left_homogeneous`][tensordev.core.universal.Universal.tensor_matrix_product_left_homogeneous] | Left-multiply a homogeneous matrix-valued tensor-algebra coefficient by a numeric matrix. |
-| | [`tensor_matrix_product_right`][tensordev.core.universal.Universal.tensor_matrix_product_right] | Right-multiply a matrix-valued tensor-algebra element by a numeric matrix. |
-| | [`tensor_matrix_product_right_homogeneous`][tensordev.core.universal.Universal.tensor_matrix_product_right_homogeneous] | Right-multiply a homogeneous matrix-valued tensor-algebra coefficient by a numeric matrix. |
-| Layout | [`tensor_stack`][tensordev.core.universal.Universal.tensor_stack] | Stack a list of equally structured elements level-wise along `axis`. |
-| | [`tensor_moveaxis`][tensordev.core.universal.Universal.tensor_moveaxis] | Move the axis `source` to `destination` in every level. |
-| | [`tensor_densify`][tensordev.core.universal.Universal.tensor_densify] | Turn a possibly sparse graded element (levels may be `None`) into a dense one. |
-| | [`tensor_from_flat`][tensordev.core.universal.Universal.tensor_from_flat] | Split a flattened graded tensor into a dense `(X₀, X₁, ..., X_N)`. |
-| | [`tensor_to_flat`][tensordev.core.universal.Universal.tensor_to_flat] | Concatenate per-degree levels into a single flattened array. |
-| | [`tensor_slice`][tensordev.core.universal.Universal.tensor_slice] | Return a proxy that applies an index or slice to every level of `A`. |
-| | [`tensor_from_standard_coordinates`][tensordev.core.universal.Universal.tensor_from_standard_coordinates] | Convert standard coefficients to this core's native coordinates. |
-| | [`tensor_to_standard_coordinates`][tensordev.core.universal.Universal.tensor_to_standard_coordinates] | Convert this core's native coefficients to standard coordinates. |
-| | [`tensor_partially_symmetrize`][tensordev.core.universal.Universal.tensor_partially_symmetrize] | Partially symmetrize one ordered tensor when supported. |
-| | [`tensor_partially_symmetrize_homogeneous`][tensordev.core.universal.Universal.tensor_partially_symmetrize_homogeneous] | Partially symmetrize one ordered block when supported. |
-| | [`tensor_to_ordered`][tensordev.core.universal.Universal.tensor_to_ordered] | Lift a partially symmetrized word tensor when supported. |
+| Group | Operation |
+|---|---|
+| Sum, scaling | [`tensor_summation`][tensordev.core.universal.Universal.tensor_summation] |
+| | [`tensor_scalar_multiply`][tensordev.core.universal.Universal.tensor_scalar_multiply] |
+| | [`tensor_dilation`][tensordev.core.universal.Universal.tensor_dilation] |
+| Tensor product | [`tensor_product`][tensordev.core.universal.Universal.tensor_product] |
+| | [`tensor_product_homogeneous`][tensordev.core.universal.Universal.tensor_product_homogeneous] |
+| Shuffle product | [`tensor_shuffle_vector`][tensordev.core.universal.Universal.tensor_shuffle_vector] |
+| | [`tensor_shuffle_vector_homogeneous`][tensordev.core.universal.Universal.tensor_shuffle_vector_homogeneous] |
+| | [`tensor_shuffle_product`][tensordev.core.universal.Universal.tensor_shuffle_product] |
+| | [`tensor_shuffle_product_homogeneous`][tensordev.core.universal.Universal.tensor_shuffle_product_homogeneous] |
+| Exp, log | [`tensor_exponential`][tensordev.core.universal.Universal.tensor_exponential] |
+| | [`tensor_logarithm`][tensordev.core.universal.Universal.tensor_logarithm] |
+| | [`tensor_fmexp`][tensordev.core.universal.Universal.tensor_fmexp] |
+| Pairing, adjoint | [`tensor_inner_product`][tensordev.core.universal.Universal.tensor_inner_product] |
+| | [`tensor_inner_product_homogeneous`][tensordev.core.universal.Universal.tensor_inner_product_homogeneous] |
+| | [`tensor_shear_pairing`][tensordev.core.universal.Universal.tensor_shear_pairing] |
+| | [`tensor_shear_pairing_homogeneous`][tensordev.core.universal.Universal.tensor_shear_pairing_homogeneous] |
+| | [`tensor_adjoint_product`][tensordev.core.universal.Universal.tensor_adjoint_product] |
+| | [`tensor_adjoint_left_homogeneous`][tensordev.core.universal.Universal.tensor_adjoint_left_homogeneous] |
+| | [`tensor_adjoint_right_homogeneous`][tensordev.core.universal.Universal.tensor_adjoint_right_homogeneous] |
+| Matrix-valued | [`tensor_matrix_product`][tensordev.core.universal.Universal.tensor_matrix_product] |
+| | [`tensor_matrix_product_homogeneous`][tensordev.core.universal.Universal.tensor_matrix_product_homogeneous] |
+| | [`tensor_matrix_product_left`][tensordev.core.universal.Universal.tensor_matrix_product_left] |
+| | [`tensor_matrix_product_left_homogeneous`][tensordev.core.universal.Universal.tensor_matrix_product_left_homogeneous] |
+| | [`tensor_matrix_product_right`][tensordev.core.universal.Universal.tensor_matrix_product_right] |
+| | [`tensor_matrix_product_right_homogeneous`][tensordev.core.universal.Universal.tensor_matrix_product_right_homogeneous] |
+| Layout | [`tensor_stack`][tensordev.core.universal.Universal.tensor_stack] |
+| | [`tensor_moveaxis`][tensordev.core.universal.Universal.tensor_moveaxis] |
+| | [`tensor_densify`][tensordev.core.universal.Universal.tensor_densify] |
+| | [`tensor_from_flat`][tensordev.core.universal.Universal.tensor_from_flat] |
+| | [`tensor_to_flat`][tensordev.core.universal.Universal.tensor_to_flat] |
+| | [`tensor_slice`][tensordev.core.universal.Universal.tensor_slice] |
+| | [`tensor_from_standard_coordinates`][tensordev.core.universal.Universal.tensor_from_standard_coordinates] |
+| | [`tensor_to_standard_coordinates`][tensordev.core.universal.Universal.tensor_to_standard_coordinates] |
+| | [`tensor_partially_symmetrize`][tensordev.core.universal.Universal.tensor_partially_symmetrize] |
+| | [`tensor_partially_symmetrize_homogeneous`][tensordev.core.universal.Universal.tensor_partially_symmetrize_homogeneous] |
+| | [`tensor_to_ordered`][tensordev.core.universal.Universal.tensor_to_ordered] |
 
 `td.tensor_flatten` is also bound, as an alias of `tensor_to_flat`.
 

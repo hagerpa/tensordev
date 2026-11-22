@@ -110,8 +110,6 @@ bidegree, partially symmetrized, and shear cores, including products, series,
 inner products, and coordinate conversions. Each core multiplies in the
 coordinates it stores: its signatures satisfy Chen's identity with its
 `tensor_product` and the shuffle identity with its `tensor_shuffle_product`.
-On shear and partially symmetrized cores these products are therefore not the
-concatenation and shuffle of the stored arrays.
 
 Use `make_core` to construct a core without changing the background default.
 `set_default_core` accepts the same construction arguments and installs the
@@ -168,8 +166,7 @@ capacity). Use `td.core_expected_memory(...)` before constructing large
 capacities; it reports retained plan memory in MiB by default.
 
 `shear_core(core, ...)` and `symmetrize_core(core, ...)` derive a matching core
-from an existing one and inherit its compatible configuration; `shear_core` also
-reuses the plan stores of a bidegree source.
+from an existing one and inherit its compatible configuration.
 <!-- --8<-- [end:core_plans] -->
 
 <!-- --8<-- [start:shear_pairing] -->
@@ -193,10 +190,9 @@ words = shear.tensor_shuffle_product(alpha, beta, trunc=2)
 values = shear.tensor_shear_pairing(words, standard_sig)
 ```
 
-With `dims=(2, 1)`, `alpha` is the letter 0 of the first group and `beta` the letter 2 of the
-second. On a shear core, `tensor_shuffle_product` is the product $\bullet$ dual to the shear
-pairing, and $0 \bullet 2$ is the single word $02$, not the shuffle $02 + 20$. Its shear coordinate
-is the product of the two increments, so `values` is $0.2 \cdot 0.3 = 0.06$.
+With `dims=(2, 1)`, `alpha` is the letter 0 and `beta` the letter 2. On a shear core,
+`tensor_shuffle_product` gives the single word $02$, whose shear coordinate is the product of the
+two increments, so `values` is $0.2 \cdot 0.3 = 0.06$.
 
 `tensor_inner_product` is the Euclidean pairing for tensors in the same
 coordinates. When tuple operands omit the scalar level,
@@ -214,7 +210,11 @@ the environment-selected default.
 
 ### `tensordev.development` — signature development
 
-Compute truncated signatures with optional blocking. `block_size` splits the path into blocks of steps and returns one signature per block. With the default `accumulate=True`, consecutive blocks are chained by Chen's identity, so each output is the signature from the start of the path to the end of its block; with `accumulate=False`, each output is the signature of its own block.
+Compute truncated signatures with optional blocking.
+
+<!-- --8<-- [start:blocking] -->
+`block_size` splits the path into blocks of steps and returns one signature per block. With the default `accumulate=True`, consecutive blocks are chained by Chen's identity, so each output is the signature from the start of the path to the end of its block; with `accumulate=False`, each output is the signature of its own block.
+<!-- --8<-- [end:blocking] -->
 
 <!-- --8<-- [start:signature_identities] -->
 ```python
@@ -245,8 +245,7 @@ np.testing.assert_allclose(
     atol=1e-6,
 )  # ✓
 
-# shuffle identity via tensor_shuffle_product and tensor_inner_product, on the
-# first block: the full trigonometric paths are closed loops, the first half is not
+# shuffle identity on the first block (the full paths are closed loops)
 # e1, e2 are the letters 0 and 1 (basis vectors), broadcast over the batch dimension
 e1 = td.tensor_densify((None, jnp.array([1., 0.])))
 e2 = td.tensor_densify((None, jnp.array([0., 1.])))
@@ -269,9 +268,9 @@ np.testing.assert_allclose(
 Wordwise execution (`execution="wordwise"`) parallelizes over words and paths
 for ordinary signatures and `q=1` FSSK signatures, across all supported core
 types. This alpha option requires eager float32/float64 calls on one NVIDIA
-GPU (compute capability 8.0+); its test suite passes on an NVIDIA A40. Defaults are
-unchanged, and unsupported requests raise; see the function docstrings for
-restrictions.
+GPU (compute capability 8.0+); its test suite passes on an NVIDIA A40. The default
+`execution="auto"` does not select it, and unsupported requests raise; see the function
+docstrings for restrictions.
 <!-- --8<-- [end:wordwise] -->
 
 <!-- --8<-- [start:free_development] -->
@@ -309,9 +308,9 @@ State-space signatures are Volterra signatures whose convolution kernel is a *fi
 $$K_{A,b}^\Lambda(t,s) = \sum_{r=1}^q \bigl(\mathbf{1}^\top e^{-\Lambda(t-s)} b_r\bigr) A_r,$$
 
 with dense or Jordan state-space operators $\Lambda$. This package propagates
-and reads out a hidden state, which makes online evaluation of these
-Volterra signatures efficient and, for piecewise-linear paths, exact up to the
-contour quadrature of the per-step coefficients.
+and reads out a hidden state $Z_t$, so each new increment costs the same
+regardless of the length of the history; for piecewise-linear paths the result
+is exact up to the contour quadrature of the per-step coefficients.
 <!-- --8<-- [end:sss_overview] -->
 
 <!-- --8<-- [start:sss_example] -->

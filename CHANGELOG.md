@@ -28,29 +28,31 @@
   `(u - s)**rho`, as `FractionalKernel` and the interpolation basis do.
   Order-1 and order-2 `vsig` and `vsig_fft` results for Gamma kernels were
   wrong before.
-- `GammaKernel` coefficients are exact. A positive series in the fractional
-  closed form replaces Gauss-Legendre quadrature, which lost accuracy at the
-  endpoint singularity (up to 8% relative error for small `beta`). Beyond
-  the series range (`rate * (t - s) > 13.8` in float64) a tanh-sinh rule
-  with `quad_order` nodes is used; its default is now 64. Gradients on
-  masked time triples are zero instead of NaN.
-- Derivatives with respect to `beta`: the new
-  `tensordev.util.special.betainc` is differentiable in all arguments, and
-  the higher-order basis exponents follow `beta`. `jax.grad` now works
-  through `FractionalKernel`, `GammaKernel`, `vsig` and `vsig_fft` for
-  `order` 0, 1 and 2.
+- `GammaKernel` coefficients are summed from a series of `FractionalKernel`
+  coefficients, exact to rounding for `rate * (t - s) <= 13.8` in float64
+  (18.9 in float32). They were computed by Gauss-Legendre quadrature, with
+  up to 8% relative error for small `beta`. Larger `rate * (t - s)` use a
+  quadrature with `quad_order` nodes, whose default is now 64 (was 32).
+  `jax.grad` is zero instead of NaN for time triples `(s, t, tau)` outside
+  `s < t <= tau`, whose coefficients are zero.
+- `jax.grad` with respect to `beta` works through `FractionalKernel`,
+  `GammaKernel`, `vsig` and `vsig_fft` for `order` 0, 1 and 2, including
+  the dependence of the order-1 and order-2 interpolation bases on `beta`.
+  The new `tensordev.util.special.betainc`, the regularized incomplete beta
+  function `I_x(a, b)`, is differentiable in `a`, `b` and `x`.
 - The alpha wordwise kernels (`execution="wordwise"`) failed to compile on
-  NVIDIA GPUs with JAX 0.10, because the Triton backend rejects value-level
-  scatter and slicing. The kernels now lower on JAX 0.10 and 0.11 with
-  unchanged results, and a CPU-runnable test exports every kernel family for
-  CUDA.
-- Keep dense state-space matrix functions and shifted solves connected to the
-  current matrix parameter, including under JAX transformations.
-- Support reverse-mode and higher derivatives of state-space phi functions,
-  with stable values near zero and correct Jordan exponential derivatives at
-  zero time.
-- Preserve explicit working precision for state-space time increments and
-  allow dense and oscillatory Jordan construction under JIT.
+  NVIDIA GPUs with JAX 0.10. They lower for CUDA with JAX 0.10 and 0.11 and
+  run on an NVIDIA A40 with JAX 0.10, with unchanged results.
+- `DenseLambda` computes `expm`, `phi1`, `phi2` and the shifted solves from
+  `matrix` in every call instead of from an eigendecomposition stored at
+  construction, so values and gradients follow the current `matrix`, also
+  under JAX transformations.
+- `phi1` and `phi2` support reverse-mode and higher derivatives and stay
+  accurate for `dt * Lambda` near zero; the derivative of the
+  `JordanLambda` exponential at `dt = 0` is correct.
+- `dt` keeps the precision of the requested `dtype`, also when the `Lambda`
+  parameters are `float32`. A `DenseLambda` and a `JordanLambda` with
+  oscillatory blocks can be built inside `jax.jit`.
 - `float32` results on NVIDIA Ampere and newer GPUs kept only about three
   significant digits (state-space signatures up to 2% relative error),
   because XLA runs `float32` matrix products in TF32 by default. All matrix
@@ -59,7 +61,7 @@
 
 ### Documentation
 
-- A documentation site, built with MkDocs from `docs/`: guides for tensor
+- Documentation at <https://hagerpa.github.io/tensordev/>: guides for tensor
   algebra, signatures, state-space and Volterra signatures, signature kernels
   and performance, and an API reference.
 

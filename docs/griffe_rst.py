@@ -8,8 +8,8 @@ the API reference only (the source stays unchanged):
 - literal blocks introduced by a trailing ``::`` to fenced code blocks;
 - double backticks in the type of a Parameters, Returns, ... item, which the type column shows
   verbatim, and around a whole line of an indented code block;
-- in prose, ``<`` before a letter (raw HTML to Markdown) and ``**`` between word characters, as
-  in ``d**k`` (bold to Markdown), are escaped.
+- in prose, ``<`` before a letter, which Markdown reads as an HTML tag, becomes ``&lt;``, and
+  ``**`` between word characters, as in ``d**k``, which Markdown reads as bold, is escaped.
 """
 import re
 
@@ -31,21 +31,30 @@ def _role(match):
     return f"`{target}`"
 
 
+def _indent(line):
+    return len(line) - len(line.lstrip())
+
+
 def _indented_block(lines, i, indent):
-    """Lines after line i that are blank or indented deeper than `indent`."""
+    """Return ``(end, body)`` of the indented block after line ``i``.
+
+    The block is the lines that are blank or indented deeper than ``indent``. ``body`` drops its
+    leading and trailing blank lines and the common indentation; ``end`` is the index after it.
+    """
     j = i + 1
-    while j < len(lines) and (not lines[j].strip() or len(lines[j]) - len(lines[j].lstrip()) > len(indent)):
+    while j < len(lines) and (not lines[j].strip() or _indent(lines[j]) > len(indent)):
         j += 1
     while j > i + 1 and not lines[j - 1].strip():
         j -= 1
     body = lines[i + 1:j]
     while body and not body[0].strip():
         body = body[1:]
-    depth = min((len(ln) - len(ln.lstrip()) for ln in body if ln.strip()), default=0)
+    depth = min((_indent(ln) for ln in body if ln.strip()), default=0)
     return j, [ln[depth:] for ln in body]
 
 
 def convert(text):
+    """Rewrite Sphinx roles, ``:math:``, ``.. math::`` and ``::`` literal blocks as Markdown."""
     lines = text.split("\n")
     out, i = [], 0
     while i < len(lines):
@@ -75,8 +84,8 @@ def convert(text):
     return "\n".join(out)
 
 
-ITEM_SECTIONS = {"parameters", "other parameters", "attributes", "returns", "yields", "receives",
-                 "raises", "warns"}
+NAMED_SECTIONS = {"parameters", "other parameters", "attributes"}
+ITEM_SECTIONS = NAMED_SECTIONS | {"returns", "yields", "receives", "raises", "warns"}
 UNDERLINE = re.compile(r"^[ \t]*-{3,}[ \t]*$")
 FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 PROTECTED = re.compile(r"(?<!`)(`+)(?!`).+?(?<!`)\1(?!`)|\$[^$\n]+\$")   # code spans, inline math
@@ -86,26 +95,25 @@ ANGLE = re.compile(r"<(?=[A-Za-z])(?!https?://)")
 POWER = re.compile(r"(?<=[\w)\]])\*\*(?=[\w(\[])")
 
 
-def _indent(line):
-    return len(line) - len(line.lstrip())
+def _escape(text):
+    return POWER.sub(r"\\*\\*", ANGLE.sub("&lt;", text))
 
 
 def _prose(line):
-    """Escape raw-HTML `<` and exponent `**` outside code spans and inline math."""
+    """Escape raw-HTML ``<`` and exponent ``**`` outside code spans and inline math."""
     out, last = [], 0
     for match in PROTECTED.finditer(line):
-        out += [POWER.sub(r"\\*\\*", ANGLE.sub("&lt;", line[last:match.start()])), match.group(0)]
+        out += [_escape(line[last:match.start()]), match.group(0)]
         last = match.end()
-    out.append(POWER.sub(r"\\*\\*", ANGLE.sub("&lt;", line[last:])))
-    return "".join(out)
+    return "".join(out) + _escape(line[last:])
 
 
 def _item(line, section):
-    """Drop the backticks of the type part of a section item, `name : type` or a bare type."""
+    """Drop the backticks of the type part of a section item, ``name : type`` or a bare type."""
     name, sep, kind = line.partition(" : ")
     if not sep:
         name, kind = "", line
-        if section in {"parameters", "other parameters", "attributes"}:
+        if section in NAMED_SECTIONS:
             return line
     plain = BACKTICKS.sub(lambda m: m.group(1) or m.group(2), kind)
     if plain != kind and _is_expression(plain):
@@ -124,6 +132,7 @@ def _is_expression(text):
 
 
 def tidy(text):
+    """Drop backticks from item types and whole-line code, and escape ``<`` and ``**`` in prose."""
     lines = text.split("\n")
     out, section, fence, base, previous = [], None, None, 0, "blank"
     for i, line in enumerate(lines):

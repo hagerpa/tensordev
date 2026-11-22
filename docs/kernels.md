@@ -1,15 +1,15 @@
 # Signature kernels
 
 A signature kernel compares two paths through the inner product of their signatures,
-$k(X, Y) = \langle \mathrm{Sig}(X), \mathrm{Sig}(Y)\rangle$, computed without truncation by solving a PDE. This page
-covers the kernel classes in `tensordev.kernel`, the empirical statistics they share, gradients,
-and batching.
+$k(X, Y) = \langle \mathrm{Sig}(X), \mathrm{Sig}(Y)\rangle$, computed without truncation by
+solving a PDE. This page covers the kernel classes in `tensordev.kernel`, the empirical statistics
+they share, gradients, and batching.
 
 --8<-- "README.md:kernels_overview"
 
 ## Empirical statistics
 
-The README example sets up the session for this page: two batches `X` and `Y` of four paths in
+The example below sets up the session for this page: two batches `X` and `Y` of four paths in
 $\mathbb{R}^2$, and a signature kernel `k`.
 
 --8<-- "README.md:kernels_example"
@@ -68,9 +68,8 @@ np.testing.assert_allclose(surface[:, -1, -1], vals, rtol=1e-12)  # and ends at 
 print(k(X, Y, evaluate="grid", pairwise=True).shape)  # (4, 4, 65, 65)
 ```
 
-The next README example also uses an FSSK kernel, which needs a finite state-space kernel. This
-one has a single exponential mode, $K(t, s) = e^{-(t-s)} I_2$;
-[State-space signatures](state-space.md) explains the constructors.
+The next example also uses [`FSSKSigKernel`](#fssk-kernel), with the finite state-space kernel
+$K(t, s) = e^{-(t-s)} I_2$; [State-space signatures](state-space.md) explains the constructors.
 
 ```python
 from tensordev.sss import StateSpaceSignature
@@ -98,9 +97,16 @@ $$
 as shown by C. Salvi, T. Cass, J. Foster, T. Lyons and W. Yang,
 [*The Signature Kernel is the Solution of a Goursat PDE*](https://arxiv.org/abs/2006.14794),
 SIAM Journal on Mathematics of Data Science, 2021.
-[`SigKernel`][tensordev.SigKernel] solves this problem for piecewise linear paths on the grid of
-path points, with a second-order finite-difference stencil inspired by `sigkernel`
-([Acknowledgements](background.md#acknowledgements)).
+[`SigKernel`][tensordev.SigKernel] solves this problem on the grid of path points by the update
+
+$$
+u_{i+1,j+1}=(u_{i+1,j}+u_{i,j+1})\bigl(1+\tfrac12G_{ij}+\tfrac1{12}G_{ij}^2\bigr)
+-u_{i,j}\bigl(1-\tfrac1{12}G_{ij}^2\bigr),
+$$
+
+with $G_{ij}=\langle \Delta x_i, \Delta y_j\rangle$ for grid cell $(i, j)$, as in `sigkernel`
+([Acknowledgements](background.md#acknowledgements)); `static_kernel` changes $G_{ij}$, see
+[Static kernels](#static-kernels).
 
 | Field | Default | Description |
 |---|---|---|
@@ -154,7 +160,10 @@ $$
 With the default `LinearKernel(scale=1.0)`, $G_{ij} = \langle \Delta x_i, \Delta y_j\rangle$
 exactly.
 
-With `dyadic_order` $(a, b)$, every sub-cell of cell $(i, j)$ receives $G_{ij}/2^{a+b}$, as in `sigkernel`. For `LinearKernel` this is the inner product of the sub-increments; for a non-linear $\kappa$ it is not the mixed difference of $\kappa$ at the refined points, so refining the solver grid is not the same as refining the input path.
+With `dyadic_order` $(a, b)$, every sub-cell of cell $(i, j)$ receives $G_{ij}/2^{a+b}$, as in
+`sigkernel`. For `LinearKernel` this is the inner product of the sub-increments; for a non-linear
+$\kappa$ it is not the mixed difference of $\kappa$ at the refined points, so refining the solver
+grid is not the same as refining the input path.
 
 | Class | Parameters | $\kappa(x, y)$ |
 |---|---|---|
@@ -163,7 +172,9 @@ With `dyadic_order` $(a, b)$, every sub-cell of cell $(i, j)$ receives $G_{ij}/2
 | [`RBF_SQR_Kernel`][tensordev.kernel.RBF_SQR_Kernel] | `sigma1=1.0`, `sigma2=1.0` | $\exp(-\lVert x - y\rVert^2/\sigma_1)\,\exp(-\lVert x^2 - y^2\rVert^2/\sigma_2)$, squares elementwise |
 | [`RBF_CEXP_Kernel`][tensordev.kernel.RBF_CEXP_Kernel] | `sigma1=1.0`, `sigma2=1.0`, `n_freqs=20`, `channels=1` | $\exp(-\lVert Tx - Ty\rVert^2/\sigma_2)$, with $T$ below |
 
-All four act on points of $\mathbb{R}^d$. To define another kernel, subclass [`StaticKernel`][tensordev.kernel.StaticKernel] and implement `batch_kernel` and `Gram_matrix`; the solvers call them with path values of shape `batch + (length, dim)`.
+All four act on points of $\mathbb{R}^d$. To define another kernel, subclass
+[`StaticKernel`][tensordev.kernel.StaticKernel] and implement `batch_kernel` and `Gram_matrix`;
+the solvers call them with path values of shape `batch + (length, dim)`.
 
 For `RBF_SQR_Kernel` and `RBF_CEXP_Kernel` a node value $x$ may be a function with `channels`
 components sampled at $s_i=i/(L-1)$, $i=0,\dots,L-1$; a path of shape
@@ -177,7 +188,11 @@ $$
 
 Two consequences of the construction:
 
-- `SigKernel` and `FreeKernel` rebuild the points $x_i$ from the increments, starting at the origin. $\kappa$ therefore sees every path translated to start at 0, and these kernels do not depend on the starting points. `FSSKSigKernel` applies $\kappa$ to the projected path values $A_r x_i$ as given, as in *Computational Aspects of the Volterra Signature*, so with a non-linear $\kappa$ such as `RBFKernel` its value depends on the starting points; with `increment_input=True` its points also start at the origin.
+- `SigKernel` and `FreeKernel` rebuild the points $x_i$ from the increments, starting at the
+  origin. $\kappa$ therefore sees every path translated to start at 0, and these kernels do not
+  depend on the starting points. `FSSKSigKernel` applies $\kappa$ to the projected path values
+  $A_r x_i$ as given, so with a non-linear $\kappa$ such as `RBFKernel` its value depends on the
+  starting points; with `increment_input=True` its points also start at the origin.
 - `LinearKernel(scale=c)` gives the kernel of the paths scaled by $c$.
 
 ```python
@@ -203,17 +218,42 @@ level-1 path, or a tuple or list of levels; level $k$ has shape `batch + (S+1, d
 sample axis is added. The fields are those of `SigKernel`. `static_kernel` only applies when both
 inputs have a single level.
 
-For a level-1 path, `FreeKernel` and `SigKernel` agree. For tensor-valued paths, the PDE couples
-the scalar kernel $u$ with tensor-valued components $f$ and $g$. This is the system of
-P. K. Friz and P. P. Hager, [*Expected Signature Kernels for Rough Paths*](https://arxiv.org/abs/2509.07893):
-`FreeKernel` solves its truncated form, Theorem 3.8 there, in which $u$ is written $w$, $g$ is
-written $\widetilde f$, and $D$ is written $\mathcal S$. For piecewise log-linear paths it is the
-system of Lemercier, Lyons and Salvi (see [Higher-order kernel](#higher-order-kernel)); with the
-integrated characteristic velocities of two continuous inhomogeneous Lévy processes as inputs,
-$u$ approximates their expected signature kernel. For tensor-valued paths the solver advances
-$(u, f, g)$ cell by cell with a predictor–corrector step adapted from `high-order-sigkernel`.
-The check below compares the free kernel with the inner product of free developments truncated
-at level 12:
+For a level-1 path, `FreeKernel` and `SigKernel` agree. For tensor-valued paths $Z$ with $M$
+levels and $W$ with $N$ levels, $u(s,t)=\langle D(Z|_{[0,s]}), D(W|_{[0,t]})\rangle$ is coupled to
+tensors $f$ with levels $1,\dots,N-1$ and $g$ with levels $1,\dots,M-1$:
+
+$$
+\partial_s\partial_t u=\langle\dot Z_s,\dot W_t\rangle\,u+\langle f,\mathrm{R}_{\dot Z_s}\dot W_t\rangle
++\langle g,\mathrm{R}_{\dot W_t}\dot Z_s\rangle,\qquad
+\partial_s f=u\,\dot Z_s+f\otimes\dot Z_s+\mathrm{L}_g\dot Z_s,\qquad
+\partial_t g=u\,\dot W_t+g\otimes\dot W_t+\mathrm{L}_f\dot W_t,
+$$
+
+with $u=1$ on both axes, $f=0$ at $s=0$, $g=0$ at $t=0$, $\mathrm{L}$, $\mathrm{R}$ the
+adjoints of [Module-level operations](tensor-algebra.md#module-level-operations), and the right-hand
+sides for $f$ and $g$ projected to these levels, which drops the scalar parts of $\mathrm{L}_g\dot Z_s$
+and $\mathrm{L}_f\dot W_t$ (the reduced adjoints $\mathrm{L}^\circ$ of the theorem). This is
+Theorem 3.8 of P. K. Friz and P. P. Hager,
+[*Expected Signature Kernels for Rough Paths*](https://arxiv.org/abs/2509.07893), where $u$ is
+written $w$, $g$ is written $\widetilde f$ and $D$ is written $\mathcal S$. For piecewise
+log-linear paths it is the system of Lemercier, Lyons and Salvi (see
+[Higher-order kernel](#higher-order-kernel)). A continuous process with independent increments,
+drift $b$ and covariance $a$ has the expected signature $D(Z)$ with
+$Z_t=\bigl(\int_0^t b_r\,\mathrm{d}r, \tfrac12\int_0^t a_r\,\mathrm{d}r\bigr)$, so for two such
+processes $u$ is their expected signature kernel.
+
+For tensor-valued paths the solver advances $(u, f, g)$ cell by cell. With $F$ the right-hand
+side of the equation for $u$, evaluated with the increments $\Delta Z_i$ and $\Delta W_j$ of the
+cell,
+
+$$
+u_{i+1,j+1}=u_{i+1,j}+u_{i,j+1}-u_{i,j}+\tfrac14\bigl(F_{i,j}+F_{i+1,j}+F_{i,j+1}+F_{i+1,j+1}\bigr),
+$$
+
+where $f$ and $g$ follow the trapezoidal rule along the cell edges with an Euler predictor, and
+$F_{i+1,j+1}$ uses these new $f$, $g$ and the Euler prediction of $u$: a predictor–corrector step
+adapted from `high-order-sigkernel`. The check below compares the free kernel with the inner product of free
+developments truncated at level 12:
 
 ```python
 np.testing.assert_allclose(
@@ -248,7 +288,7 @@ also returns $f$ and $g$. Its increment flag is called `increment_in`.
 from tensordev.kernel import free_kernel
 
 gram_fn = free_kernel((X,), (Y,), pairwise=True, dyadic_order=1)
-np.testing.assert_allclose(gram_fn, gram_free, rtol=1e-12)  # gram_free from the README example
+np.testing.assert_allclose(gram_fn, gram_free, rtol=1e-12)  # gram_free from the example above
 ```
 
 ## Higher-order kernel
@@ -258,8 +298,8 @@ np.testing.assert_allclose(gram_fn, gram_free, rtol=1e-12)  # gram_free from the
 kernel of the two approximations. For each input separately, it splits the intervals into
 blocks of `log_steps` steps, computes the block signatures truncated at `log_degree`, and takes
 their tensor logarithms as the increments of the new path. The PDE grid then has one row per
-block of `X` and one column per block of `Y`, and each cell carries tensor-valued data. For the log-PDE method, see M. Lemercier,
-T. Lyons and C. Salvi,
+block of `X` and one column per block of `Y`, and each cell carries tensor-valued data. For the
+log-PDE method, see M. Lemercier, T. Lyons and C. Salvi,
 [*Log-PDE Methods for Rough Signature Kernels*](https://arxiv.org/abs/2404.02926), SIAM Journal
 on Numerical Analysis, 2026.
 
@@ -296,19 +336,55 @@ print(gram_ho.shape)  # (4, 4)
 ## FSSK kernel
 
 [`FSSKSigKernel`][tensordev.FSSKSigKernel] is the kernel induced by the Volterra signature of a
-finite state-space kernel ([State-space signatures](state-space.md)). Like the other kernels, it
-solves a PDE on the grid of path points: the matrix Goursat system of P. P. Hager, F. N. Harang,
-L. Pelizzari and S. Tindel, *Computational Aspects of the Volterra Signature* (Part II below),
-section on the Volterra signature kernel.
+finite state-space kernel ([State-space signatures](state-space.md)). For paths $x$ and $y$ it
+solves, on the grid of path points, the system of P. P. Hager, F. N. Harang, L. Pelizzari and
+S. Tindel, *Computational Aspects of the Volterra Signature*, for $R\times R$ matrices $K$, $\Psi$
+and $\Phi$ of $(s, t)$:
+
+$$
+\partial_s\partial_t K=\Lambda K\Lambda^\top-\gamma\eta+\partial_s\Psi+\partial_t\Phi,\qquad
+\partial_s\Psi=-\Lambda\Psi+\gamma\eta,\qquad
+\partial_t\Phi=-\Phi\Lambda^\top+\gamma\eta,
+$$
+
+with $\eta=1+\mathbf 1^\top K\mathbf 1$,
+$\gamma(s,t)=\sum_{r,p=1}^{q}\partial_s\partial_t\kappa(A_rx_s,A_py_t)\,b_rb_p^\top$ for the
+static kernel $\kappa$, which is $\sum_{r,p}\langle A_r\dot x_s,A_p\dot y_t\rangle\,b_rb_p^\top$ for
+the default `LinearKernel`, $K=0$ on both axes, $\Psi=0$ at $s=0$ and $\Phi=0$ at $t=0$. The
+kernel value is $\eta$ at the end of both paths.
 
 | Field | Default | Description |
 |---|---|---|
 | `kernel` | required | The [`FSSK`][tensordev.FSSK], for example `sss.kernel` of a `StateSpaceSignature`. |
 | `dt_x`, `dt_y` | required | Time steps of `X` and `Y`: a scalar for a uniform grid, or a 1-D array with one width per interval. |
-| `scheme` | `"heun"` | `"heun"` is the predictor–corrector scheme of Part II, second order. `"etd1"` is the first-order scheme with exponential integration of the auxiliary equations that Part II uses for comparison. |
-| `precompute_propagators` | `True` | Precompute the matrix exponentials and $\varphi$-functions once per step size and reuse them in every cell: faster for uniform steps, more memory. |
-| `static_kernel` | `LinearKernel(scale=1.0)` | Kernel $\kappa$ applied to the projected path values $A_r x$, $r = 1, \dots, q$. The cell coefficient is $\gamma_{ij} = b^\top G_{ij} b$, where $G_{ij}^{r,p}$ is the mixed difference of $\kappa(A_r x, A_p y)$ over cell $(i, j)$, as in Part II. |
+| `scheme` | `"heun"` | `"heun"` (second order) or `"etd1"` (first order), below. |
+| `precompute_propagators` | `True` | Precompute $e^{-\Lambda h}$, $\varphi_1(-\Lambda h)$ and $\varphi_2(-\Lambda h)$ once per step size $h$ and reuse them in every cell: faster for uniform steps, more memory. |
+| `static_kernel` | `LinearKernel(scale=1.0)` | Kernel $\kappa$ applied to the projected path values $A_r x$, $r = 1, \dots, q$. The cell coefficient is $\gamma_{ij} = b^\top G_{ij} b$, where $G_{ij}^{r,p}$ is the mixed difference of $\kappa(A_r x, A_p y)$ over cell $(i, j)$. |
 | `backend`, `dyadic_order`, `increment_input`, `num_devices` | as `SigKernel` | |
+
+On cell $(i, j)$, of width $h$ in $s$ and $k$ in $t$, $\gamma_{ij}$ is the integral of $\gamma$
+over the cell, and the scheme carries the strip integrals
+$\Psi_{i,j+1}=\int_{t_j}^{t_{j+1}}\Psi(s_i,t)\,\mathrm{d}t$ and
+$\Phi_{i+1,j}=\int_{s_i}^{s_{i+1}}\Phi(s,t_j)\,\mathrm{d}s$. `"etd1"` sets
+
+$$
+\Psi_{i+1,j+1}=e^{-\Lambda h}\Psi_{i,j+1}+\varphi_1(-\Lambda h)\,\gamma_{ij}\eta_{i,j+1},\qquad
+\Phi_{i+1,j+1}=\Phi_{i+1,j}\,e^{-\Lambda^\top k}+\gamma_{ij}\eta_{i+1,j}\,\varphi_1(-\Lambda^\top k),
+$$
+
+with $\varphi_1(z)=(e^z-1)/z$, the exact solution of the integrated equations for $\Psi$ and
+$\Phi$ with the source held fixed, and
+
+$$
+K_{i+1,j+1}=K_{i+1,j}+K_{i,j+1}-K_{i,j}+(\Psi_{i+1,j+1}-\Psi_{i,j+1})+(\Phi_{i+1,j+1}-\Phi_{i+1,j})
++\tfrac12\sum_{c}\bigl(hk\,\Lambda K_c\Lambda^\top-\gamma_{ij}\eta_c\bigr)
+$$
+
+over the corners $c=(i+1,j),(i,j+1)$. `"heun"` lets the source of $\Psi$ vary linearly in
+$s$, from $H_0=\gamma_{ij}(\eta_{i,j}+\eta_{i,j+1})/2$ to $H_1=\gamma_{ij}(\eta_{i+1,j}+\eta_{i+1,j+1})/2$
+with $\eta_{i+1,j+1}$ from a first-order prediction, which adds $\varphi_2(-\Lambda h)(H_1-H_0)$,
+$\varphi_2(z)=(e^z-1-z)/z^2$; $\Phi$ is treated likewise in $t$, and the average for $K$ runs over
+all four corners, with the predicted $K$ and $\eta$ at $(i+1, j+1)$.
 
 The path dimension must equal `kernel.path_dim`; otherwise the input check raises a
 `ValueError`. The check below compares the FSSK kernel with the inner product of Volterra
@@ -341,11 +417,9 @@ np.testing.assert_allclose(
 
 The function [`fssk_sigkernel`][tensordev.fssk_sigkernel] takes the same arguments as keywords,
 with `increment_in` for the increment flag. Its `precompute_propagators` defaults to `False`.
-With `return_fg=True` it returns the tuple `(η, K, A, B)` of the matrix Goursat system of
-Part II: `K` is the $R \times R$ matrix there, with
-$\eta = 1 + \mathbf 1^\top K \mathbf 1$, and `A` and `B` are the auxiliary matrices written
-$\Psi$ and $\Phi$ there, transported along $s$ and $t$. They are not the matrices $A_r$ of the
-FSSK.
+With `return_fg=True` it returns the tuple `(η, K, A, B)` of the scheme above, where `A` and `B`
+hold the strip integrals of $\Psi$ and $\Phi$ at each node (zero on the first column and the first
+row); they are not the matrices $A_r$ of the FSSK.
 
 ```python
 from tensordev.kernel import fssk_sigkernel
@@ -384,8 +458,8 @@ np.testing.assert_allclose(jnp.vdot(grad_X, direction), central, rtol=1e-6)
 ```
 
 Gradients of `FSSKSigKernel` with respect to the state-space operator $\Lambda$ work in forward
-and reverse mode: the rates, decays and frequencies of an `FSSK` built with `from_jordan`, and the
-matrix of one built with `from_matrix`.
+and reverse mode, for the parameters of $\Lambda$ listed under
+[Streaming evaluation](state-space.md#streaming-evaluation).
 
 ## Batching
 
@@ -421,11 +495,11 @@ np.testing.assert_allclose(
 ### Ragged and continuous inputs
 
 [`bucket_pad_ragged_paths`][tensordev.util.bucket_pad_ragged_paths] takes a list of paths of
-different lengths, optionally sorts them by length, groups them into chunks of at most
-`chunk_size` paths, and pads each path by repeating its last value. Padding adds zero
-increments, which leave the kernel unchanged. `return_indices=True` also returns the original
-position of every path in each chunk, and `target_length` pads all chunks to one fixed length
-to keep batch shapes stable, for example to avoid recompilation.
+different lengths, optionally sorts them by length, and groups them into chunks of at most
+`chunk_size` paths, padded as described under [Example paths](signatures.md#example-paths), which
+leaves the kernel unchanged. `return_indices=True` also returns the original position of every
+path in each chunk, and `target_length` pads all chunks to one fixed length to keep batch shapes
+stable, for example to avoid recompilation.
 
 ```python
 from tensordev.util import bucket_pad_ragged_paths
@@ -440,9 +514,8 @@ direct = jnp.stack([k.compute_Gram(path, Y)[0] for path in paths])
 np.testing.assert_allclose(k.compute_Gram(padded, Y), direct, atol=1e-12)
 ```
 
-[`velocity_to_increments`][tensordev.util.velocity_to_increments] integrates a velocity
-`t -> tuple of levels` over the intervals of a grid and returns one increment array per level,
-ready for `increment_input=True`. With two levels, the result is a tensor-valued path for
+With two levels, [`velocity_to_increments`][tensordev.util.velocity_to_increments]
+([Example paths](signatures.md#example-paths)) gives the increments of a tensor-valued path for
 `FreeKernel`:
 
 ```python
@@ -473,9 +546,8 @@ Then pass `num_devices` to any kernel class. If it exceeds the visible device co
 `tensordev` warns and uses the devices it sees. A batch smaller than `num_devices` runs on one
 device, and other batches are padded to a multiple of `num_devices`. The virtual CPU devices
 divide the CPU thread pool among themselves, so more devices give more batch parallelism but
-fewer threads for the matrix operations on each device. The module documentation advises more
-devices when the batch is large relative to the path size, and fewer for a small batch of large
-problems.
+fewer threads for the matrix operations on each device: use more devices when the batch is large
+relative to the size of each problem, and fewer for a small batch of large problems.
 
 ```python
 k_devices = SigKernel(dyadic_order=1, num_devices=jax.device_count())

@@ -41,9 +41,9 @@ $$
 \mathrm{VSig}(x;K)^{\tau}_{0,t}=1+\sum_{r=1}^{q}Z^{r}_{t}\,e^{-\Lambda(\tau-t)}\,b_r .
 $$
 
-The recursion advances $Z$ over each step of a piecewise-linear path. There is no time
-discretization of the history, unlike the generic schemes of [`vsig`][tensordev.vsig] (see
-[Comparison with vsig](#comparison-with-vsig)). The per-step coefficients are contour integrals
+The recursion advances $Z$ over each step of a piecewise-linear path;
+[Comparison with vsig](#comparison-with-vsig) compares it with the schemes of
+[`vsig`][tensordev.vsig]. The per-step coefficients are contour integrals
 of resolvents of $-\Lambda\,\mathrm{d}t$, evaluated by the trapezoidal rule at the nodes
 
 $$
@@ -78,9 +78,9 @@ An FSSK holds its operator $\Lambda$ as a [`Lambda`][tensordev.sss.Lambda] objec
 provides $e^{-\Lambda\,\mathrm{d}t}$ (`expm`), shifted solves and the other operations the
 recursion needs. Two realizations exist:
 
-- [`DenseLambda`][tensordev.sss.DenseLambda] takes any dense `(R, R)` matrix. It caches an
-  eigendecomposition at construction for the operator actions and falls back to Padé-based
-  matrix functions and direct solves when the eigenvector matrix is ill-conditioned.
+- [`DenseLambda`][tensordev.sss.DenseLambda] takes any dense `(R, R)` matrix and evaluates
+  $e^{-\Lambda t}$, $\varphi_k(-\Lambda t)=\sum_{j\ge0}(-\Lambda t)^j/(j+k)!$ for $k=1,2$ and the
+  solves with $\zeta I+t\Lambda$ directly from the matrix.
 - [`JordanLambda`][tensordev.sss.JordanLambda] is block diagonal in real Jordan form. A real
   block with rate $\lambda$ and size $n$ is $\lambda I_n-N_n$, with $N_n$ the ones on the
   superdiagonal. An oscillatory pair with decay $a$, frequency $\omega>0$ and size $n$ is a
@@ -88,14 +88,9 @@ recursion needs. Two realizations exist:
   $\bigl(\begin{smallmatrix}a&-\omega\\ \omega&a\end{smallmatrix}\bigr)$ on the diagonal
   and $-I_2$ on the block superdiagonal; for $n=1$,
   $e^{-\Lambda t}=e^{-at}\bigl(\begin{smallmatrix}\cos\omega t&\sin\omega t\\ -\sin\omega t&\cos\omega t\end{smallmatrix}\bigr)$.
-  *Computational Aspects of the Volterra Signature* prints the transposed $2\times2$ block
-  ($-\Lambda=J_n(-a,\omega)$ with
-  $C(a,\omega)=\bigl(\begin{smallmatrix}a&-\omega\\ \omega&a\end{smallmatrix}\bigr)$). Both have
-  eigenvalues $a\pm i\omega$, but only the orientation used here turns the vector $b$ of that
-  paper's Prony lemma, which `from_prony` builds, into $\beta\cos\omega t+\delta\sin\omega t$;
-  the printed one gives $\beta\cos\omega t-\delta\sin\omega t$. Real blocks come first, then
-  oscillatory pairs, so $R$ is `sum(real_sizes) + 2 * sum(osc_sizes)`. Rates, decays and
-  frequencies are JAX arrays, so new values do not retrace; block sizes are static.
+  Real blocks come first, then oscillatory pairs, so $R$ is
+  `sum(real_sizes) + 2 * sum(osc_sizes)`. Rates, decays and frequencies are JAX arrays, so new
+  values do not retrace; block sizes are static.
 
 ```python
 from tensordev.sss import DenseLambda, JordanLambda
@@ -254,8 +249,9 @@ lagged = sss.vsig(X, dt=dt, tau_dt=jnp.array([0.0, 0.1, 0.2, 0.3]))
 np.testing.assert_allclose(lagged[2][0], result[2][0], atol=1e-12)  # lag 0 for path 0
 ```
 
-For `q = 1`, `execution="wordwise"` requests the alpha GPU implementation; the default is
-unchanged (see [Wordwise GPU execution](performance.md#wordwise-gpu-execution)).
+For `q = 1`, `execution="wordwise"` requests the alpha GPU implementation; the default
+`execution="auto"` runs the JAX implementation (see
+[Wordwise GPU execution](performance.md#wordwise-gpu-execution)).
 
 `trunc` is a positive integer for a total-degree core or a bidegree $(N, M)$ for a bidegree
 core, whose `dims` must sum to $m$. Kernels with `q = 1` accept total-degree and bidegree
@@ -276,8 +272,8 @@ for grade in rectangular.grades:
 [`fssk_vsig`][tensordev.fssk_vsig] and [`fssk_state`][tensordev.fssk_state] take the kernel,
 `trunc`, `core` and `seq_core` as arguments and otherwise the same keywords as the methods.
 `trunc` defaults to the core's default truncation and `initial_state` to zero. Unlike the method
-`states`, `fssk_state` does not prepend the seed by default (`output_starting_state=False`). The state is in
-first-on format: one array per degree $n=1,\dots,N$, without degree zero, of shape
+`states`, `fssk_state` does not prepend the seed by default (`output_starting_state=False`). The
+state is in first-on format: one array per degree $n=1,\dots,N$, without degree zero, of shape
 `batch + (q, 1, R, m**n)` for a total-degree core.
 
 ```python
@@ -313,9 +309,8 @@ for g, r in zip(generic, result):
     np.testing.assert_allclose(g, r, atol=1e-6, rtol=1e-6)
 ```
 
-The default `order=0` leaves a large gap on this grid. For FSSK kernels the state recursion
-avoids this error; the generic schemes serve kernels without a finite state, such as the
-fractional and gamma kernels.
+The default `order=0` leaves a large gap on this grid. The generic schemes serve kernels without
+a finite state, such as the fractional and gamma kernels.
 
 ## Streaming evaluation
 

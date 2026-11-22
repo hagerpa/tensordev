@@ -227,8 +227,7 @@ scope of their source unless you pass `precompute_shuffle`:
 
 - `shear_core` accepts a standard `Jax`, `JaxBigraded` or `JaxPartiallySymmetrizedBigraded` core.
   A total-degree source does not record the alphabet split, so pass `dims=(d', d'')`; an
-  unbounded `Jax()` also needs `max_trunc`. A bidegree source shares its compatible plan stores
-  with the new core.
+  unbounded `Jax()` also needs `max_trunc`.
 - `symmetrize_core` accepts an ordered bidegree core, `JaxBigraded` or `JaxShearBigraded`.
   Total-degree and already partially symmetrized sources raise a `TypeError`.
 
@@ -246,8 +245,9 @@ print(len(td.path_signature(X)))              # 4
 td.reset_default_core()
 ```
 
-Some specialized entry points, such as `free_kernel` and `higher_order_kernel`, require a
-standard total-degree default core and raise a `RuntimeError` under another default.
+`SigKernel`, `FreeKernel` and `HigherOrderKernel`, and the functions `free_kernel` and
+`higher_order_kernel`, require a standard total-degree default core; see
+[The classical signature kernel](kernels.md#the-classical-signature-kernel).
 
 !!! note "Use `td.tensor_*` through the module"
 
@@ -314,6 +314,9 @@ truncation, the coordinates and whether the tensor is partially symmetrized.
 
 --8<-- "README.md:core_plans"
 
+A plan is a precomputed array of indices and coefficients that a core uses for a product or a
+change of layout.
+
 | `precompute_shuffle` | Retained shuffle plans | Cores |
 |---|---|---|
 | `False` (default) | none | all |
@@ -330,9 +333,9 @@ truncation, the coordinates and whether the tensor is partially symmetrized.
 `make_core`, except `default_trunc`, and counts the bytes of the plan buffers that the core
 retains, without constructing it. It excludes Python-container overhead, runtime temporaries and
 compiled executables. The count is exact, not an upper bound: below it equals `memory_bytes()` of
-the constructed core. A shear core that `shear_core` builds from a bidegree core shares that core's
-compatible plan stores, and `memory_bytes()` counts them in both cores; `symmetrize_core`, and
-`shear_core` with a total-degree source, build their own plans.
+the constructed core. A shear core that `shear_core` builds from a bidegree core shares the plans
+that the two cores have in common, and `memory_bytes()` counts them in both cores;
+`symmetrize_core`, and `shear_core` with a total-degree source, build their own plans.
 
 ```python
 print(td.core_expected_memory(dims=2, max_trunc=4))  # 0.0
@@ -402,10 +405,8 @@ P. P. Hager and L. Pelizzari,
 [*Expected signatures via partial integration, coordinate change and symmetrization*](https://arxiv.org/abs/2607.29534),
 arXiv preprint, 2026; their Remark 3.3 calls $\Psi$ shear-like, hence the name. The partial
 symmetrization is their quotient by the commutators of the letters in $\mathcal{A}''$ (Sections 2.4
-and 3.2). The data layouts and algorithms of these cores are described in
-P. P. Hager and L. Pelizzari,
-[*A Technical Note on Signature Computations with Bidegree Truncation, Coordinate Changes, and Symmetrization*](https://github.com/hagerpa/tensordev/tree/main/academia/bidegree),
-technical note, 2026.
+and 3.2). The data layouts and algorithms of these cores are described in the
+[technical note](background.md#technical-note).
 
 With one channel in each group, the $(1, 1)$ block has two entries, one per position of the
 $\mathcal{A}'$-letter: first the word $AX$, then $XA$. By the formula, the shear coordinate of
@@ -487,18 +488,3 @@ np.testing.assert_allclose(
 Developments scan over time with a sequential core,
 [`JaxSequentialCore`][tensordev.JaxSequentialCore]. `set_default_core` installs the matching
 pair, and [`get_default_core_pair`][tensordev.get_default_core_pair] returns both cores.
-
-## Migrating from 0.0.3
-
-Version 0.1.0 replaces the separate shuffle core with optional shuffle plans on every bounded
-core:
-
-| 0.0.3 | 0.1.0 |
-|---|---|
-| `JaxShuffleCore(d, trunc)`, `shuffle_core(d, trunc)` | `make_core(dims=d, max_trunc=trunc, precompute_shuffle=True)` |
-| the same, as background default | `set_default_core(dims=d, max_trunc=trunc, precompute_shuffle=True)` |
-| `shuffle_core_expected_memory` | `core_expected_memory(dims=d, max_trunc=trunc, precompute_shuffle=True)` |
-
-`core_expected_memory` reports MiB by default. `tensordev` 0.1.0 requires Python 3.11 or newer and `jax>=0.10.0,<0.12`. `JaxSequentialCore`
-remains public, and developments resolve it automatically for cores returned by `make_core`.
-The [changelog](https://github.com/hagerpa/tensordev/blob/main/CHANGELOG.md) lists all changes.

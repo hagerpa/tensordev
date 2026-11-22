@@ -7,10 +7,12 @@ Run from the repository root with the Python environment that has JAX installed:
     python docs/scripts/check_snippets.py README.md          # the README on its own
     python docs/scripts/check_snippets.py --list             # show the blocks, run nothing
 
-README includes are resolved with docs/hooks.py first, so a page is checked as MkDocs renders
-it.  The ```python (or ```py) blocks of a page run in order in one fresh Python process, with
-PYTHONPATH=src and the repository root as working directory; later blocks see the names that
-earlier blocks defined.  Pages do not share state.
+A page line  --8<-- "README.md:NAME"  is first replaced by the README text between the markers
+<!-- --8<-- [start:NAME] -->  and  <!-- --8<-- [end:NAME] -->, as pymdownx.snippets does on the
+site, so a page is checked as MkDocs renders it.  The ```python, ```py and ```python3 blocks of
+a page run in order in one fresh Python process, with PYTHONPATH=src and the repository root as
+working directory; later blocks see the names that earlier blocks defined.  Pages do not share
+state.
 
 A block that must not run, for example because it needs a GPU, is marked by an HTML comment
 on the nearest non-blank line above its fence:
@@ -21,7 +23,6 @@ The comment is invisible on the site, on GitHub and on PyPI.  Give the reason in
 The script exits with status 1 when a block fails, a page times out, or a marker is malformed.
 """
 import argparse
-import importlib.util
 import json
 import os
 import re
@@ -35,11 +36,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DOCS = ROOT / "docs"
+README = ROOT / "README.md"
 
-_spec = importlib.util.spec_from_file_location("tensordev_docs_hooks", DOCS / "hooks.py")
-hooks = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(hooks)
-
+INCLUDE = re.compile(r'^--8<-- "README\.md:(\w+)"$', re.MULTILINE)
 FENCE_OPEN = re.compile(r"^(?P<indent>[ \t]*)(?P<fence>`{3,}|~{3,})[ \t]*(?P<info>[^`\n]*?)[ \t]*$")
 DIRECTIVE = re.compile(r"^<!--\s*check_snippets:(?P<body>.*?)-->$")
 SKIP = re.compile(r"^\s*skip(?:\s*\((?P<reason>[^)]*)\))?\s*$")
@@ -84,8 +83,17 @@ def _language(info):
     return info.split()[0].lower() if info else ""
 
 
+def _section(readme, name):
+    start = f"<!-- --8<-- [start:{name}] -->\n"
+    end = f"<!-- --8<-- [end:{name}] -->"
+    if start not in readme or end not in readme:
+        raise SnippetError(f"README.md has no section {name!r} (markers {start.strip()} ... {end})")
+    i = readme.index(start) + len(start)
+    return readme[i:readme.index(end, i)]
+
+
 def _origin(code, name, page_text, readme_text, resolved_line):
-    """Where a block comes from, as `file:line` of its first code line."""
+    """Where a block comes from, as ``file:line`` of its first code line."""
     first = code.splitlines()[0] if code.strip() else ""
     for label, text in ((name, page_text), ("README.md", readme_text)):
         i = text.find(code)
@@ -97,10 +105,9 @@ def _origin(code, name, page_text, readme_text, resolved_line):
 def extract(path):
     """Return the code blocks of a page after README includes are resolved."""
     page_text = path.read_text(encoding="utf-8")
-    readme_text = hooks.README.read_text(encoding="utf-8")
-    text = hooks.resolve(page_text, readme_text)
+    readme_text = README.read_text(encoding="utf-8")
     name = str(path.resolve().relative_to(ROOT)) if path.resolve().is_relative_to(ROOT) else str(path)
-    lines = text.split("\n")
+    lines = INCLUDE.sub(lambda match: _section(readme_text, match.group(1)), page_text).split("\n")
     blocks, pending_skip, i = [], None, 0
     while i < len(lines):
         line = lines[i]
@@ -124,11 +131,11 @@ def extract(path):
                 j += 1
             if j == len(lines):
                 raise SnippetError(f"{name}:{i + 1}: code fence is never closed")
-            body = [ln[len(indent):] if ln.startswith(indent) else ln.lstrip() for ln in lines[i + 1:j]]
-            code = "\n".join(body) + "\n"
+            code = "\n".join(ln[len(indent):] if ln.startswith(indent) else ln.lstrip()
+                             for ln in lines[i + 1:j]) + "\n"
             if _language(opening.group("info")) in PYTHON:
-                origin = _origin(code, name, page_text, readme_text, i + 2)
-                blocks.append(Block(code, origin, pending_skip[0] if pending_skip else None))
+                blocks.append(Block(code, _origin(code, name, page_text, readme_text, i + 2),
+                                    pending_skip[0] if pending_skip else None))
             elif pending_skip is not None:
                 raise SnippetError(f"{name}:{pending_skip[1]}: skip marker above a non-Python block")
             pending_skip, i = None, j + 1
@@ -144,8 +151,7 @@ def extract(path):
 def run_page(name, blocks, python, timeout):
     """Run the blocks of one page; return (ok, message)."""
     runnable = [{"code": b.code, "label": b.label} for b in blocks if b.skip is None]
-    skipped = len(blocks) - len(runnable)
-    counts = f"{len(runnable)} run, {skipped} skipped"
+    counts = f"{len(runnable)} run, {len(blocks) - len(runnable)} skipped"
     if not runnable:
         return True, f"{name}: no blocks to run ({counts})"
     env = dict(os.environ)
@@ -164,8 +170,8 @@ def run_page(name, blocks, python, timeout):
         peak = json.loads(stats.read_text())["peak_rss_bytes"] if stats.exists() else None
     memory = "" if peak is None else f", peak RSS {peak / 2**30:.2f} GiB"
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout).rstrip()
-        return False, f"{name}: FAILED ({counts}, {seconds:.1f} s{memory})\n{detail}"
+        return False, (f"{name}: FAILED ({counts}, {seconds:.1f} s{memory})\n"
+                       f"{(proc.stderr or proc.stdout).rstrip()}")
     return True, f"{name}: ok ({counts}, {seconds:.1f} s{memory})"
 
 
@@ -178,9 +184,8 @@ def main():
     parser.add_argument("--list", action="store_true", help="list the blocks and run nothing")
     args = parser.parse_args()
 
-    pages = args.pages or sorted(DOCS.glob("*.md"))
     try:
-        extracted = [extract(page) for page in pages]
+        extracted = [extract(page) for page in args.pages or sorted(DOCS.glob("*.md"))]
     except SnippetError as error:
         sys.exit(f"error: {error}")
 
@@ -188,16 +193,13 @@ def main():
         for name, blocks in extracted:
             print(f"{name}: {len(blocks)} Python blocks")
             for block in blocks:
-                status = f"skip ({block.skip})" if block.skip else "run"
-                print(f"  {block.label:<60} {status}")
+                print(f"  {block.label:<60}", f"skip ({block.skip})" if block.skip else "run")
         return
 
     print(f"Python: {args.python}", flush=True)
     failures = 0
     with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-        futures = [pool.submit(run_page, name, blocks, args.python, args.timeout) for name, blocks in extracted]
-        for future in futures:
-            ok, message = future.result()
+        for ok, message in pool.map(lambda page: run_page(*page, args.python, args.timeout), extracted):
             failures += not ok
             print(message, flush=True)
     if failures:

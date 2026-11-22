@@ -48,10 +48,10 @@ $$
 the last time of the grid. With blocking and the default `accumulate=True` it returns
 $\mathbf{z}^{t}_{0,t}$ at the end $t$ of every block; with `accumulate=False` it returns
 $\mathbf{z}^{t}_{t',t}$ for every block $[t',t]$, which for the convolution kernels below is the
-Volterra signature of the block as a separate path. The letters are the $m$ output coordinates of the kernel, so the result is shaped like
-a signature over $\mathbb{R}^m$, not over $\mathbb{R}^d$. For a constant kernel $K\equiv A$
-the definition reduces to the signature of the path $Ax$. A readout time $\tau$ later than $t$
-is available for finite state-space kernels, as `tau_dt` on
+Volterra signature of the block as a separate path. The letters are the $m$ output coordinates of
+the kernel, so the result is shaped like a signature over $\mathbb{R}^m$, not over
+$\mathbb{R}^d$. A readout time $\tau$ later than $t$ is available for finite state-space
+kernels, as `tau_dt` on
 [State-space signatures](state-space.md#volterra-signatures-by-state-recursion).
 
 ## Convolution kernels
@@ -74,7 +74,7 @@ outside these ranges raise `ValueError`:
 | Class | Constructor | `q` | Arguments |
 |---|---|---|---|
 | [`FractionalKernel`][tensordev.FractionalKernel] | [`ConvolutionKernel.fractional`][tensordev.ConvolutionKernel.fractional] | any | `beta` of shape `(q,)` with positive entries; `A` of shape `(q, m, d)` |
-| [`GammaKernel`][tensordev.GammaKernel] | [`ConvolutionKernel.gamma`][tensordev.ConvolutionKernel.gamma] | 1 | `beta > 0`, `scale > 0` and `rate >= 0`, each a scalar or of shape `(1,)`; `A` of shape `(1, m, d)`; static `quad_order`, the number of quadrature nodes of the fallback for large `rate` times the step. The constructor defaults `scale` and `rate` to 1. |
+| [`GammaKernel`][tensordev.GammaKernel] | [`ConvolutionKernel.gamma`][tensordev.ConvolutionKernel.gamma] | 1 | `beta > 0`, `scale > 0` and `rate >= 0`, each a scalar or of shape `(1,)`; `A` of shape `(1, m, d)`; static `quad_order` (default 64), the number of quadrature nodes for the coefficients of a step $h$ with $\mathrm{rate}\cdot h$ above $13.85$ in float64 ($18.93$ in float32); shorter steps use a series that is exact to rounding. The constructor defaults `scale` and `rate` to 1. |
 | [`FSSKConvolutionKernel`][tensordev.FSSKConvolutionKernel] | [`ConvolutionKernel.fssk`][tensordev.ConvolutionKernel.fssk] | any | an [`FSSK`][tensordev.FSSK]; `beta` is fixed to ones |
 
 The output dimension $m$ need not equal the path dimension $d$, and components may have
@@ -122,8 +122,9 @@ recursion that also supports streaming;
 
 ### The classical signature as a special case
 
-With $\beta=1$ the fractional kernel is $k\equiv 1$, so $K\equiv A$ and `vsig` returns the
-signature of $Ax$. With $A$ the identity this is [`path_signature`][tensordev.path_signature]:
+For $\beta=1$ the Volterra signature reduces to the signature: with $A$ the identity, `vsig` equals
+[`path_signature`][tensordev.path_signature] of `X`, and with `A3` ($m = 3$) it equals
+`path_signature` of `X @ A3[0].T`:
 
 ```python
 flat = td.ConvolutionKernel.fractional(beta=jnp.array([1.0]), A=jnp.eye(2)[None])
@@ -150,10 +151,10 @@ $$
 $$
 
 `tensordev.sss.rough_approx.fractional_fssk(beta=..., R=..., A=..., T=1.0)` accepts
-$\tfrac12<\beta<1$. It replaces the integral by $R$ exponentials with logarithmically spaced rates and fits nonnegative weights
-in relative error on a logarithmic grid of $[10^{-3}T,\,T]$. The result is an
-[`FSSK`][tensordev.FSSK] with a diagonal state matrix of size $R$. The function is not
-re-exported, so import it from its module. The fit needs SciPy, which the `rough` extra
+$\tfrac12<\beta<1$. It replaces the integral by $R$ exponentials with logarithmically spaced
+rates and fits nonnegative weights in relative error on a logarithmic grid of $[10^{-3}T,\,T]$.
+The result is an [`FSSK`][tensordev.FSSK] with a diagonal state matrix of size $R$. The function
+is not re-exported, so import it from its module. The fit needs SciPy, which the `rough` extra
 installs: `pip install "tensordev[rough]"`.
 
 ```python
@@ -282,10 +283,11 @@ these schemes need the history $\mathbf{z}^{t_i+u}_{0,t_i}$ as a function of the
 $u\in[0,t_{i+1}-t_i]$: `0` approximates it by its left-point value $\mathbf{z}^{t_i}_{0,t_i}$,
 `1` interpolates it in the basis $\{1, u^{\beta_p}, u\}$ and `2` in
 $\{1, u^{\beta_p}, u, u^{\beta_p+1}, u^2\}$, with the exponents of every component $p$ (an
-exponent that occurs twice, such as $\beta_p=1$, is used once). For `"adams"`, `order=0` gives the Euler weights and `order=1` or `2` the
-predictor-corrector weights. `dyadic_order` refines the grid before any scheme runs. All four schemes discretize the same equation, so on a coarse grid
-they differ by their discretization errors. The quadratic and FFT schemes agree to rounding at
-equal `order`; the Adams scheme does not, and refining the grid brings them together:
+exponent that occurs twice, such as $\beta_p=1$, is used once). For `"adams"`, `order=0` gives
+the Euler weights and `order=1` or `2` the predictor-corrector weights. `dyadic_order` refines
+the grid before any scheme runs. All four schemes discretize the same equation, so on a coarse
+grid they differ by their discretization errors. The quadratic and FFT schemes agree to rounding
+at equal `order`; the Adams scheme does not, and refining the grid brings them together:
 
 ```python
 for dyadic_order in (0, 2):
@@ -383,12 +385,8 @@ incomplete beta function that is differentiable in all three arguments.
 
 !!! warning "Limits of the kernel-parameter gradients"
     - First derivatives work with `jax.grad`, `jax.jacfwd` and `jax.jacrev`. For second
-      derivatives use `jax.jacrev(jax.jacfwd(...))`, which works for both kernels:
-      `jax.hessian` raises for a `GammaKernel`, because JAX drops the custom derivative rule of
-      `betainc` when it linearizes a loop.
-    - With `order > 0` and a scheme other than `"adams"`, the interpolation basis depends on the
-      value of `beta`. A traced `beta` therefore runs the solver without its cached compilation,
-      which is slower.
-    - Pass kernel parameters to `jax.jit` as closed-over constants, not as jit arguments: the
-      kernel constructors check their arguments eagerly, which fails on traced values.
+      derivatives use `jax.jacrev(jax.jacfwd(...))`, which works for both kernels;
+      `jax.hessian` raises for a `GammaKernel`.
+    - With `order > 0` and a scheme other than `"adams"`, a traced `beta` runs without the cached
+      solver (see [Compilation](#compilation)).
     - Gradients with respect to the step size `dt` are not supported.

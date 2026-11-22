@@ -76,12 +76,23 @@ All arguments except `x` are keyword-only.
 | `output_starting_point` | `False` | Prepend the seed to the output along `axis`. Without blocking, the output then has an axis of length 2: seed and signature. |
 | `accumulate` | `True` | Carry the running product across blocks. With `False`, each block holds the signature of its own steps. |
 | `accumulate_in_tree` | `False` | Accumulate across blocks with an associative tree scan. |
-| `parallel` | `False` | Compute all per-step exponentials first and combine them with an associative tree scan: more parallelism, more memory. `False` streams the steps through `tensor_fmexp`, which multiplies the running signature by $\exp_\otimes(\Delta_i)$ with a fused Horner scheme: less memory, sequential depth. |
+| `parallel` | `False` | Compute all per-step exponentials first and combine them with an associative tree scan: more parallelism, more memory. `False` streams the steps through `tensor_fmexp`, below: less memory, sequential depth. |
 | `core` | `None` | Tensor-algebra core. Defaults to the installed default core. |
 | `seq_core` | `None` | Sequential-operations backend. Defaults to the one that matches `core`. |
-| `execution` | `"auto"` | `"auto"` keeps the default execution policy. `"jax"` never selects the wordwise GPU kernels; the [native CPU kernels](performance.md#native-cpu-kernels) still apply where eligible. `"wordwise"` requests the alpha GPU kernels. |
+| `execution` | `"auto"` | `"auto"` and `"jax"` run the JAX implementation, with the [native CPU kernels](performance.md#native-cpu-kernels) where eligible. `"wordwise"` requests the alpha GPU kernels. |
 
-The `parallel=True` and `increment_input=True` routes give the same signature:
+With `parallel=False`, [`tensor_fmexp`][tensordev.core.universal.Universal.tensor_fmexp]
+multiplies the running signature $g$ by $\exp_\otimes(\Delta)$ without forming the exponential,
+by the Horner recursion
+
+$$
+g\otimes\exp_\otimes(\Delta)
+=g+\Bigl(g+\bigl(g+\cdots+\bigl(g+g\otimes\tfrac{\Delta}{K}\bigr)\otimes\tfrac{\Delta}{K-1}\cdots\bigr)\otimes\tfrac{\Delta}{2}\Bigr)\otimes\Delta,
+$$
+
+with $K=N$ for total degree $N$, $K=N+M$ for bidegree $(N, M)$, and every product truncated to the
+core's truncation. The `parallel=True` and `increment_input=True` routes
+give the same signature:
 
 ```python
 np.testing.assert_allclose(
@@ -120,12 +131,11 @@ $$
 
 and after truncation $\pi_{\le N}\mathrm{Sig}(X)_{s,t} = \pi_{\le N}\mathrm{Sig}(X)_{s,u}\otimes_N\pi_{\le N}\mathrm{Sig}(X)_{u,t}$.
 
-`block_size` splits the steps into blocks and emits one signature per block, along a block axis
-at `axis`. With `accumulate=True` (the default), entry $j$ is the signature from the start up to
-the end of block $j$. With `accumulate=False`, entry $j$ is the signature of block $j$ alone. The
-blocks are computed side by side, so blocking does not lower the peak memory; see
-[Long paths and gradients](performance.md#long-paths-and-gradients). The README example below
-takes two independent blocks, composes them with
+--8<-- "README.md:blocking"
+
+The block axis is at `axis`. The blocks are computed side by side, so blocking does not lower the
+peak memory; see [Long paths and gradients](performance.md#long-paths-and-gradients). The example
+below takes two independent blocks, composes them with
 [`tensor_product`][tensordev.core.universal.Universal.tensor_product], and also checks the
 shuffle identity of the next section:
 
@@ -165,7 +175,7 @@ $$
 \langle u, \mathrm{Sig}(X)_{0,T}\rangle\,\langle v, \mathrm{Sig}(X)_{0,T}\rangle = \langle u \sqcup\!\sqcup v, \mathrm{Sig}(X)_{0,T}\rangle .
 $$
 
-The README example above checks this for the letters $e_1$ and $e_2$, where
+The example above checks this for the letters $e_1$ and $e_2$, where
 $e_1 \sqcup\!\sqcup e_2 = e_1e_2 + e_2e_1$. Here $e_1$ and $e_2$ are the basis vectors of $\mathbb{R}^2$, the
 letters 0 and 1 of the layout in [Truncated tensors](tensor-algebra.md#truncated-tensors), which numbers
 letters from 0 (the papers number them from 1). Full shuffle products need a core with shuffle plans,
@@ -178,9 +188,8 @@ flat indices 1 and 2:
 print(core.tensor_shuffle_product(e1, e2, trunc=2)[2])  # [0. 1. 1. 0.]
 ```
 
-On the closed loops `X`, both sides of the README check are zero up to rounding. On the open
-path `X_open` they are not, and the identity still holds; the concatenation $e_1e_2$ alone
-would give a different value:
+On the open path `X_open` both sides are nonzero; the concatenation $e_1e_2$ alone gives a
+different value:
 
 ```python
 lhs = td.tensor_inner_product(sig_open, core.tensor_shuffle_product(e1, e2, trunc=3))
@@ -192,9 +201,10 @@ concatenation = td.tensor_inner_product(sig_open, td.tensor_product(e1, e2, trun
 print(np.allclose(concatenation, rhs))  # False
 ```
 
-For two letters the identity is integration by parts, $\langle ij, \mathrm{Sig}(X)_{0,T}\rangle + \langle ji, \mathrm{Sig}(X)_{0,T}\rangle = X^i_{0,T}X^j_{0,T}$ with
-$X_{0,T} = X_T - X_0$: the symmetric part of level 2 is half the outer product of the increment.
-No shuffle plans are needed to check it:
+For two letters the identity is integration by parts,
+$\langle ij, \mathrm{Sig}(X)_{0,T}\rangle + \langle ji, \mathrm{Sig}(X)_{0,T}\rangle = X^i_{0,T}X^j_{0,T}$
+with $X_{0,T} = X_T - X_0$: the symmetric part of level 2 is half the outer product of the
+increment. No shuffle plans are needed to check it:
 
 ```python
 increment = X_open[:, -1] - X_open[:, 0]
@@ -357,7 +367,7 @@ inputs:
 
 | Function | Description |
 |---|---|
-| [`random_trigonometric_polynomial_paths`][tensordev.util.random_trigonometric_polynomial_paths] | Batched random trigonometric-polynomial paths, shape `(batch, steps + 1, dim)`, starting and ending at 0: closed loops, so level 1 of their signatures is zero. `key` is a JAX key or an integer. |
+| [`random_trigonometric_polynomial_paths`][tensordev.util.random_trigonometric_polynomial_paths] | Batched random trigonometric-polynomial paths, shape `(batch, steps + 1, dim)`, starting and ending at 0. `key` is a JAX key or an integer. |
 | [`unit_speed_paths`][tensordev.util.unit_speed_paths] | Smooth unit-speed paths on $[0, 1]$, generated from `seed`, as a NumPy array of shape `(n_paths, int(1 / dt) + 1, dim)`, with `dim` 2 or 3. `dt` must divide 1 and `dt_fine` (default `0.001`) must divide `dt`. |
 | [`integrated_ou_first_on_path`][tensordev.util.integrated_ou_first_on_path] | Tensor-valued path whose flattened coordinates are independent integrated Ornstein-Uhlenbeck processes: a tuple of `trunc` levels, level $k$ of shape `(batch, steps + 1, dim**k)` and scaled by `level_lambda**k` (and $1/k!$ with `factorial=True`). |
 | [`deterministic_trigonometric_path_pair`][tensordev.util.deterministic_trigonometric_path_pair] | Two fixed trigonometric paths `x`, `w` of shape `(length, dim)` on a given grid, meant as base signals for kernel experiments and benchmarks. |
@@ -369,9 +379,10 @@ inputs:
 Padding by the last value adds zero increments, and $\exp(0)$ is the identity, so padding does
 not change a signature. [Batching](kernels.md#batching) uses this for ragged kernel inputs.
 
-`velocity_to_increments` turns a velocity into increments that `increment_input=True` accepts.
 The circle of radius $1/(2\pi)$, traversed once with unit speed, encloses the area $1/(4\pi)$,
-and its Lévy area $\tfrac12(\langle e_1e_2, \mathrm{Sig}(X)_{0,1}\rangle - \langle e_2e_1, \mathrm{Sig}(X)_{0,1}\rangle)$ approaches that value as the grid is refined:
+and its Lévy area
+$\tfrac12(\langle e_1e_2, \mathrm{Sig}(X)_{0,1}\rangle - \langle e_2e_1, \mathrm{Sig}(X)_{0,1}\rangle)$
+approaches that value as the grid is refined:
 
 ```python
 from tensordev.util import velocity_to_increments
