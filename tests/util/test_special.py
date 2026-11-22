@@ -21,15 +21,16 @@ from jax.test_util import check_grads
 
 from tensordev.util.special import betainc
 
-# a, b, x of the stored first-order table
+# a- and b-grids of the stored first-order table
 _TABLE_A = (1e-3, 0.1, 1.0, 7.0, 40.0, 120.0)
 _TABLE_B = (1e-3, 0.1, 0.7, 3.0, 30.0)
-# a, b, x of the stored second-order table
+# a- and b-grids of the stored second-order table
 _TABLE2_A = (1e-3, 1.0, 40.0, 120.0)
 _TABLE2_B = (1e-3, 0.7, 30.0)
 
 
 def _switch(a, b):
+    """x = (a + 1) / (a + b + 2); above it betainc evaluates 1 - I_{1-x}(b, a)."""
     return (a + 1) / (a + b + 2)
 
 
@@ -112,8 +113,7 @@ def _write_reference_table(path):
 
 def _value_and_partials(a, b, x):
     """Values and (a, b, x)-gradients for 1-d inputs."""
-    fn = jax.vmap(jax.value_and_grad(betainc, argnums=(0, 1, 2)))
-    value, grads = jax.jit(fn)(a, b, x)
+    value, grads = jax.jit(jax.vmap(jax.value_and_grad(betainc, argnums=(0, 1, 2))))(a, b, x)
     return (np.asarray(value), *(np.asarray(g) for g in grads))
 
 
@@ -206,11 +206,11 @@ def test_higher_order_modes_agree():
     np.testing.assert_allclose(jax.jit(jax.jacfwd(jax.jacfwd(f)))(v), fwd_rev, rtol=1e-12)
     grad_grad = jax.jit(jax.grad(jax.grad(betainc, 1), 1))
     np.testing.assert_allclose(grad_grad(a, b, x), fwd_rev[1, 1], rtol=1e-12)
-    # third order: a-derivative of the (a, b)-hessian against central differences
-    third = jax.jit(jax.jacfwd(jax.hessian(f)))(v)[:2, :2, 0]
-    step = jnp.array([1e-5, 0.0, 0.0])
-    fd = (hessian(v + step) - hessian(v - step)) / (2 * step[0])
-    np.testing.assert_allclose(third, fd[:2, :2], rtol=1e-6)
+    # third order: a-derivative of the (a, b)-hessian
+    check_grads(
+        lambda a_: hessian(v.at[0].set(a_))[:2, :2], (a,),
+        order=1, modes=("fwd",), eps=1e-5, rtol=1e-6, atol=0.0,
+    )
 
 
 # ---------------------------------------------------------------------------

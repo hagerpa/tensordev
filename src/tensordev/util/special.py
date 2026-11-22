@@ -1,9 +1,8 @@
 r"""Regularised incomplete beta function, differentiable in all three arguments.
 
-:func:`jax.scipy.special.betainc` has no derivative with respect to its shape
-parameters, which blocks gradients of the Volterra kernels with respect to
-their roughness parameter.  :func:`betainc` returns the same values and
-supplies the missing derivatives through a :func:`jax.custom_jvp`.
+:func:`betainc` returns the values of :func:`jax.scipy.special.betainc` and
+defines their derivatives in ``a``, ``b`` and ``x`` through a
+:func:`jax.custom_jvp`.
 
 Method
 ------
@@ -15,25 +14,40 @@ For :math:`y < (p+1)/(p+q+2)`,
     w = \frac{y^p (1-y)^q\,\Gamma(p+q)}{\Gamma(p+1)\,\Gamma(q+1)}, \qquad
     F = {}_2F_1(p+q, 1; p+1; y),
 
-with :math:`F` evaluated by the modified Lentz algorithm on the continued
-fraction DLMF 8.17.22-24 (Numerical Recipes ``betacf``), and
-:math:`I_x(a, b) = 1 - I_{1-x}(b, a)` covering the other side of the switch
-point.  :math:`\partial_p F` and :math:`\partial_q F` are propagated through
-the Lentz recursion in forward mode and enter the convergence test, as in
-Boik & Robison-Cox (1998), *Derivatives of the incomplete beta function*,
-J. Stat. Softw. 3(1).  Writing :math:`q\,w` instead of
-:math:`y^p(1-y)^q / (p\,B(p, q))` keeps the derivatives finite at
-:math:`a = 0` or :math:`b = 0`, and :math:`\psi(z+e) - \psi(z+1)` is evaluated
-without cancellation for large :math:`z`; this difference otherwise dominates
-the error when :math:`I` is close to 0 or 1.
+and :math:`I_x(a, b) = 1 - I_{1-x}(b, a)` covers :math:`x > (a+1)/(a+b+2)`.
+:math:`F` is the continued fraction DLMF 8.17.22-24
+
+.. math::
+
+    F = \cfrac{1}{1 + \cfrac{d_1}{1 + \cfrac{d_2}{1 + \cdots}}}, \qquad
+    d_{2m} = \frac{m(q-m)\,y}{(p+2m-1)(p+2m)}, \qquad
+    d_{2m+1} = -\frac{(p+m)(p+q+m)\,y}{(p+2m)(p+2m+1)},
+
+whose convergents :func:`_hyp2f1_lentz` evaluates together with their
+``p``- and ``q``-tangents, as in Boik & Robison-Cox (1998), *Derivatives of
+the incomplete beta function*, J. Stat. Softw. 3(1).  Near
+:math:`y = (p+1)/(p+q+2)` this takes :math:`O(\sqrt{\max(p, q)})` steps.
+With :math:`\Delta\psi(z, e) = \psi(z+e) - \psi(z+1)`,
+
+.. math::
+
+    \partial_p I_y(p, q) = q\,w\,\bigl(F\,(\log y + \Delta\psi(p, q))
+        + \partial_p F\bigr), \qquad
+    \partial_q I_y(p, q) = w\,\bigl(F\,(1 + q\,(\log(1-y) + \Delta\psi(q, p)))
+        + q\,\partial_q F\bigr),
+
+which stay finite at :math:`p = 0` or :math:`q = 0`.  For
+:math:`\min(z+e, z+1) \ge 10`, :math:`\Delta\psi` is evaluated without
+cancellation as
+
+.. math::
+
+    \Delta\psi(z, e) = \log\Bigl(1 + \frac{e-1}{z+1}\Bigr)
+        + \frac{e-1}{2(z+e)(z+1)}
+        - \sum_{k=1}^{7} \frac{B_{2k}}{2k}\bigl((z+e)^{-2k} - (z+1)^{-2k}\bigr).
 
 The derivative with respect to ``x`` is the beta density
 :math:`x^{a-1}(1-x)^{b-1}/B(a, b)`, evaluated in log space.
-
-Summing the hypergeometric series for :math:`F` termwise instead would need
-:math:`O(a+b)` terms near the switch point (about 1800 for
-:math:`a = 100, b = 1`), against :math:`O(\sqrt{\max(a, b)})` Lentz steps
-(36 there).
 """
 
 from __future__ import annotations
@@ -67,27 +81,25 @@ def betainc(a: ArrayLike, b: ArrayLike, x: ArrayLike) -> Array:
 
         I_x(a, b) = \frac{1}{B(a, b)} \int_0^x t^{a-1} (1-t)^{b-1}\,\mathrm{d}t.
 
-    Values are those of :func:`jax.scipy.special.betainc`.  Unlike that
-    function, this one is differentiable with respect to ``a`` and ``b`` as
-    well as ``x``, to any order and in any composition of forward and reverse
-    mode (``jax.grad``, ``jax.jacfwd``, ``jax.jacrev``, ``jax.hessian``,
-    ``jax.grad(jax.grad(...))``), under ``jit`` and ``vmap``.
-
-    One exception comes from JAX: where the arguments vary along a
-    ``lax.scan``, reverse-mode linearisation of the scan inlines the primal
-    of this function, so a derivative of a reverse-mode derivative
-    (``jax.hessian``, ``jax.grad(jax.grad(...))``) raises there.  Taking the
-    inner derivative in forward mode (``jax.jacrev(jax.jacfwd(...))``) works.
+    Values are those of :func:`jax.scipy.special.betainc`.  The function is
+    differentiable in ``a``, ``b`` and ``x`` to any order and in any
+    composition of forward and reverse mode (``jax.grad``, ``jax.jacfwd``,
+    ``jax.jacrev``, ``jax.hessian``, ``jax.grad(jax.grad(...))``), under
+    ``jit`` and ``vmap``.  Where the arguments vary along a ``lax.scan``,
+    derivatives of a reverse-mode derivative (``jax.hessian``,
+    ``jax.grad(jax.grad(...))``) raise; ``jax.jacrev(jax.jacfwd(...))``
+    works there.
 
     Derivatives with respect to ``a`` and ``b`` come from the continued
     fraction for :math:`I` differentiated in forward mode (see the module
     docstring); each further order nests one more forward-mode pass.  In
-    float64 the first derivatives agree with 40-digit references to about
-    :math:`10^{-12}` relative (worst case about :math:`10^{-11}`) for
+    float64 the relative error of the first derivatives is about
+    :math:`10^{-12}`, at most :math:`10^{-11}`, for
     :math:`a \in [10^{-3}, 120]`, :math:`b \in [10^{-3}, 30]` and
-    :math:`x \in [0, 1]`, and second derivatives to about :math:`10^{-10}`.
-    In float32 the typical relative error is :math:`10^{-6}`, rising to about
-    :math:`10^{-3}` where a tiny shape parameter makes :math:`I` nearly 0 or 1.
+    :math:`x \in [0, 1]`, and that of the second derivatives about
+    :math:`10^{-10}`.  In float32 it is typically :math:`10^{-6}`, and up to
+    about :math:`10^{-3}` where a tiny shape parameter makes :math:`I` nearly
+    0 or 1.
 
     The domain is :math:`a, b \ge 0` with :math:`a + b > 0` and
     :math:`0 \le x \le 1`.  At :math:`x \in \{0, 1\}` all derivatives with
@@ -100,12 +112,16 @@ def betainc(a: ArrayLike, b: ArrayLike, x: ArrayLike) -> Array:
     gradients.  Outside the domain values and derivatives are NaN, except for
     the limits :func:`jax.scipy.special.betainc` itself defines.
 
-    Args:
-        a: Real array-like, :math:`a \ge 0`.
-        b: Real array-like, :math:`b \ge 0`.
-        x: Real array-like, :math:`0 \le x \le 1`.
+    Parameters
+    ----------
+    a, b : ArrayLike
+        Real shape parameters, :math:`a, b \ge 0`.
+    x : ArrayLike
+        Real argument, :math:`0 \le x \le 1`.
 
-    Returns:
+    Returns
+    -------
+    Array
         :math:`I_x(a, b)` with the broadcast shape of the arguments and their
         promoted floating dtype.
     """
@@ -121,9 +137,13 @@ def betainc(a: ArrayLike, b: ArrayLike, x: ArrayLike) -> Array:
 
 @functools.lru_cache(maxsize=None)
 def _ab_partials(order: int):
-    r"""All ``order``-th partials :math:`\partial_a^{order-i}\partial_b^i I` as a
-    custom-JVP function of ``(a, b, x)``, stacked along a leading axis of
-    length ``order + 1`` (index ``i`` counts the ``b``-derivatives).
+    r"""Custom-JVP function of ``(a, b, x)`` with all ``order``-th ``(a, b)``-partials.
+
+    Entry ``i`` of the leading axis, of length ``k + 1`` for ``k = order``, is
+    :math:`\partial_a^{k-i}\partial_b^i I_x(a, b)`; its tangent is
+    :math:`\partial_a^{k+1-i}\partial_b^i I\,\dot a
+    + \partial_a^{k-i}\partial_b^{i+1} I\,\dot b
+    + \partial_a^{k-i}\partial_b^i\partial_x I\,\dot x`.
     """
     impl = _incbeta_partials_impl(order)
     density = _density_partials_impl(order)
@@ -194,8 +214,7 @@ def _beta_density(a: Array, b: Array, x: Array) -> Array:
     end = jnp.where(
         power > 0, 0.0, jnp.where(power == 0, jnp.exp(-log_beta), jnp.inf)
     ).astype(x.dtype)
-    out = jnp.where(interior, inner, end)
-    return jnp.where(_in_domain(a, b, x), out, jnp.nan)
+    return jnp.where(_in_domain(a, b, x), jnp.where(interior, inner, end), jnp.nan)
 
 
 def _in_domain(a: Array, b: Array, x: Array) -> Array:
@@ -207,7 +226,8 @@ def _incbeta_grad_ab(a: Array, b: Array, x: Array) -> tuple[Array, Array]:
     r"""(:math:`\partial_a I_x(a, b)`, :math:`\partial_b I_x(a, b)`)."""
     valid = _in_domain(a, b, x)
     interior = valid & (x > 0) & (x < 1)
-    # safe values keep masked lanes finite and the loop count unaffected
+    # a = b = 1, x = 1/2 where not interior: finite, and the continued
+    # fraction converges there in about ten steps
     a = jnp.where(interior, a, 1.0)
     b = jnp.where(interior, b, 1.0)
     x = jnp.where(interior, x, 0.5)
@@ -237,9 +257,23 @@ def _incbeta_grad_ab(a: Array, b: Array, x: Array) -> tuple[Array, Array]:
 def _hyp2f1_lentz(p: Array, q: Array, y: Array) -> tuple[Array, Array, Array]:
     r""":math:`F = {}_2F_1(p+q, 1; p+1; y)` and its ``p``- and ``q``-partials.
 
-    Modified Lentz evaluation of the continued fraction for
-    :math:`I_y(p, q) / (q w)`, with the tangents carried alongside and required
-    to converge too.  Accurate for :math:`y < (p+1)/(p+q+2)`.
+    With :math:`d_j` of the module docstring, the convergents are
+    :math:`F_1 = D_1 = 1/(1 + d_1)`, :math:`C_1 = 1` and, for :math:`j \ge 2`,
+
+    .. math::
+        D_j = \frac{1}{1 + d_j D_{j-1}}, \qquad
+        C_j = 1 + \frac{d_j}{C_{j-1}}, \qquad
+        F_j = F_{j-1}\, C_j D_j,
+
+    where :math:`1/D_j` and :math:`C_j` below the smallest normal number
+    :math:`\varepsilon_0` in absolute value are set to :math:`\varepsilon_0`.
+    The ``p``- and ``q``-tangents follow by :func:`jax.jvp`.  Step ``m`` adds
+    levels :math:`2m` and :math:`2m+1`.  An entry has converged once
+    :math:`|F_{2m+1}/F_{2m-1} - 1| \le \epsilon` and each tangent
+    :math:`\partial F` changes by at most :math:`\epsilon(|\partial F| + |F|)`,
+    with :math:`\epsilon` the machine epsilon; the loop ends when all entries
+    have converged or after ``_MAX_STEPS`` steps.  Accurate for
+    :math:`y < (p+1)/(p+q+2)`.
     """
     dtype = y.dtype
     eps = jnp.finfo(dtype).eps

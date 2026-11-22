@@ -407,11 +407,12 @@ def _basis_rhos_multicomp(
     order=1: ``{0} | {beta_p} | {1}``
     order=2: ``{0} | {beta_p} | {1} | {beta_p + 1} | {2}``
 
-    Deduplication and ordering need the concrete value of ``betas``, which
-    may be a JVP tracer but not a ``jit`` tracer.  The fractional exponents
-    are returned as expressions in ``betas`` so the scheme is differentiable
-    in them.  A fractional exponent equal to an integer one, or to another
-    component's, is not differentiated as a separate basis element.
+    Deduplication and sorting use the values of ``betas``, so ``betas`` may
+    be differentiated (``jax.grad``, ``jax.jvp``) but not traced by
+    ``jax.jit``.  The fractional exponents are returned as expressions in
+    ``betas`` so the scheme is differentiable in them.  A fractional exponent
+    equal to an integer one, or to another component's, is not differentiated
+    as a separate basis element.
     """
     zero = jnp.asarray(0.0, dtype=dtype)
     if order == 0:
@@ -422,17 +423,18 @@ def _basis_rhos_multicomp(
             f"got order={order}."
         )
 
-    # Read before any jnp op: under jit those are staged even on constants.
-    concrete = jax.lax.stop_gradient(betas) if isinstance(betas, jax.core.Tracer) else betas
-    beta_vals = np.asarray(concrete).reshape(-1).astype(dtype).astype(float)
+    # Convert to NumPy before any jnp op: under jit, jnp returns tracers even
+    # for constant inputs.
+    beta_vals = np.asarray(
+        jax.lax.stop_gradient(betas) if isinstance(betas, jax.core.Tracer) else betas
+    ).reshape(-1).astype(dtype).astype(float)
     betas = jnp.asarray(betas).reshape(-1).astype(dtype)
 
     # (value, exponent) pairs; integer exponents come first so they win ties.
-    shifts = (0.0, 1.0) if order == 2 else (0.0,)
     candidates = [(float(c), jnp.asarray(c, dtype=dtype)) for c in range(order + 1)]
     candidates += [
-        (float(v) + shift, betas[p] + shift if shift else betas[p])
-        for shift in shifts
+        (float(v) + shift, betas[p] + shift)
+        for shift in range(order)
         for p, v in enumerate(beta_vals)
     ]
 

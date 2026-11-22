@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import math
 
 import jax
@@ -9,10 +10,13 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from jax.test_util import check_grads
 
 from tensordev.volterra import VolterraCoefficients, ConvolutionKernel, FractionalKernel, GammaKernel
 from tensordev.volterra.coeffs import validate_volterra_coefficients
 from tensordev.volterra.kernel import _gamma_series_x_max
+
+from parameter_kernels import check_grads_each, parameter_kernel
 
 
 def _np(x):
@@ -163,8 +167,52 @@ def _gamma_kernel(beta, *, scale=1.0, rate=0.0, quad_order=64, dtype=jnp.float64
     )
 
 
-# alpha_n(s, t, tau; rho) for n = 1..5, keyed by (s, t, tau, beta, scale, rate, rho);
-# see test_gamma_series_matches_high_precision_reference for the generator.
+def _fractional_kernel(beta):
+    return FractionalKernel(beta=jnp.array([beta]), A=jnp.ones((1, 1, 1)))
+
+
+def _weighted_coef_sum(kernel, s, t, tau, rho):
+    """Mixed-sign weighted sum of all coefficients up to degree 4."""
+    alpha = kernel.coef(s, t, tau, trunc=5, rho=rho).alpha
+    weights = jnp.cos(jnp.arange(alpha.size, dtype=alpha.dtype)).reshape(alpha.shape)
+    return jnp.sum(weights * alpha)
+
+
+def _mpmath_alpha(s, t, tau, n, beta, scale, rate, rho):
+    """alpha_n(s, t, tau; rho) of the gamma kernel at 40 digits.
+
+    With h = t - s, d = tau - t and I the regularised incomplete beta function
+    (I = 1 for n = 1),
+
+        alpha_n = scale^n / (Gamma(n beta) h^n) int_0^h (h - v)^rho
+                  e^(-rate (d + v)) (d + v)^(n beta - 1) I_{v/(d+v)}((n - 1) beta, beta) dv.
+
+    The range is split geometrically towards v = 0, and on the first piece
+    v = w^(1/p) removes the v^(p - 1) endpoint behaviour, with p = n beta if
+    d = 0 and p = (n - 1) beta + 1 otherwise.
+    """
+    import mpmath as mp
+
+    mp.mp.dps = 40
+    s, t, tau, beta, scale, rate, rho = map(mp.mpf, (s, t, tau, beta, scale, rate, rho))
+    h, d = t - s, tau - t
+
+    def f(v):
+        val = (h - v) ** rho * mp.exp(-rate * (d + v)) * (d + v) ** (n * beta - 1)
+        if n > 1:
+            val *= mp.betainc((n - 1) * beta, beta, 0, v / (d + v), regularized=True)
+        return val
+
+    pts = [h]
+    while pts[-1] > min(r for r in (d, 1 / rate, h) if r > 0) / 8:
+        pts.append(pts[-1] / 2)
+    p = n * beta if d == 0 else (n - 1) * beta + 1
+    head = mp.quad(lambda w: f(w ** (1 / p)) * w ** (1 / p - 1) / p, [0, pts[-1] ** p])
+    return scale**n * (head + mp.quad(f, pts[::-1])) / (mp.gamma(n * beta) * h**n)
+
+
+# alpha_n(s, t, tau; rho) for n = 1..5 from _mpmath_alpha, keyed by
+# (s, t, tau, beta, scale, rate, rho).
 _GAMMA_SERIES_REFERENCE = [
     ((0.1, 0.6, 0.6, 0.15, 1.3, 0.7, 0.0),
      (2.4066926558575722, 5.6691131458111761, 13.100213553555704,
@@ -192,9 +240,9 @@ _GAMMA_SERIES_REFERENCE = [
       0.0014987900665763897, 0.00024373005385932697)),
 ]
 
-# Same generator; rate * (t - s) is beyond the series range, so these use the
-# tanh-sinh fallback.
-_GAMMA_FALLBACK_REFERENCE = [
+# The same for rate * (t - s) above the float64 series threshold 13.8, where the
+# coefficients come from tanh-sinh quadrature.
+_GAMMA_QUAD_REFERENCE = [
     ((0.0, 0.5, 0.5, 0.3, 1.3, 60.0, 0.0),
      (0.76125116952361052, 0.57950334310105886, 0.44114759767850405,
       0.33582412466524622, 0.25564650765556368)),
@@ -217,7 +265,7 @@ def test_gamma_rate_zero_matches_fractional(beta):
     t = jnp.array([0.6, 0.6, 0.25, 0.3, 1.0])
     tau = jnp.array([0.6, 0.85, 0.25, 2.0, 1.001])
     gamma = _gamma_kernel(beta)
-    frac = FractionalKernel(beta=jnp.array([beta]), A=jnp.ones((1, 1, 1)))
+    frac = _fractional_kernel(beta)
     for rho in (0.0, beta, 1.0, beta + 1.0, 2.0):
         got = gamma.coef(s, t, tau, trunc=5, rho=rho)
         ref = frac.coef(s, t, tau, trunc=5, rho=rho)
@@ -226,41 +274,11 @@ def test_gamma_rate_zero_matches_fractional(beta):
 
 @pytest.mark.parametrize("case, expected", _GAMMA_SERIES_REFERENCE)
 def test_gamma_series_matches_high_precision_reference(case, expected):
-    """Exact series against 40-digit quadrature of the defining integral.
+    """The series matches the 40-digit references of ``_mpmath_alpha``.
 
-    The references were generated with mpmath 1.3.0 by::
-
-        import mpmath as mp
-
-        mp.mp.dps = 40
-
-        def alpha(s, t, tau, n, beta, scale, rate, rho):
-            s, t, tau, beta, scale, rate, rho = map(mp.mpf, (s, t, tau, beta, scale, rate, rho))
-            h, d = t - s, tau - t
-
-            def f(v):  # v = t - u
-                val = (h - v) ** rho * mp.exp(-rate * (d + v)) * (d + v) ** (n * beta - 1)
-                if n > 1:
-                    val *= mp.betainc((n - 1) * beta, beta, 0, v / (d + v), regularized=True)
-                return val
-
-            # split geometrically towards v = 0, then remove the v^(q-1) endpoint
-            # behaviour on the first piece with v = w^(1/q)
-            pts = [h]
-            while pts[-1] > min(q for q in (d, 1 / rate, h) if q > 0) / 8:
-                pts.append(pts[-1] / 2)
-            q = n * beta if d == 0 else (n - 1) * beta + 1
-            head = mp.quad(lambda w: f(w ** (1 / q)) * w ** (1 / q - 1) / q, [0, pts[-1] ** q])
-            integral = head + mp.quad(f, pts[::-1])
-            return scale**n * integral / (mp.gamma(n * beta) * h**n)
-
-        for case in CASES:
-            print(case, [mp.nstr(alpha(*case[:3], n, *case[3:]), 17) for n in range(1, 6)])
-
-    They agree with the exact series summed in mpmath to 1e-28.  The cases
-    cover ``tau == t`` with ``n * beta < 1`` endpoint singularities, a far
-    lag, ``(tau - t) / (t - s) = 1e-3``, and ``rate * (t - s) = 13`` at the
-    edge of the series range.
+    The cases cover ``tau == t`` with ``n * beta < 1``, a far lag,
+    ``(tau - t) / (t - s) = 1e-3``, and ``rate * (t - s) = 13`` just below
+    the series threshold.
     """
     s, t, tau, beta, scale, rate, rho = case
     assert rate * (t - s) <= _gamma_series_x_max(64, "float64")
@@ -268,9 +286,9 @@ def test_gamma_series_matches_high_precision_reference(case, expected):
     _assert_allclose(coeffs.alpha[0], expected, atol=0.0, rtol=1e-12)
 
 
-@pytest.mark.parametrize("case, expected", _GAMMA_FALLBACK_REFERENCE)
-def test_gamma_fallback_matches_high_precision_reference(case, expected):
-    """Tanh-sinh fallback for ``rate * (t - s)`` beyond the series range."""
+@pytest.mark.parametrize("case, expected", _GAMMA_QUAD_REFERENCE)
+def test_gamma_quadrature_matches_high_precision_reference(case, expected):
+    """Above the series threshold, 64 and 128 tanh-sinh nodes match to 1e-6 and 1e-10."""
     s, t, tau, beta, scale, rate, rho = case
     assert rate * (t - s) > _gamma_series_x_max(64, "float64")
     default = _gamma_kernel(beta, scale=scale, rate=rate).coef(s, t, tau, trunc=5, rho=rho)
@@ -279,8 +297,8 @@ def test_gamma_fallback_matches_high_precision_reference(case, expected):
     _assert_allclose(fine.coef(s, t, tau, trunc=5, rho=rho).alpha[0], expected, atol=0.0, rtol=1e-10)
 
 
-def test_gamma_series_range_and_fallback_are_continuous():
-    """Coefficients just inside and just outside the series range agree."""
+def test_gamma_series_and_quadrature_agree_at_threshold():
+    """Coefficients at ``rate * (t - s) = x_max * (1 -+ 1e-12)`` agree."""
     x_max = _gamma_series_x_max(64, "float64")
     assert 13.8 < x_max < 13.9
     assert 18.9 < _gamma_series_x_max(64, "float32") < 19.0
@@ -294,38 +312,22 @@ def test_gamma_series_range_and_fallback_are_continuous():
         _assert_allclose(outside, inside, atol=0.0, rtol=1e-10)
 
 
-def _gamma_coef_sum(scale, rate, s, t, tau, *, beta, rho):
-    kernel = GammaKernel(beta=beta, scale=scale, rate=rate, A=jnp.ones((1, 1, 1)))
-    weights = jnp.array([1.0, 0.7, -0.3, 0.2, 0.5])
-    return jnp.sum(kernel.coef(s, t, tau, trunc=5, rho=rho).alpha[..., 0, :] * weights)
-
-
-def _central_difference(f, x, eps=1e-6):
-    return (f(x + eps) - f(x - eps)) / (2.0 * eps)
+def _gamma_coef_sum(scale, rate, s, t, tau, *, beta):
+    return _weighted_coef_sum(_gamma_kernel(beta, scale=scale, rate=rate), s, t, tau, rho=beta)
 
 
 @pytest.mark.parametrize("beta", [0.3, 1.7])
 @pytest.mark.parametrize(
     "s, t, tau, rate",
     [(0.1, 0.6, 0.85, 2.5), (0.0, 0.5, 0.7, 40.0)],
-    ids=["series", "fallback"],
+    ids=["series", "quad"],
 )
 def test_gamma_gradients_match_finite_differences(beta, s, t, tau, rate):
     """Gradients w.r.t. scale, rate, s, t and tau."""
-    scale, rho = 1.3, beta
-    args = (scale, rate, s, t, tau)
-    grads = jax.grad(
-        lambda *a: _gamma_coef_sum(*a, beta=beta, rho=rho), argnums=(0, 1, 2, 3, 4)
-    )(*args)
-    for i, grad in enumerate(grads):
-        def partial(v, i=i):
-            shifted = list(args)
-            shifted[i] = v
-            return _gamma_coef_sum(*shifted, beta=beta, rho=rho)
-
-        np.testing.assert_allclose(
-            float(grad), float(_central_difference(partial, args[i])), rtol=1e-6, atol=1e-9
-        )
+    check_grads_each(
+        functools.partial(_gamma_coef_sum, beta=beta), (1.3, rate, s, t, tau),
+        eps=1e-6, rtol=1e-6, atol=1e-9,
+    )
 
 
 @pytest.mark.parametrize("beta", [0.3, 1.7])
@@ -333,7 +335,7 @@ def test_gamma_gradients_match_finite_differences(beta, s, t, tau, rate):
 def test_gamma_rate_gradient_at_zero(beta, tau):
     """d alpha_n / d rate at rate 0 is scale^n (alpha^frac(rho+1) - (tau-s) alpha^frac(rho))."""
     s, t, scale = 0.1, 0.6, 1.3
-    frac = FractionalKernel(beta=jnp.array([beta]), A=jnp.ones((1, 1, 1)))
+    frac = _fractional_kernel(beta)
     n = jnp.arange(1.0, 6.0)
     for rho in (0.0, beta):
         got = jax.jacfwd(
@@ -351,27 +353,25 @@ def test_gamma_rate_gradient_at_zero(beta, tau):
 @pytest.mark.parametrize("beta", [0.3, 1.0, 1.7])
 @pytest.mark.parametrize("rate", [0.0, 2.5, 40.0])
 def test_gamma_gradients_are_finite_on_diagonal_and_invalid_triples(beta, rate):
-    """``tau == t`` and masked triples give finite gradients; the diagonal direction is exact."""
-    f = lambda *a: _gamma_coef_sum(*a, beta=beta, rho=beta)
-    on_diag = jax.grad(f, argnums=(0, 1, 2, 3, 4))(1.3, rate, 0.1, 0.6, 0.6)
-    assert all(np.isfinite(float(g)) for g in on_diag)
+    """Gradients are finite at ``tau == t`` and zero for ``tau < t``.
 
-    along = jax.grad(lambda c: f(1.3, rate, 0.1, c, c))(0.6)
-    np.testing.assert_allclose(
-        float(along),
-        float(_central_difference(lambda c: f(1.3, rate, 0.1, c, c), 0.6)),
-        rtol=1e-6,
+    The derivative along ``t == tau`` matches central differences.
+    """
+    f = functools.partial(_gamma_coef_sum, beta=beta)
+    grad_f = jax.grad(f, argnums=range(5))
+    assert all(np.isfinite(float(g)) for g in grad_f(1.3, rate, 0.1, 0.6, 0.6))
+    check_grads(
+        lambda c: f(1.3, rate, 0.1, c, c), (0.6,),
+        order=1, modes=("rev",), eps=1e-6, rtol=1e-6, atol=0.0,
     )
-
-    invalid = jax.grad(f, argnums=(0, 1, 2, 3, 4))(1.3, rate, 0.1, 0.6, 0.5)
-    assert all(float(g) == 0.0 for g in invalid)
+    assert all(float(g) == 0.0 for g in grad_f(1.3, rate, 0.1, 0.6, 0.5))
 
 
 def test_gamma_float32_matches_float64():
     """float32 coefficients are finite and close to float64, including far lags."""
     times = np.linspace(0.0, 1.0, 9)
     tau = np.array([0.125, 0.5, 1.0, 40.0])
-    # rate 400 puts rate * (t - s) = 50 beyond the float32 series range.
+    # With rate 400, rate * (t - s) >= 50 is above the float32 series threshold.
     for beta, rate in [(0.3, 0.0), (0.6, 1.5), (1.7, 3.0), (0.6, 400.0)]:
         got, ref = (
             _gamma_kernel(beta, scale=1.3, rate=rate, dtype=dtype)
@@ -386,7 +386,8 @@ def test_gamma_float32_matches_float64():
         np.testing.assert_allclose(got[representable], ref[representable], rtol=5e-5)
         assert np.all(got[~representable] < 1e-30)
 
-    # z^a ~ 1e-41 underflows a linear-space float32 closed form at this lag.
+    # z = (t - s) / (tau - s) = 1 / 30000 and a = 2 n + 1 give z^a < 1e-38 for
+    # n >= 4, below the float32 normal range.
     far32 = _gamma_kernel(2.0, dtype=jnp.float32).coef(0.0, 1e-3, 30.0, trunc=6, rho=2.0)
     far64 = _gamma_kernel(2.0).coef(0.0, 1e-3, 30.0, trunc=6, rho=2.0)
     assert np.all(_np(far32.alpha) > 0.0)
@@ -397,58 +398,49 @@ def test_gamma_float32_matches_float64():
 # Derivatives with respect to the kernel parameters, including beta
 # ---------------------------------------------------------------------------
 
-# name -> (parameters, kernel built from them); beta is always params[0].
-_PARAM_KERNELS = {
-    "fractional": (
-        (0.3,),
-        lambda p: FractionalKernel(beta=jnp.stack([p[0]]), A=jnp.ones((1, 1, 1))),
-    ),
-    "fractional_q2": (
-        (0.45, 1.3),
-        lambda p: FractionalKernel(beta=jnp.stack([p[0], p[1]]), A=jnp.ones((2, 1, 1))),
-    ),
-    # (beta, scale, rate); rate * (t - s) is 1.25 (series) and 20 (fallback).
-    "gamma_series": (
-        (0.3, 1.3, 2.5),
-        lambda p: GammaKernel(beta=p[0], scale=p[1], rate=p[2], A=jnp.ones((1, 1, 1))),
-    ),
-    "gamma_fallback": (
-        (0.3, 1.3, 40.0),
-        lambda p: GammaKernel(beta=p[0], scale=p[1], rate=p[2], A=jnp.ones((1, 1, 1))),
-    ),
+# name -> parameters of parameter_kernel; rate * (t - s) is 1.25 for "gamma_series"
+# and 20 for "gamma_quad".
+_KERNEL_PARAMS = {
+    "fractional": (0.3,),
+    "fractional_q2": (0.45, 1.3),
+    "gamma_series": (0.3, 1.3, 2.5),
+    "gamma_quad": (0.3, 1.3, 40.0),
 }
 
 
-def _weighted_coef_sum(params, s, t, tau, *, kernel, rho):
-    """Mixed-sign weighted sum of all coefficients; ``rho="beta"`` ties rho to beta."""
-    rho_value = params[0] if rho == "beta" else rho
-    alpha = _PARAM_KERNELS[kernel][1](params).coef(s, t, tau, trunc=4, rho=rho_value).alpha
-    weights = jnp.cos(jnp.arange(alpha.size, dtype=alpha.dtype)).reshape(alpha.shape)
-    return jnp.sum(weights * alpha)
+def _parameter_coef_sum(params, s, t, tau, *, kernel, rho):
+    """``_weighted_coef_sum`` of ``parameter_kernel``; ``rho="beta"`` ties rho to beta."""
+    return _weighted_coef_sum(
+        parameter_kernel(kernel, params, jnp.ones((1, 1, 1))),
+        s, t, tau, rho=params[0] if rho == "beta" else rho,
+    )
 
 
 @pytest.mark.parametrize("rho", [0.0, "beta", 1.0], ids=["rho0", "rho_beta", "rho1"])
 @pytest.mark.parametrize("tau", [0.6, 0.85], ids=["tau_eq_t", "tau_gt_t"])
-@pytest.mark.parametrize("kernel", list(_PARAM_KERNELS))
+@pytest.mark.parametrize("kernel", list(_KERNEL_PARAMS))
 def test_parameter_gradients_match_finite_differences(kernel, tau, rho):
     """Gradients w.r.t. beta (and scale, rate) of the coefficients."""
-    params = jnp.asarray(_PARAM_KERNELS[kernel][0])
-    f = lambda p: _weighted_coef_sum(p, 0.1, 0.6, tau, kernel=kernel, rho=rho)
-    grad = _np(jax.grad(f)(params))
-    assert np.all(np.isfinite(grad))
-    for i in range(params.shape[0]):
-        unit = jnp.zeros_like(params).at[i].set(1.0)
-        expected = _central_difference(lambda v: f(params + v * unit), 0.0)
-        np.testing.assert_allclose(grad[i], float(expected), rtol=1e-7, atol=1e-9)
+    check_grads_each(
+        lambda p: _parameter_coef_sum(p, 0.1, 0.6, tau, kernel=kernel, rho=rho),
+        (jnp.asarray(_KERNEL_PARAMS[kernel]),), eps=1e-6, rtol=1e-7, atol=1e-9,
+    )
 
 
-@pytest.mark.parametrize("kernel", list(_PARAM_KERNELS))
+@pytest.mark.parametrize("kernel", list(_KERNEL_PARAMS))
 def test_parameter_gradients_vanish_on_invalid_triples(kernel):
-    """Masked triples (t == s, t < s, tau < t) contribute exactly zero, not NaN."""
-    params = jnp.asarray(_PARAM_KERNELS[kernel][0])
+    """Triples with t == s, t < s or tau < t have gradient exactly zero, not NaN."""
+    params = jnp.asarray(_KERNEL_PARAMS[kernel])
     s = jnp.array([0.5, 0.6, 0.3])
     t = jnp.array([0.5, 0.4, 0.7])
     tau = jnp.array([1.0, 0.9, 0.5])
     for rho in (0.0, "beta"):
-        grad = jax.grad(lambda p: _weighted_coef_sum(p, s, t, tau, kernel=kernel, rho=rho))(params)
-        np.testing.assert_array_equal(_np(grad), 0.0)
+        f = lambda p: _parameter_coef_sum(p, s, t, tau, kernel=kernel, rho=rho)
+        np.testing.assert_array_equal(_np(jax.grad(f)(params)), 0.0)
+
+
+if __name__ == "__main__":
+    import mpmath as mp
+
+    for case, _ in _GAMMA_SERIES_REFERENCE + _GAMMA_QUAD_REFERENCE:
+        print(case, [mp.nstr(_mpmath_alpha(*case[:3], n, *case[3:]), 17) for n in range(1, 6)])

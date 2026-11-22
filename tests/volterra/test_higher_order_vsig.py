@@ -19,6 +19,9 @@ from tensordev.volterra.eval_general import eval_vte as eval_vte_general
 from tensordev.volterra.eval_scalar import eval_vte as eval_vte_scalar
 
 _CORE = Jax()
+_X = jnp.array(
+    [[0.0, 0.0], [0.2, -0.1], [0.4, 0.3], [0.1, 0.5], [-0.2, 0.2]], dtype=jnp.float64
+)
 
 
 def _unit(batch_shape, m, trunc, dtype=jnp.float64):
@@ -84,15 +87,11 @@ def _assert_allclose(got, ref, *, atol, label=""):
 @pytest.mark.parametrize("beta", [0.6, 0.9, 1.3])
 def test_higher_order_vsig_matches_fft_fractional(order, trunc, beta):
     """vsig with order>=1 matches vsig_fft on a uniform fractional grid."""
-    X = jnp.array(
-        [[0.0, 0.0], [0.2, -0.1], [0.4, 0.3], [0.1, 0.5], [-0.2, 0.2]],
-        dtype=jnp.float64,
-    )
     A = jnp.eye(2, dtype=jnp.float64)[None, :, :]
     kernel = FractionalKernel(beta=jnp.array([beta]), A=A)
 
-    ref = vsig_fft(X, kernel=kernel, dt=0.5, trunc=trunc, order=order)
-    got = vsig(X, kernel=kernel, dt=0.5, trunc=trunc, order=order)
+    ref = vsig_fft(_X, kernel=kernel, dt=0.5, trunc=trunc, order=order)
+    got = vsig(_X, kernel=kernel, dt=0.5, trunc=trunc, order=order)
     _assert_allclose(got, ref, atol=1e-8, label=f"order={order} trunc={trunc} beta={beta}")
 
 
@@ -116,21 +115,16 @@ def test_higher_order_vsig_matches_fft_gamma(order, trunc):
 @pytest.mark.parametrize("order", [1, 2])
 @pytest.mark.parametrize("beta", [0.6, 1.3])
 def test_higher_order_vsig_gamma_rate_zero_matches_fractional(fn, order, beta):
-    """A gamma kernel with ``rate=0, scale=1`` is the fractional kernel.
+    """A gamma kernel with ``rate = 0, scale = 1`` gives the fractional signature.
 
-    Unlike the vsig/vsig_fft comparison above, this pins the rho-weighted
-    gamma coefficients to an independent closed form.
+    Both kernels are then ``t^(beta - 1) / Gamma(beta)``.
     """
-    X = jnp.array(
-        [[0.0, 0.0], [0.2, -0.1], [0.4, 0.3], [0.1, 0.5], [-0.2, 0.2]],
-        dtype=jnp.float64,
-    )
     A = jnp.eye(2, dtype=jnp.float64)[None, :, :]
     gamma = GammaKernel(beta=jnp.array([beta]), A=A, scale=jnp.array([1.0]), rate=jnp.array([0.0]))
     frac = FractionalKernel(beta=jnp.array([beta]), A=A)
 
-    got = fn(X, kernel=gamma, dt=0.25, trunc=2, order=order)
-    ref = fn(X, kernel=frac, dt=0.25, trunc=2, order=order)
+    got = fn(_X, kernel=gamma, dt=0.25, trunc=2, order=order)
+    ref = fn(_X, kernel=frac, dt=0.25, trunc=2, order=order)
     _assert_allclose(got, ref, atol=1e-12, label=f"order={order} beta={beta}")
 
 
@@ -186,17 +180,13 @@ def test_higher_order_vsig_terminal_consistent_with_trajectory(order):
 @pytest.mark.parametrize("order", [1, 2])
 def test_higher_order_vsig_nonuniform_self_convergence(order):
     """Higher-order vsig on a non-uniform grid self-converges under dyadic refinement."""
-    X = jnp.array(
-        [[0.0, 0.0], [0.2, -0.1], [0.4, 0.3], [0.1, 0.5], [-0.2, 0.2]],
-        dtype=jnp.float64,
-    )
     A = jnp.eye(2, dtype=jnp.float64)[None, :, :]
     kernel = FractionalKernel(beta=jnp.array([0.7]), A=A)
     dt = jnp.array([0.3, 0.5, 0.2, 0.4], dtype=jnp.float64)
     trunc = 3
 
-    coarse = vsig(X, kernel=kernel, dt=dt, trunc=trunc, order=order, dyadic_order=4)
-    fine = vsig(X, kernel=kernel, dt=dt, trunc=trunc, order=order, dyadic_order=5)
+    coarse = vsig(_X, kernel=kernel, dt=dt, trunc=trunc, order=order, dyadic_order=4)
+    fine = vsig(_X, kernel=kernel, dt=dt, trunc=trunc, order=order, dyadic_order=5)
     _assert_allclose(coarse, fine, atol=5e-3, label=f"nonuniform order={order} self-convergence")
 
 

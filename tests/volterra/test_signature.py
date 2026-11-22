@@ -24,8 +24,13 @@ from tensordev.volterra.eval_general import eval_e as eval_e_general
 from tensordev.volterra.eval_general import eval_vte as eval_vte_general
 from tensordev.volterra.eval_scalar import eval_vte as eval_vte_scalar
 
+from parameter_kernels import check_grads_each, parameter_kernel
+
 
 _CORE = Jax()
+_X = jnp.array(
+    [[0.0, 0.0], [0.2, -0.1], [0.4, 0.3], [0.1, 0.5], [-0.2, 0.2]], dtype=jnp.float64
+)
 
 
 def _np(x):
@@ -201,13 +206,11 @@ def _assert_fft_allclose(got, ref, *, atol=_FFT_ATOL):
 @pytest.mark.parametrize("beta", [0.6, 1.0, 1.5])
 def test_vsig_fft_fractional_uniform_grid_matches_vsig(trunc, beta):
     """FFT path (fractional kernel, uniform grid) matches the scan-based vsig."""
-    X = jnp.array([[0.0, 0.0], [0.2, -0.1], [0.4, 0.3], [0.1, 0.5], [-0.2, 0.2]],
-                  dtype=jnp.float64)
     A = jnp.eye(2, dtype=jnp.float64)[None, :, :]
     kernel = FractionalKernel(beta=jnp.array([beta]), A=A)
 
-    ref = vsig(X, kernel=kernel, dt=0.5, trunc=trunc)
-    got = vsig_fft(X, kernel=kernel, dt=0.5, trunc=trunc)
+    ref = vsig(_X, kernel=kernel, dt=0.5, trunc=trunc)
+    got = vsig_fft(_X, kernel=kernel, dt=0.5, trunc=trunc)
     _assert_fft_allclose(got, ref)
 
 
@@ -291,18 +294,6 @@ def test_vsig_fft_q_gt_one_runs():
 # Gradients with respect to kernel parameters
 # ---------------------------------------------------------------------------
 
-def _parameter_kernel(name, params):
-    """Kernel from ``params``; beta is ``params[0]`` (and ``params[1]`` for q = 2)."""
-    A = jnp.eye(2, dtype=jnp.float64)[None]
-    if name == "fractional":
-        return FractionalKernel(beta=jnp.stack([params[0]]), A=A)
-    if name == "fractional_q2":
-        return FractionalKernel(
-            beta=jnp.stack([params[0], params[1]]), A=jnp.concatenate([A, A[:, ::-1]])
-        )
-    return GammaKernel(beta=params[0], scale=params[1], rate=params[2], A=A)
-
-
 _PARAMETER_GRADIENT_CASES = [
     pytest.param(fn, name, params, order, id=f"{fn_id}-{name}-order{order}")
     for fn, fn_id, name, params, order in [
@@ -320,20 +311,12 @@ _PARAMETER_GRADIENT_CASES = [
 @pytest.mark.parametrize("fn, name, params, order", _PARAMETER_GRADIENT_CASES)
 def test_vsig_parameter_gradients_match_finite_differences(fn, name, params, order):
     """``jax.grad`` through vsig w.r.t. beta (and scale, rate) matches central differences."""
-    X = jnp.array(
-        [[0.0, 0.0], [0.2, -0.1], [0.4, 0.3], [0.1, 0.5], [-0.2, 0.2]], dtype=jnp.float64
-    )
-    params = jnp.asarray(params, dtype=jnp.float64)
+    A = jnp.eye(2, dtype=jnp.float64)[None]
 
     def f(p):
-        levels = fn(X, kernel=_parameter_kernel(name, p), dt=0.25, trunc=2, order=order)
+        levels = fn(_X, kernel=parameter_kernel(name, p, A), dt=0.25, trunc=2, order=order)
         return sum(
             jnp.sum(jnp.sin(jnp.arange(level.size) + 1.0) * level.ravel()) for level in levels
         )
 
-    grad = _np(jax.grad(f)(params))
-    eps = 1e-5
-    for i in range(params.shape[0]):
-        step = jnp.zeros_like(params).at[i].set(eps)
-        expected = (f(params + step) - f(params - step)) / (2.0 * eps)
-        np.testing.assert_allclose(grad[i], float(expected), rtol=1e-7, atol=1e-9)
+    check_grads_each(f, (jnp.asarray(params, dtype=jnp.float64),), eps=1e-5, rtol=1e-7, atol=1e-9)

@@ -120,9 +120,10 @@ class ConvolutionKernel:
         rate : Array, default=1.0
             Non-negative exponential decay rate.
         quad_order : int, default=64
-            Number of tanh-sinh nodes of the quadrature fallback used only
-            when ``rate * (t - s)`` exceeds the range of the exact series;
-            see :class:`GammaKernel`.
+            Number of tanh-sinh nodes for coefficients with
+            ``rate * (t - s)`` above the threshold of the truncated series
+            (13.85 in float64 and 18.93 in float32); see
+            :class:`GammaKernel`.
         """
         return GammaKernel(beta=beta, A=A, scale=scale, rate=rate, quad_order=quad_order)
 
@@ -413,20 +414,22 @@ class GammaKernel(ConvolutionKernel):
     the relative error by :math:`\sum_{j\ge 64} x^j/j!` with
     :math:`x = \lambda h`; this is below half the machine epsilon for
     :math:`x \le 13.8` in float64 and :math:`x \le 18.9` in float32.  Larger
-    :math:`x` fall back to tanh-sinh quadrature with ``quad_order`` nodes
-    after a substitution that absorbs :math:`e^{-\lambda(t-u)}`.  Measured
-    against 40-digit references for :math:`\beta \ge 0.15`, the float64
-    relative error of the fallback is about ``1e-9`` for :math:`n\beta < 3`
-    and ``1e-7`` for :math:`n\beta < 6` with the default 64 nodes, and
-    about ``1e-11`` for :math:`n\beta < 6` with 128 nodes; it grows with
-    :math:`n\beta` because the remaining factor
-    :math:`(\tau-u)^{n\beta-1}` sharpens.  In float32 it is about ``1e-5``.
+    :math:`x` substitute :math:`(t-u)/h = -\log(1-cy)/x`,
+    :math:`c = 1-e^{-x}`, so that
+    :math:`e^{-xv}\,\mathrm{d}v = (c/x)\,\mathrm{d}y` for :math:`v = (t-u)/h`, and apply
+    the tanh-sinh rule on :math:`y \in [0, 1]` with ``quad_order`` nodes
+    :math:`y_k = (1+e^{-\pi\sinh t_k})^{-1}` at equispaced :math:`t_k`.  For
+    :math:`\beta \ge 0.15` its float64 relative error is about ``1e-9`` for
+    :math:`n\beta < 3` and ``1e-7`` for :math:`n\beta < 6` with 64 nodes and
+    about ``1e-11`` for :math:`n\beta < 6` with 128 nodes; it grows with the
+    exponent of the integrand factor :math:`(\tau-u)^{n\beta-1}`.  In
+    float32 it is about ``1e-5``.
 
-    At ``tau == t`` the one-sided derivative in ``tau`` alone is infinite for
-    :math:`\beta < 1`.  There the dependence on :math:`(t-s)/(\tau-s)` and
-    :math:`\tau-t` is held fixed, so the partial derivatives in ``t`` and
-    ``tau`` are finite but conventional, while their sum, the derivative
-    along ``tau == t``, is exact.
+    At ``tau == t`` the one-sided partial derivative in ``tau`` is infinite
+    for :math:`\beta < 1`.  There :math:`(t-s)/(\tau-s)` and :math:`\tau-t`
+    are held constant in differentiation, so the returned derivatives in
+    ``t`` and ``tau`` are not the partial derivatives, but their sum, the
+    derivative of :math:`\alpha_n(s, t, t; \rho)` in :math:`t`, is exact.
 
     Parameters
     ----------
@@ -439,10 +442,11 @@ class GammaKernel(ConvolutionKernel):
     A : Array
         Kernel matrix of shape ``(1, m, d)``.
     quad_order : int, default=64
-        Number of tanh-sinh nodes of the large-``rate * (t - s)`` fallback.
-        Coefficients with ``rate * (t - s)`` inside the series range do not
-        depend on it.  Its cost is ``quad_order`` incomplete-beta evaluations
-        per coefficient.
+        Number of tanh-sinh nodes for coefficients with ``rate * (t - s)``
+        above the series threshold (13.85 in float64, 18.93 in float32).  When
+        any coefficient of a call is above it, every coefficient of that call
+        costs ``quad_order``, rounded up to a multiple of 16, incomplete-beta
+        evaluations.
     """
 
     scale: Array
@@ -528,11 +532,7 @@ def _fractional_alpha(
 
     Returns ``(vals, valid)`` with ``vals`` of shape ``leading + (n, M)``.
     """
-    h = t - s
-    tau_s = tau - s
-    valid = (h > 0) & (tau >= t)
-    h_safe = jnp.where(valid, h, 1.0)
-    tau_s_safe = jnp.where(valid, tau_s, 1.0)
+    valid, h_safe, tau_s_safe = _safe_intervals(s, t, tau)
     z = jnp.clip(h_safe / tau_s_safe, 0.0, 1.0)
 
     prefix = xp.matmul(ell, beta)            # (M,)
@@ -541,15 +541,41 @@ def _fractional_alpha(
     b = beta[None, :]
 
     # leading + (M, n)
-    log_scale = (
-        (rho + total) * jnp.log(tau_s_safe[..., None, None])
-        - (degree[:, None] + 1.0) * jnp.log(h_safe[..., None, None])
-        + gammaln(rho + 1.0)
-        - gammaln(rho + total + 1.0)
+    log_scale = _fractional_log_scale(
+        rho,
+        total,
+        degree[:, None] + 1.0,
+        tau_s_safe[..., None, None],
+        h_safe[..., None, None],
     )
     vals = jnp.exp(log_scale) * betainc(a, b, z[..., None, None])
     vals = jnp.where(valid[..., None, None], vals, 0.0)
     return jnp.swapaxes(vals, -1, -2), valid  # leading + (n, M)
+
+
+def _safe_intervals(s: Array, t: Array, tau: Array) -> tuple[Array, Array, Array]:
+    """Mask ``s < t <= tau`` and ``(t - s, tau - s)``, set to 1 where it is false."""
+    h = t - s
+    valid = (h > 0) & (tau >= t)
+    return valid, jnp.where(valid, h, 1.0), jnp.where(valid, tau - s, 1.0)
+
+
+def _fractional_log_scale(
+    rho: float | Array, total: Array, n: Array, tau_s: Array, h: Array
+) -> Array:
+    r"""Logarithm of the prefactor of the fractional coefficients,
+
+    .. math::
+        \log\frac{\Gamma(\rho+1)\,T^{\rho+\gamma}}{\Gamma(\rho+\gamma+1)\,h^n},
+
+    with :math:`T` = ``tau_s`` and :math:`\gamma` = ``total``.
+    """
+    return (
+        (rho + total) * jnp.log(tau_s)
+        - n * jnp.log(h)
+        + gammaln(rho + 1.0)
+        - gammaln(rho + total + 1.0)
+    )
 
 
 # Terms of the gamma series; see GammaKernel for the resulting accuracy range.
@@ -559,7 +585,7 @@ _GAMMA_SERIES_TERMS = 64
 # (t - u)^(n beta - 1) singularity and needs the longer reach; it is capped
 # per dtype so the offsets stay normal numbers.
 _TANH_SINH_SPAN = (5.0, 3.5)
-# Nodes per scan step of the fallback, bounding its working memory.
+# Nodes per scan step of the quadrature, bounding its working memory.
 _TANH_SINH_CHUNK = 16
 
 
@@ -590,17 +616,24 @@ def _gamma_series_x_max(num_terms: int, dtype_name: str) -> float:
 
 @functools.lru_cache(maxsize=None)
 def _tanh_sinh_rule(num_nodes: int, dtype_name: str) -> tuple[np.ndarray, ...]:
-    """Midpoint tanh-sinh rule on ``[0, 1]`` as ``(y, 1 - y, log y, log(1 - y), log w)``.
+    r"""Tanh-sinh rule on ``[0, 1]`` as ``(y, 1 - y, log y, log(1 - y), log w)``.
 
-    Both endpoint offsets are stored directly, so nodes never round onto an
-    endpoint.  Arrays have shape ``(chunks, _TANH_SINH_CHUNK)``; padding
-    nodes carry ``log w = -inf``.
+    .. math::
+        y_k = \frac{1}{1 + e^{-\pi\sinh t_k}}, \qquad
+        w_k = \Delta\,\pi\cosh(t_k)\,y_k(1-y_k), \qquad
+        t_k = -L + (k + \tfrac12)\Delta, \qquad
+        \Delta = \frac{L+R}{N},
+
+    for :math:`k < N` = ``num_nodes``, where
+    :math:`L = \min(L_0, \operatorname{asinh}(-\log(2^{10}\varepsilon_0)/\pi))`,
+    :math:`(L_0, R)` = ``_TANH_SINH_SPAN`` and :math:`\varepsilon_0` is the
+    smallest normal number of the dtype.  :math:`1-y` is stored separately,
+    so it stays positive where :math:`y` rounds to 1.  Arrays have shape
+    ``(chunks, _TANH_SINH_CHUNK)``; padding nodes carry ``log w = -inf``.
     """
-    finfo = np.finfo(np.dtype(dtype_name))
-    reach = -math.log(float(finfo.tiny)) - 10.0 * math.log(2.0)
+    reach = -math.log(float(np.finfo(np.dtype(dtype_name)).tiny)) - 10.0 * math.log(2.0)
     left = min(_TANH_SINH_SPAN[0], math.asinh(reach / math.pi))
-    right = _TANH_SINH_SPAN[1]
-    step = (left + right) / num_nodes
+    step = (left + _TANH_SINH_SPAN[1]) / num_nodes
     nodes = -left + (np.arange(num_nodes) + 0.5) * step
     arg = np.pi * np.sinh(nodes)
     log_y = -np.logaddexp(0.0, -arg)
@@ -652,16 +685,13 @@ def _gamma_alpha(
     with :math:`I_x(0, \beta) = 1`.  For :math:`x = \lambda h` up to
     :func:`_gamma_series_x_max` this is the ``num_terms``-term series of
     :class:`GammaKernel`, and otherwise the ``num_nodes``-node tanh-sinh
-    fallback :func:`_gamma_alpha_quad`.  All inputs are pre-cast to a common
+    quadrature :func:`_gamma_alpha_quad`.  All inputs are pre-cast to a common
     floating-point dtype by :meth:`GammaKernel.alpha`.  The result is zero
     whenever :math:`s < t \le \tau` is violated.
 
     Returns ``(vals, valid)`` with ``vals`` of shape ``leading + (1, M)``.
     """
-    h = t - s
-    valid = (h > 0) & (tau >= t)
-    h_safe = jnp.where(valid, h, 1.0)
-    tau_s_safe = jnp.where(valid, tau - s, 1.0)
+    valid, h_safe, tau_s_safe = _safe_intervals(s, t, tau)
     # z and tau - t are held constant at tau == t, where the derivative in
     # tau alone is infinite for beta < 1 (see GammaKernel).
     delta = jnp.where(valid & (tau > t), tau - t, 0.0)
@@ -670,7 +700,7 @@ def _gamma_alpha(
     x = rate * h_safe
     n = degree + 1.0
 
-    x_max = _gamma_series_x_max(num_terms, jnp.dtype(s.dtype).name)
+    x_max = _gamma_series_x_max(num_terms, s.dtype.name)
     use_quad = valid & (x > x_max)
     alpha = _gamma_alpha_series(
         z, h_safe, tau_s_safe, jnp.where(use_quad, x_max, x),
@@ -701,7 +731,11 @@ def _gamma_alpha_series(
     rho: float | Array,
     num_terms: int,
 ) -> Array:
-    r"""Truncated series :math:`\mathrm{scale}^n e^{-\lambda T}\sum_{j<J} \frac{\lambda^j}{j!}\alpha^{\mathrm{frac}}_n(\rho+j)`.
+    r"""Gamma coefficients by the series truncated after ``J = num_terms`` terms,
+
+    .. math::
+        \mathrm{scale}^n e^{-\lambda T}\sum_{j<J}
+            \frac{\lambda^j}{j!}\,\alpha^{\mathrm{frac}}_n(\rho+j).
 
     With :math:`T = \tau - s`, :math:`a = \rho + (n-1)\beta + 1` and
     :math:`I_j = I_z(a+j, \beta)`,
@@ -715,14 +749,14 @@ def _gamma_alpha_series(
     Only :math:`I_{J-1}` calls ``betainc``; the others follow from the
     additive recurrence :math:`I_j = I_{j+1} + d_j`,
     :math:`d_j = z^{a+j}(1-z)^\beta\,\Gamma(a+j+\beta)/(\Gamma(a+j+1)\Gamma(\beta))`.
-    It runs on :math:`K_j = I_j z^{-j} / S` with a per-entry scale :math:`S`,
-    so every term stays in range in float32.  Inputs ``z, h, tau_s, x`` have
-    the leading shape; the result has shape ``leading + (M,)``.
+    It runs on :math:`K_j = I_j z^{-j} / S` with
+    :math:`S = \max(I_{J-1} z^{1-J}, d_0)` per entry, so every term stays in
+    range in float32.  Inputs ``z, h, tau_s, x`` have the leading shape; the
+    result has shape ``leading + (M,)``.
     """
-    dtype = z.dtype
     a = rho + (n - 1.0) * beta + 1.0  # (M,)
     nb = n * beta
-    k = jnp.arange(num_terms, dtype=dtype)[:, None]  # (J, 1)
+    k = jnp.arange(num_terms, dtype=z.dtype)[:, None]  # (J, 1)
     # P[j] = d_j / (d_0 z^j), shape (J - 1, M) for j < J - 1
     P = jnp.exp(
         gammaln(a + k[:-1] + beta) - gammaln(a + beta)
@@ -765,10 +799,7 @@ def _gamma_alpha_series(
     log_pref = (
         n * jnp.log(scale)
         - rate * tau_s[..., None]
-        + gammaln(rho + 1.0)
-        - gammaln(rho + nb + 1.0)
-        + (rho + nb) * jnp.log(tau_s[..., None])
-        - n * jnp.log(h[..., None])
+        + _fractional_log_scale(rho, nb, n, tau_s[..., None], h[..., None])
         + log_S
     )
     return jnp.exp(log_pref) * acc
@@ -788,18 +819,24 @@ def _gamma_alpha_quad(
     r"""Tanh-sinh quadrature of the Gamma coefficients for large ``x = rate * h``.
 
     Substitutes :math:`v = (t-u)/h = -\log(1 - c y)/x`, :math:`c = 1 - e^{-x}`,
-    so that :math:`e^{-x v}\,\mathrm{d}v = (c/x)\,\mathrm{d}y` absorbs the
-    exponential, and integrates over :math:`y \in [0, 1]` with
-    :func:`_tanh_sinh_rule`, which handles the algebraic singularities at
-    :math:`u = t` and :math:`u = s`.  The distances to both endpoints are
-    formed from the stored node offsets without cancellation.  Nodes are
-    processed in chunks by a checkpointed scan with a running log-sum-exp.
-    ``delta = tau - t``; the result has shape ``leading + (M,)``.
+    so that :math:`e^{-x v}\,\mathrm{d}v = (c/x)\,\mathrm{d}y`, and sums over
+    the nodes :math:`(y_k, w_k)` of :func:`_tanh_sinh_rule`:
+
+    .. math::
+        \alpha_n \approx \frac{\mathrm{scale}^n e^{-\lambda\delta}\, c}
+            {\Gamma(n\beta)\, h^{n-1} x}
+            \sum_k w_k\, \bigl(h(1-v_k)\bigr)^\rho (\delta + h v_k)^{n\beta-1}
+            I_{\frac{h v_k}{\delta + h v_k}}\bigl((n-1)\beta, \beta\bigr),
+
+    with :math:`\delta = \tau - t`, :math:`x v_k = -\log(1 - c y_k)` and
+    :math:`x(1 - v_k) = \log(y_k + (1-y_k) e^x)`, both formed from the stored
+    :math:`y_k` and :math:`1 - y_k` without cancellation.  Nodes are processed
+    in chunks by a checkpointed scan accumulating the sum in log space.  The
+    result has shape ``leading + (M,)``.
     """
     dtype = h.dtype
     nodes = tuple(
-        jnp.asarray(v, dtype=dtype)
-        for v in _tanh_sinh_rule(num_nodes, jnp.dtype(dtype).name)
+        jnp.asarray(v, dtype=dtype) for v in _tanh_sinh_rule(num_nodes, dtype.name)
     )
     xe = x[..., None]
     c = -jnp.expm1(-xe)
@@ -807,8 +844,7 @@ def _gamma_alpha_quad(
     de = delta[..., None]
     use_inc = (n > 1.0)[:, None] & (de > 0)[..., None, :]  # leading + (M, 1)
     a_inc = jnp.where(n > 1.0, (n - 1.0) * beta, 1.0)[:, None]
-    nb = (n * beta)[:, None]
-    tiny = jnp.finfo(dtype).tiny
+    nb = n * beta
 
     def log_f(y: Array, yc: Array, log_y: Array, log_yc: Array, log_w: Array) -> Array:
         # x v = -log(1 - c y) and x (1 - v) = log(y + (1 - y) e^x)
@@ -818,7 +854,7 @@ def _gamma_alpha_quad(
         tau_u = de + t_u
         # leading + (M, chunk)
         x_inc = (t_u / tau_u)[..., None, :]
-        inc_ok = use_inc & (x_inc > tiny)
+        inc_ok = use_inc & (x_inc > jnp.finfo(dtype).tiny)
         inc = betainc(a_inc, beta, jnp.where(inc_ok, x_inc, 0.5))
         inc_ok = inc_ok & (inc > 0)
         log_inc = jnp.where(
@@ -829,7 +865,7 @@ def _gamma_alpha_quad(
         return (
             log_w
             + rho * jnp.log(he * xw / xe)[..., None, :]
-            + (nb - 1.0) * jnp.log(tau_u)[..., None, :]
+            + (nb[:, None] - 1.0) * jnp.log(tau_u)[..., None, :]
             + log_inc
         )
 
@@ -851,7 +887,7 @@ def _gamma_alpha_quad(
         n * jnp.log(scale)
         - rate * de
         + (1.0 - n) * jnp.log(he)
-        - gammaln(n * beta)
+        - gammaln(nb)
         + jnp.log(c / xe)
     )
     return jnp.exp(log_pref + log_sum)
