@@ -6,6 +6,8 @@ import jax.numpy as jnp
 import jax.random as jr
 from jax import lax
 
+from tensordev.core.utils.xp import xp
+
 
 def _as_key(key):
     if isinstance(key, int):
@@ -119,8 +121,8 @@ def random_trigonometric_polynomial_paths(
     cos_basis = jnp.cos(angles) - 1.0
 
     X = (
-        jnp.einsum("bdm,mt->bdt", sin_coeffs, sin_basis, precision="highest")
-        + jnp.einsum("bdm,mt->bdt", cos_coeffs, cos_basis, precision="highest")
+        xp.einsum("bdm,mt->bdt", sin_coeffs, sin_basis)
+        + xp.einsum("bdm,mt->bdt", cos_coeffs, cos_basis)
     )
 
     return jnp.swapaxes(X, 1, 2)

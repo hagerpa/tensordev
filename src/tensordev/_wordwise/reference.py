@@ -12,6 +12,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tensordev.core.utils.xp import xp
 from tensordev._wordwise.layout import WordwiseBlockPlan, WordwiseLayoutPlan
 from tensordev._wordwise.plans import PrefixGraphView
 from tensordev.core.bigraded.types import BigradedTensor
@@ -277,9 +278,9 @@ def fssk_q1_word_state_reference(
             for a in range(1, p):
                 h = (
                     h * y_step[word[a - 1]]
-                    + jnp.matmul(prefixes[a - 1], phi_step[p - 1 - a], precision="highest")
+                    + xp.matmul(prefixes[a - 1], phi_step[p - 1 - a])
                 )
-            updated = jnp.matmul(prefixes[p - 1], E_step, precision="highest") + h * y_step[word[p - 1]]
+            updated = xp.matmul(prefixes[p - 1], E_step) + h * y_step[word[p - 1]]
             prefixes = prefixes.at[p - 1].set(updated)
         return prefixes, None
 
@@ -386,14 +387,14 @@ def fssk_q1_quotient_graph_state_reference(
             )
             for degree in range(1, target_degree):
                 incoming = right_action(horner, increment)
-                memory = jnp.matmul(old, phi_step[target_degree - 1 - degree], precision="highest")
+                memory = xp.matmul(old, phi_step[target_degree - 1 - degree])
                 horner = jnp.where(
                     (degrees == degree)[:, None],
                     incoming + memory,
                     0,
                 )
             incoming = right_action(horner, increment)
-            updated = jnp.matmul(old, E_step, precision="highest") + incoming
+            updated = xp.matmul(old, E_step) + incoming
             new = jnp.where(
                 (degrees == target_degree)[:, None],
                 updated,
@@ -477,7 +478,7 @@ def fssk_q1_readout_reference(
     for block in state_blocks:
         if block.shape[-2] != readout.shape[0]:
             raise ValueError("state-space dimension and readout length disagree.")
-        blocks.append(jnp.einsum("...rw,r->...w", block, readout, precision="highest"))
+        blocks.append(xp.einsum("...rw,r->...w", block, readout))
     return plan.assemble_signature(blocks)
 
 

@@ -15,9 +15,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tensordev.core.utils.xp import xp
 from tensordev.util.combinatorics import build_multiindex_layout, num_multiindices_leq
 from tensordev.sss.coeffs import FSSKCoefficients
-from tensordev.sss.lambdas import _HIGHEST, DenseLambda, JordanLambda, Lambda
+from tensordev.sss.lambdas import DenseLambda, JordanLambda, Lambda
 
 Array = jax.Array
 
@@ -533,7 +534,7 @@ def prepare_coef(
         out_axes=0,
     )(zeta)  # (m, B, n, R)
 
-    beta = jnp.einsum("mbr,pr->mbp", r, b_c, precision=_HIGHEST)
+    beta = xp.einsum("mbr,pr->mbp", r, b_c)
     gamma = jnp.prod(
         beta[None, :, :, :] ** ell.astype(complex_dtype)[:, None, None, :],
         axis=-1,

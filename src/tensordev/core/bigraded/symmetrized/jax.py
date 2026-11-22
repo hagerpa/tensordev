@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Literal
 
-import jax.numpy as jnp
-
 from tensordev.core.capabilities import _WORDWISE_SIGNATURE_PROTOCOL
 from tensordev.core.bigraded.jax_backend import (
     _JaxPartiallySymmetrizedBigradedBackend,
@@ -27,6 +25,7 @@ from tensordev.core.bigraded.symmetrized.transforms import (
     PartiallySymmetrizedShearPlanStore,
 )
 from tensordev.core.bigraded.types import Bidegree
+from tensordev.core.utils.xp import xp
 
 
 class JaxPartiallySymmetrizedBigraded(
@@ -52,7 +51,7 @@ class JaxPartiallySymmetrizedBigraded(
         precompute_shuffle: bool | Literal["generator"] = False,
     ) -> None:
         super().__init__(
-            jnp,
+            xp,
             dims=dims,
             max_trunc=max_trunc,
             default_trunc=default_trunc,

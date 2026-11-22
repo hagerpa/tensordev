@@ -29,6 +29,8 @@ import jax.numpy as jnp
 import jax.scipy.linalg as jsp_linalg
 import numpy as np
 
+from tensordev.core.utils.xp import xp
+
 Array = jax.Array
 
 # ---------------------------------------------------------------------------
@@ -218,25 +220,16 @@ def _apply_dt_solve(
 # ---------------------------------------------------------------------------
 
 
-# Full float32 matmuls: on Ampere and newer GPUs XLA otherwise uses TF32,
-# which loses about three digits.
-_HIGHEST = jax.lax.Precision.HIGHEST
-
-
-def _mm(a: Array, b: Array) -> Array:
-    return jnp.matmul(a, b, precision=_HIGHEST)
-
-
 @jax.jit
 def _left_multiply(m: Array, x: Array) -> Array:
     """Return ``m @ x`` on the second-to-last axis."""
-    return jnp.einsum("ab,...bc->...ac", m, x, precision=_HIGHEST)
+    return xp.einsum("ab,...bc->...ac", m, x)
 
 
 @jax.jit
 def _right_multiply(x: Array, m: Array) -> Array:
     """Return ``x @ m`` on the last axis."""
-    return jnp.einsum("...ab,bc->...ac", x, m, precision=_HIGHEST)
+    return xp.einsum("...ab,bc->...ac", x, m)
 
 
 # ---------------------------------------------------------------------------
@@ -286,8 +279,8 @@ _PADE_THETA = 1.0  # shared 1-norm scaling threshold for [6/6] Padé (full float
 def _pade_eval(B: Array, B2: Array, B4: Array, B6: Array,
                n: Array, d: Array, eye: Array) -> Array:
     """Evaluate a [6/6] Padé rational via even/odd splitting. Single matrix, no scaling."""
-    N_val = (n[0] * eye + n[2] * B2 + n[4] * B4 + n[6] * B6) + _mm(B, n[1] * eye + n[3] * B2 + n[5] * B4)
-    D_val = (d[0] * eye + d[2] * B2 + d[4] * B4 + d[6] * B6) + _mm(B, d[1] * eye + d[3] * B2 + d[5] * B4)
+    N_val = (n[0] * eye + n[2] * B2 + n[4] * B4 + n[6] * B6) + xp.matmul(B, n[1] * eye + n[3] * B2 + n[5] * B4)
+    D_val = (d[0] * eye + d[2] * B2 + d[4] * B4 + d[6] * B6) + xp.matmul(B, d[1] * eye + d[3] * B2 + d[5] * B4)
     return jnp.linalg.solve(D_val, N_val)
 
 
@@ -316,9 +309,9 @@ def _phi_pade_ss(A: Array, *, order: int) -> Array:
     def evaluate(_):
         B = jnp.where(valid[..., None, None], A, 0)
         B = B * jnp.exp2(-s.astype(norm1.dtype))[..., None, None]
-        B2 = _mm(B, B)
-        B4 = _mm(B2, B2)
-        B6 = _mm(B4, B2)
+        B2 = xp.matmul(B, B)
+        B4 = xp.matmul(B2, B2)
+        B6 = xp.matmul(B4, B2)
         phi1 = _pade_eval(
             B, B2, B4, B6,
             jnp.asarray(_PHI1_PADE_N, dtype=dtype),
@@ -335,10 +328,10 @@ def _phi_pade_ss(A: Array, *, order: int) -> Array:
 
         def square(values):
             C, p1 = values[:2]
-            p1_new = 0.5 * _mm(p1, 2.0 * eye + _mm(C, p1))
+            p1_new = 0.5 * xp.matmul(p1, 2.0 * eye + xp.matmul(C, p1))
             if order == 1:
                 return 2.0 * C, p1_new
-            return 2.0 * C, p1_new, 0.5 * values[2] + 0.25 * _mm(p1, p1)
+            return 2.0 * C, p1_new, 0.5 * values[2] + 0.25 * xp.matmul(p1, p1)
 
         def step(i, values):
             active = i < s
@@ -588,7 +581,7 @@ class DenseLambda(Lambda):
 
         def batched_action(dt_vec: Array, x_flat: Array) -> Array:
             op = self._dense_op(dt_vec, dtype=x_flat.dtype, kind=kind)
-            return jnp.einsum("mab,mbc->mac", op, x_flat, precision=_HIGHEST)
+            return xp.einsum("mab,mbc->mac", op, x_flat)
 
         return _apply_dt_action(
             dt, was_scalar, x, dtype=dtype, side=side, name=name,
@@ -686,37 +679,37 @@ class DenseLambda(Lambda):
     def expm_multiply_left(self, dt, rhs, *, dtype=None) -> Array:
         d = self._default_dtype(dtype)
         if self._expm_mat is not None:
-            return jnp.einsum("ab,...bc->...ac", self._expm_mat.astype(d), jnp.asarray(rhs, dtype=d), precision=_HIGHEST)
+            return xp.einsum("ab,...bc->...ac", self._expm_mat.astype(d), jnp.asarray(rhs, dtype=d))
         return self._action(dt, rhs, dtype=d, kind="expm", side="left")
 
     def expm_multiply_right(self, dt, lhs, *, dtype=None) -> Array:
         d = self._default_dtype(dtype)
         if self._expm_mat is not None:
-            return jnp.einsum("...ab,cb->...ac", jnp.asarray(lhs, dtype=d), self._expm_mat.astype(d), precision=_HIGHEST)
+            return xp.einsum("...ab,cb->...ac", jnp.asarray(lhs, dtype=d), self._expm_mat.astype(d))
         return self._action(dt, lhs, dtype=d, kind="expm", side="right")
 
     def phi1_multiply_left(self, dt, rhs, *, dtype=None) -> Array:
         d = self._default_dtype(dtype)
         if self._phi1_mat is not None:
-            return jnp.einsum("ab,...bc->...ac", self._phi1_mat.astype(d), jnp.asarray(rhs, dtype=d), precision=_HIGHEST)
+            return xp.einsum("ab,...bc->...ac", self._phi1_mat.astype(d), jnp.asarray(rhs, dtype=d))
         return self._action(dt, rhs, dtype=d, kind="phi1", side="left")
 
     def phi1_multiply_right(self, dt, lhs, *, dtype=None) -> Array:
         d = self._default_dtype(dtype)
         if self._phi1_mat is not None:
-            return jnp.einsum("...ab,cb->...ac", jnp.asarray(lhs, dtype=d), self._phi1_mat.astype(d), precision=_HIGHEST)
+            return xp.einsum("...ab,cb->...ac", jnp.asarray(lhs, dtype=d), self._phi1_mat.astype(d))
         return self._action(dt, lhs, dtype=d, kind="phi1", side="right")
 
     def phi2_multiply_left(self, dt, rhs, *, dtype=None) -> Array:
         d = self._default_dtype(dtype)
         if self._phi2_mat is not None:
-            return jnp.einsum("ab,...bc->...ac", self._phi2_mat.astype(d), jnp.asarray(rhs, dtype=d), precision=_HIGHEST)
+            return xp.einsum("ab,...bc->...ac", self._phi2_mat.astype(d), jnp.asarray(rhs, dtype=d))
         return self._action(dt, rhs, dtype=d, kind="phi2", side="left")
 
     def phi2_multiply_right(self, dt, lhs, *, dtype=None) -> Array:
         d = self._default_dtype(dtype)
         if self._phi2_mat is not None:
-            return jnp.einsum("...ab,cb->...ac", jnp.asarray(lhs, dtype=d), self._phi2_mat.astype(d), precision=_HIGHEST)
+            return xp.einsum("...ab,cb->...ac", jnp.asarray(lhs, dtype=d), self._phi2_mat.astype(d))
         return self._action(dt, lhs, dtype=d, kind="phi2", side="right")
 
 
@@ -906,11 +899,11 @@ def _apply_chain(coeff: Array, rhs: Array, *, lower: bool) -> Array:
     if coeff.ndim == 2:
         # Scalar chain
         weights = jnp.take(coeff, idx_j, axis=1) * mask_j[None, :, :]
-        return jnp.einsum("tij,tjc->tic", weights, rhs, precision=_HIGHEST)
+        return xp.einsum("tij,tjc->tic", weights, rhs)
     else:
         # Matrix (2x2 block) chain
         weights = jnp.take(coeff, idx_j, axis=1) * mask_j[None, :, :, None, None]
-        return jnp.einsum("tijuv,tjvc->tiuc", weights, rhs, precision=_HIGHEST)
+        return xp.einsum("tijuv,tjvc->tiuc", weights, rhs)
 
 
 # ---------------------------------------------------------------------------
@@ -949,7 +942,7 @@ def _jordan_lambda_left_unbatched(
             [[osc_decays[i], -osc_freqs[i]], [osc_freqs[i], osc_decays[i]]],
             dtype=rhs.dtype,
         )
-        out = jnp.einsum("uv,...nvc->...nuc", base, block, precision=_HIGHEST)
+        out = xp.einsum("uv,...nvc->...nuc", base, block)
         if size > 1:
             out = out.at[..., :-1, :, :].add(-block[..., 1:, :, :])
         parts.append(out.reshape(rhs.shape[:-2] + (width, rhs.shape[-1])))
@@ -1426,7 +1419,7 @@ class JordanLambda(Lambda):
             grp_starts = [g[1] for g in grp]
             block_stack = jnp.stack([blocks[oi].astype(dtype) for oi in orig_idxs])   # (n, w, w)
             rhs_stack = jnp.stack([rhs[..., s:s+w, :] for s in grp_starts], axis=-3)  # (..., n, w, cols)
-            res = jnp.einsum("nab,...nbc->...nac", block_stack, rhs_stack, precision=_HIGHEST)             # (..., n, w, cols)
+            res = xp.einsum("nab,...nbc->...nac", block_stack, rhs_stack)             # (..., n, w, cols)
             for i, oi in enumerate(orig_idxs):
                 result_map[oi] = res[..., i, :, :]
         return jnp.concatenate([result_map[i] for i in range(len(entries))], axis=-2)
@@ -1448,7 +1441,7 @@ class JordanLambda(Lambda):
             grp_starts = [g[1] for g in grp]
             block_stack = jnp.stack([blocks[oi].astype(dtype) for oi in orig_idxs])   # (n, w, w)
             lhs_stack = jnp.stack([lhs[..., s:s+w] for s in grp_starts], axis=-2)     # (..., k, n, w)
-            res = jnp.einsum("nab,...knb->...kna", block_stack, lhs_stack, precision=_HIGHEST)             # (..., k, n, w)
+            res = xp.einsum("nab,...knb->...kna", block_stack, lhs_stack)             # (..., k, n, w)
             for i, oi in enumerate(orig_idxs):
                 result_map[oi] = res[..., i, :]
         return jnp.concatenate([result_map[i] for i in range(len(entries))], axis=-1)

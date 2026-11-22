@@ -12,7 +12,6 @@ from math import comb
 from types import MappingProxyType
 from typing import Any, Literal, Mapping
 
-import jax.numpy as jnp
 import numpy as np
 
 from tensordev.core.capabilities import _WORDWISE_SIGNATURE_PROTOCOL
@@ -73,7 +72,7 @@ from tensordev.core.shuffle import (
     _precompute_shuffle_argument,
 )
 from tensordev.core.utils.precompute import _readonly, _unsigned_index_dtype
-from tensordev.core.utils.einsum import full_precision_einsum
+from tensordev.core.utils.xp import xp
 
 
 _COMPILED_SHEAR_SHUFFLE_ENTRY_THRESHOLD = 100_000
@@ -1205,7 +1204,7 @@ class ShearBigradedCore(BigradedShearCoordinateCore, StandardBigradedCore):
                     key.rank_matrix.T if transpose else key.rank_matrix,
                     dtype=block.dtype,
                 )
-                values = full_precision_einsum(self.xp, "oi,...id->...od", matrix, values)
+                values = self.xp.einsum("oi,...id->...od", matrix, values)
                 output = output + values.reshape(batch + plan.dense_shape)
                 continue
             values = self.xp.take(source, self.xp.asarray(input_ranks), axis=len(batch))
@@ -1507,7 +1506,7 @@ class JaxShearBigraded(_JaxBigradedBackend, ShearBigradedCore):
         precompute_shuffle: bool | Literal["generator"] = False,
     ) -> None:
         super().__init__(
-            jnp,
+            xp,
             dims=dims,
             max_trunc=max_trunc,
             default_trunc=default_trunc,

@@ -7,7 +7,6 @@ from math import comb
 from types import MappingProxyType
 from typing import Any, Literal, Mapping
 
-import jax.numpy as jnp
 import numpy as np
 
 from tensordev.core.capabilities import _WORDWISE_SIGNATURE_PROTOCOL
@@ -50,6 +49,7 @@ from tensordev.core.shear.bigraded_jax_transport import (
 )
 from tensordev.core.shuffle import _precompute_shuffle_argument
 from tensordev.core.utils.precompute import _unsigned_index_dtype
+from tensordev.core.utils.xp import xp
 
 
 _COMPILED_SHEAR_GENERATOR_ENTRY_THRESHOLD = 25_000
@@ -606,7 +606,7 @@ class JaxPartiallySymmetrizedShearBigraded(
         precompute_shuffle: bool | Literal["generator"] = False,
     ) -> None:
         super().__init__(
-            jnp,
+            xp,
             dims=dims,
             max_trunc=max_trunc,
             default_trunc=default_trunc,

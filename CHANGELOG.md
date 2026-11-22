@@ -49,10 +49,11 @@
   zero time.
 - Preserve explicit working precision for state-space time increments and
   allow dense and oscillatory Jordan construction under JIT.
-- `float32` results on NVIDIA Ampere and newer GPUs lost about three digits
-  (state-space signatures up to 2% relative error), because XLA runs
-  `float32` matrix products in TF32 by default. All matrix products in
-  tensordev now request full `float32` precision. CPU results are unchanged.
+- `float32` results on NVIDIA Ampere and newer GPUs kept only about three
+  significant digits (state-space signatures up to 2% relative error),
+  because XLA runs `float32` matrix products in TF32 by default. All matrix
+  products in tensordev now request full `float32` precision. CPU results are
+  unchanged.
 
 ### Documentation
 

@@ -13,6 +13,7 @@ from jax import numpy as jnp
 
 from tensordev.core.capabilities import _WORDWISE_SIGNATURE_PROTOCOL
 from tensordev.core.utils.annotations import iter_class_jittables
+from tensordev.core.utils.xp import xp as _xp
 from .einsum import Einsum
 from .sequential import SequentialCore, DenseElem
 from .shuffle import (
@@ -89,7 +90,7 @@ class Jax(Einsum[jnp.ndarray]):
         # Passing an existing store lets it infer omitted bounds and reject
         # explicit bounds that disagree with the shared store.
         super().__init__(
-            jnp,
+            _xp,
             d=d,
             max_trunc=max_trunc,
             default_trunc=default_trunc,
@@ -450,7 +451,7 @@ class JaxTotalDegreeShufflePlanStore(TotalDegreeShufflePlanStore):
     @partial(jax.jit, static_argnums=(0, 1, 4, 5))
     def apply(self, xp, Ai, Bj, i: int, j: int):
         """Apply one homogeneous plan with the selected JAX strategy."""
-        if xp is not jnp:
+        if xp is not _xp:
             raise TypeError("JAX shuffle plans can only be applied with jax.numpy.")
         plan = self.plan(i, j)
         runtime_plan = self._runtime_plans[(i, j)]
@@ -540,7 +541,7 @@ class JaxSequentialCore(SequentialCore[jnp.ndarray]):
     capabilities = SequentialCore.capabilities | {"functional_indexed_update"}
 
     def __init__(self, default_time_axis: int = -2):
-        super().__init__(jnp, default_time_axis)
+        super().__init__(_xp, default_time_axis)
         for name, function in _compiled_jittables(type(self)):
             setattr(self, name, types.MethodType(function, self))
 

@@ -31,7 +31,6 @@ from tensordev.core.bigraded.symmetrized.plans import (
 )
 from tensordev.core.bigraded.types import Bidegree, _bidegree
 from tensordev.core.utils.precompute import _readonly, _unsigned_index_dtype
-from tensordev.core.utils.einsum import full_precision_einsum
 
 
 TransformOrientation = Literal[
@@ -183,7 +182,7 @@ def apply_partially_symmetrized_transform_plan(
         matrix = xp.asarray(plan.rank_matrix)
         if transpose:
             matrix = xp.swapaxes(matrix, -1, -2)
-        output = full_precision_einsum(xp, "oi,...id->...od", matrix, source)
+        output = xp.einsum("oi,...id->...od", matrix, source)
     else:
         output_ranks, input_ranks = plan.rank_pairs()
         if transpose:

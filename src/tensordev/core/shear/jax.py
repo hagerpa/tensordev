@@ -6,8 +6,6 @@ from numbers import Integral
 import types
 from typing import Literal
 
-import jax.numpy as jnp
-
 from tensordev.core.capabilities import _WORDWISE_SIGNATURE_PROTOCOL
 from tensordev.core.einsum import Einsum
 from tensordev.core.jax import Jax, _compiled_jittables
@@ -24,6 +22,7 @@ from tensordev.core.shuffle import (
     _precompute_shuffle_argument,
 )
 from tensordev.core.utils.annotations import jit as dummy_jit
+from tensordev.core.utils.xp import xp
 
 
 class JaxShearTotal(ShearCoordinateCore, Einsum):
@@ -85,7 +84,7 @@ class JaxShearTotal(ShearCoordinateCore, Einsum):
         self.dims = plan_store.dims
         Einsum.__init__(
             self,
-            jnp,
+            xp,
             d=plan_store.d,
             max_trunc=plan_store.max_truncation,
             default_trunc=default_trunc,

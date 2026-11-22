@@ -27,7 +27,6 @@ from tensordev.core.shuffle import _normalize_precompute_shuffle
 from tensordev.core.universal import Universal
 from tensordev.core.utils.annotations import jit as dummy_jit
 from tensordev.core.utils.pytrees import tree_first_leaf
-from tensordev.core.utils.einsum import full_precision_einsum
 
 
 class StandardBigradedCore(Universal):
@@ -1840,7 +1839,7 @@ class StandardBigradedCore(Universal):
             left, row_axis, col_axis
         )
         right, _, _ = self._canonicalize_matrix_axes(right, row_axis, col_axis)
-        pair = full_precision_einsum(self.xp, "...rki,...klj->...rlij", left, right)
+        pair = self.xp.einsum("...rki,...klj->...rlij", left, right)
         plan = self.plan_store.concat_plan(left_grade, right_grade)
         if plan.output_grade != output_grade:
             raise ValueError("matrix product plan/output grade mismatch")

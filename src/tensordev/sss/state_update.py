@@ -22,9 +22,9 @@ from tensordev.core.bigraded.symmetrized.jax import (
 from tensordev.core.bigraded.types import BigradedTensor
 from tensordev.core.jax import Jax
 from tensordev.core.utils.pytrees import tree_first_leaf, tree_map
+from tensordev.core.utils.xp import xp
 from tensordev.sss.coeffs import FSSKCoefficients
 from tensordev.sss.kernel import FSSK, contour_substeps
-from tensordev.sss.lambdas import _HIGHEST
 from tensordev.sss.recursion_scalar import update_state as update_state_scalar
 from tensordev.sss.recursion_general import update_state as update_state_general
 from tensordev.util.combinatorics import build_multiindex_layout
@@ -453,9 +453,8 @@ def _prepare_fssk_state_call(
     steps = increments.shape[axis_norm]
     if steps == 0:
         raise ValueError("fssk_state requires at least one increment.")
-    projected = jnp.einsum(
-        "qmd,...d->...qm", kernel.A.astype(dtype), increments,
-        precision=_HIGHEST,
+    projected = xp.einsum(
+        "qmd,...d->...qm", kernel.A.astype(dtype), increments
     )
     y = projected[..., 0, :] if kernel.q == 1 else projected
 
@@ -801,11 +800,10 @@ def _canonicalize_fssk_q1_readout_weights(
 ) -> Array:
     tau_dt = jnp.asarray(tau_dt, dtype=dtype)
     E = _readout_expm(kernel, tau_dt, dtype=dtype)
-    weights = jnp.einsum(
+    weights = xp.einsum(
         "...rs,qs->...qr",
         E,
         kernel.b.astype(dtype),
-        precision=_HIGHEST,
     )[..., 0, :]
     return _canonicalize_batch_array(
         weights,
@@ -1644,7 +1642,7 @@ def _fssk_readout_impl(
 
     tau_dt = jnp.asarray(tau_dt, dtype=dtype)
     E = _readout_expm(kernel, tau_dt, dtype=dtype)
-    weights = jnp.einsum("...rs,qs->...qr", E, kernel.b.astype(dtype), precision=_HIGHEST)
+    weights = xp.einsum("...rs,qs->...qr", E, kernel.b.astype(dtype))
 
     positive = tree_map(
         lambda z: jnp.sum(

@@ -41,7 +41,6 @@ from tensordev.volterra.iteration_quad import (
     _normalize_times,
 )
 from tensordev.volterra.kernel import ConvolutionKernel
-from tensordev.core.utils.einsum import full_precision_einsum
 
 
 Array = jax.Array
@@ -260,7 +259,7 @@ def fft_iteration(
             "assumes a uniform grid."
         )
 
-    projected = full_precision_einsum(xp, "qmd,...d->...qm", kernel.A.astype(dtype), dX)
+    projected = xp.einsum("qmd,...d->...qm", kernel.A.astype(dtype), dX)
     # (S, *batch, q, m), with the kernel-component axis always present.
     y = xp.moveaxis(projected, axis_norm, 0)
     times_arr = _normalize_times(dt_array, S=S, dtype=dtype)
@@ -501,8 +500,8 @@ def _append_interpolated_basis_diagonal(
 ) -> tuple[ComponentState, ...]:
     """Interpolate once across a packed native output diagonal."""
     stacked = algebra.core.xp.stack(evaluations, axis=0)
-    coefficients = full_precision_einsum(
-        algebra.core.xp, "bk,k...->b...", interpolation_inverse, stacked
+    coefficients = algebra.core.xp.tensordot(
+        interpolation_inverse, stacked, axes=1
     )
     diagonal = algebra.diagonal(total_order)
     updated: list[ComponentState] = []
