@@ -932,28 +932,25 @@ def _split_steps_for_coefficients(
         block_size: int | None,
         increment_input: bool,
 ) -> tuple[Array, Array | float, int | None, bool]:
-    """Split every step into equal sub-steps when one step is too long for the coefficients.
+    """Increments and ``dt`` of ``k`` = :func:`contour_substeps` equal sub-steps per step.
 
-    The recursion is exact for piecewise-linear input, so ``k`` sub-steps of length ``dt / k``
-    with increments ``dX / k`` give the same states. Blocks keep their original steps.
+    Every step becomes ``k`` steps with increment ``dX / k`` and length ``dt / k``, and
+    ``block_size`` becomes ``k * block_size`` so that blocks end at the original steps.
     """
     k = contour_substeps(kernel, dt)
     if k == 1:
         return X, dt, block_size, increment_input
     X = jnp.asarray(X)
-    axis_norm = axis % X.ndim
-    increments = X if increment_input else jnp.diff(X, axis=axis_norm)
-    increments = jnp.repeat(increments / k, k, axis=axis_norm)
+    axis %= X.ndim
+    increments = X if increment_input else jnp.diff(X, axis=axis)
     dt = jnp.asarray(dt)
-    if dt.ndim == 0 or dt.size == 1:
-        dt = dt / k
-    elif dt.ndim == 1:
-        dt = jnp.repeat(dt / k, k)
-    elif dt.shape[axis_norm] == 1:
-        dt = dt / k
-    else:
-        dt = jnp.repeat(dt / k, k, axis=axis_norm)
-    return increments, dt, None if block_size is None else block_size * k, True
+    if dt.size > 1:
+        dt = _normalize_dt(
+            dt, increment_shape=increments.shape, S=increments.shape[axis], axis_norm=axis
+        )
+        dt = jnp.repeat(jnp.moveaxis(dt, 0, axis), k, axis=axis)
+    block_size = None if block_size is None else k * block_size
+    return jnp.repeat(increments / k, k, axis=axis), dt / k, block_size, True
 
 
 def fssk_state(

@@ -7,16 +7,18 @@
 - `RBF_SQR_Kernel` and `RBF_CEXP_Kernel` act on the node values
   `batch + (length, dim)` like every static kernel. They flattened the time
   axis before, so `SigKernel` and `FreeKernel` returned one value for every
-  pair of paths and `FSSKSigKernel` raised. Function-valued paths are passed
-  flattened; the new `RBF_CEXP_Kernel(channels=...)` recovers their grid.
-- FSSK coefficients were silently wrong for steps beyond the reach of their
-  contour quadrature: weakly damped oscillations with `omega * dt` above
-  about 10 and growing modes with `|rate| * dt` above about 3 (up to 40%
-  relative error in `fssk_vsig`). `fssk_state`, `fssk_vsig` and
-  `StateSpaceSignature.vsig` now split such steps into equal sub-steps,
-  which is exact for piecewise-linear paths. When `Lambda` or `dt` is
-  traced, the coefficients of a `JordanLambda` are NaN beyond the contour
-  instead of wrong.
+  pair of paths and `FSSKSigKernel` raised. A path of functions with shape
+  `batch + (length_t, L, channels)` is passed as
+  `X.reshape(X.shape[:-2] + (-1,))`, with the new argument
+  `RBF_CEXP_Kernel(channels=...)`.
+- FSSK coefficients were wrong for long steps: up to 40% relative error in
+  `fssk_vsig` for weakly damped oscillations with `omega * dt` above about 10
+  and for growing modes with `|rate| * dt` above about 3. `fssk_state`,
+  `fssk_vsig` and `StateSpaceSignature.vsig` now split every step into equal
+  sub-steps with `omega * dt <= 4` and `|rate| * dt <= 1` (default
+  `quad_order`), which leaves a piecewise-linear path unchanged. Under
+  `jax.jit`, or `jax.grad` with respect to `Lambda`, steps are not split, and
+  a `JordanLambda` gives NaN for `omega * dt > 12` or `|rate| * dt > 5`.
 
 ## 0.1.1
 

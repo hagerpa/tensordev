@@ -167,17 +167,18 @@ class RBFKernel(StaticKernel):
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class RBF_CEXP_Kernel(StaticKernel):
-    """RBF kernel on cos-exp features of function-valued path values.
+    r"""RBF kernel on node values that are functions, after a cos-exp transform.
 
-    Each node value is a function sampled on a uniform grid over ``[0, 1]``,
-    stored as a vector of length ``length_x * channels`` in grid-major order
-    (``x.reshape(length_x, channels)`` recovers the samples). The kernel maps
-    each value through the integral operator of the cos-exp kernel
-    (``sigma1``, ``n_freqs``) and applies an RBF kernel with bandwidth
-    ``sigma2`` to the results.
+    A node value :math:`x` is a function with ``channels`` components, sampled at
+    :math:`s_i = i/(L-1)`, :math:`i = 0, \dots, L-1`, and stored grid-major in the last axis
+    (``x.reshape(L, channels)``). With :math:`n` = ``n_freqs``,
 
-    A function-valued path of shape ``batch + (length_t, length_x, channels)``
-    is passed as ``X.reshape(X.shape[:-2] + (-1,))``.
+    .. math::
+        T(u) = e^{-u^2/\sigma_1} \sum_{l=0}^{n-1} \cos(2\pi l u), \qquad
+        (Tx)(s_j) = \frac{1}{L} \sum_{i} x(s_i)\, T(s_i - s_j),
+
+    and :math:`k(x, y) = \exp(-\|Tx - Ty\|^2 / \sigma_2)`. A path of shape
+    ``batch + (length_t, L, channels)`` is passed as ``X.reshape(X.shape[:-2] + (-1,))``.
 
     Parameters
     ----------
@@ -198,14 +199,15 @@ class RBF_CEXP_Kernel(StaticKernel):
     channels: int = field(default=1, metadata={"static": True})
 
     def _features(self, X: Array) -> Array:
-        """``batch + (length, length_x * channels)`` → same shape."""
+        """:math:`Tx` for every node value, in the layout of ``X``."""
         dim = X.shape[-1]
         if dim % self.channels:
             raise ValueError(
-                f"The node dimension {dim} is not a multiple of channels={self.channels}."
+                f"node dimension {dim} is not a multiple of channels={self.channels}."
             )
-        F = X.reshape(X.shape[:-1] + (dim // self.channels, self.channels))
-        return cexp(F, self.n_freqs, self.sigma1).reshape(X.shape)
+        return cexp(
+            X.reshape(X.shape[:-1] + (dim // self.channels, self.channels)), self.n_freqs, self.sigma1
+        ).reshape(X.shape)
 
     def batch_kernel(self, X: Array, Y: Array) -> Array:
         """

@@ -1,10 +1,7 @@
-"""Steps beyond the reach of the coefficient contour are split exactly, or give NaN while traced."""
+"""``fssk_vsig`` on steps beyond the bounds of :func:`contour_substeps`: exact sub-steps, or NaN when traced."""
 import jax
-from jax import config
-
-config.update("jax_enable_x64", True)
+jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
-import numpy as np
 import pytest
 
 import tensordev as td
@@ -15,10 +12,9 @@ from tensordev.util import random_trigonometric_polynomial_paths
 DT = 1.0 / 8
 
 
-def _refine(X, k):
-    """Insert k - 1 nodes on every segment; the piecewise-linear path is unchanged."""
-    inc = jnp.diff(X, axis=-2)
-    return jnp.concatenate([X[..., :1, :], X[..., :1, :] + jnp.cumsum(jnp.repeat(inc / k, k, axis=-2), axis=-2)], axis=-2)
+def _substeps(X, k):
+    """Increments of the same piecewise-linear path with every step split into ``k`` equal ones."""
+    return jnp.repeat(jnp.diff(X, axis=-2) / k, k, axis=-2)
 
 
 def _oscillation(omega):
@@ -45,9 +41,8 @@ def X():
                          ids=["omega_dt_50", "omega_dt_17", "rate_dt_-7"])
 def test_long_steps_are_split_exactly(X, kernel):
     assert contour_substeps(kernel, DT) > 1
-    reference = td.fssk_vsig(_refine(X, 128), kernel=kernel, dt=DT / 128, trunc=3)
-    got = td.fssk_vsig(X, kernel=kernel, dt=DT, trunc=3)
-    assert _max_rel(got, reference) < 1e-12
+    reference = td.fssk_vsig(_substeps(X, 128), kernel=kernel, dt=DT / 128, trunc=3, increment_input=True)
+    assert _max_rel(td.fssk_vsig(X, kernel=kernel, dt=DT, trunc=3), reference) < 1e-12
 
 
 def test_short_steps_are_not_split():
@@ -57,11 +52,9 @@ def test_short_steps_are_not_split():
 
 def test_split_keeps_per_step_outputs_and_dt_arrays(X):
     kernel = _oscillation(30 / DT)
-    dt_steps = jnp.full((8,), DT)
-    got = td.fssk_vsig(X, kernel=kernel, dt=dt_steps, trunc=3, block_size=1, output_starting_state=True)
-    k = 64
-    reference = td.fssk_vsig(_refine(X, k), kernel=kernel, dt=DT / k, trunc=3, block_size=k,
-                             output_starting_state=True)
+    got = td.fssk_vsig(X, kernel=kernel, dt=jnp.full((8,), DT), trunc=3, block_size=1, output_starting_state=True)
+    reference = td.fssk_vsig(_substeps(X, 64), kernel=kernel, dt=DT / 64, trunc=3, block_size=64,
+                             output_starting_state=True, increment_input=True)
     assert got[1].shape == reference[1].shape == (2, 9, 2)
     assert _max_rel(got, reference) < 1e-12
 

@@ -161,11 +161,19 @@ With `dyadic_order` $(a, b)$, every sub-cell of cell $(i, j)$ receives $G_{ij}/2
 | [`LinearKernel`][tensordev.LinearKernel] | `scale=1.0` | $\langle \mathrm{scale}\cdot x, \mathrm{scale}\cdot y\rangle$ |
 | [`RBFKernel`][tensordev.RBFKernel] | `sigma=1.0` | $\exp(-\lVert x - y\rVert^2/\sigma)$ |
 | [`RBF_SQR_Kernel`][tensordev.kernel.RBF_SQR_Kernel] | `sigma1=1.0`, `sigma2=1.0` | $\exp(-\lVert x - y\rVert^2/\sigma_1)\,\exp(-\lVert x^2 - y^2\rVert^2/\sigma_2)$, squares elementwise |
-| [`RBF_CEXP_Kernel`][tensordev.kernel.RBF_CEXP_Kernel] | `sigma1=1.0`, `sigma2=1.0`, `n_freqs=20`, `channels=1` | $\exp(-\lVert Tx - Ty\rVert^2/\sigma_2)$, with $T$ the cos-exp integral operator on the grid of $x$ |
+| [`RBF_CEXP_Kernel`][tensordev.kernel.RBF_CEXP_Kernel] | `sigma1=1.0`, `sigma2=1.0`, `n_freqs=20`, `channels=1` | $\exp(-\lVert Tx - Ty\rVert^2/\sigma_2)$, with $T$ below |
 
 All four act on points of $\mathbb{R}^d$. To define another kernel, subclass [`StaticKernel`][tensordev.kernel.StaticKernel] and implement `batch_kernel` and `Gram_matrix`; the solvers call them with path values of shape `batch + (length, dim)`.
 
-`RBF_SQR_Kernel` and `RBF_CEXP_Kernel` come from `sigkernel`, where they act on function-valued paths. Here such a path of shape `batch + (length_t, length_x, channels)` is passed flattened, as `X.reshape(X.shape[:-2] + (-1,))`; `RBF_CEXP_Kernel` needs `channels` to recover the grid of each value.
+For `RBF_SQR_Kernel` and `RBF_CEXP_Kernel` a node value $x$ may be a function with `channels`
+components sampled at $s_i=i/(L-1)$, $i=0,\dots,L-1$; a path of shape
+`batch + (length_t, L, channels)` is passed as `X.reshape(X.shape[:-2] + (-1,))`. With
+$n$ = `n_freqs`, `RBF_CEXP_Kernel` compares
+
+$$
+(Tx)(s_j)=\frac{1}{L}\sum_{i}x(s_i)\,T(s_i-s_j),\qquad
+T(u)=e^{-u^2/\sigma_1}\sum_{l=0}^{n-1}\cos(2\pi l u).
+$$
 
 Two consequences of the construction:
 

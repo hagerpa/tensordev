@@ -21,7 +21,7 @@ import jax.random as jr
 
 from tensordev.kernel.fssk import FSSKSigKernel, fssk_sigkernel
 from tensordev.kernel.sig import SigKernel
-from tensordev.kernel.static_kernels import RBFKernel
+from tensordev.kernel.static_kernels import RBF_CEXP_Kernel, RBF_SQR_Kernel, RBFKernel
 from tensordev.sss.kernel import FSSK
 
 from random_paths import random_trigonometric_polynomial_paths
@@ -342,6 +342,8 @@ def test_fssk_scan_vs_wavefront_nontrivial_kernel(dyadic_order):
 _NONLINEAR_STATIC_KERNELS = [
     pytest.param(RBFKernel(sigma=1.0), id="RBF-sigma1"),
     pytest.param(RBFKernel(sigma=0.5), id="RBF-sigma0.5"),
+    pytest.param(RBF_SQR_Kernel(sigma1=4.0, sigma2=8.0), id="RBF_SQR"),
+    pytest.param(RBF_CEXP_Kernel(sigma1=0.5, sigma2=4.0, n_freqs=5), id="RBF_CEXP"),
 ]
 
 

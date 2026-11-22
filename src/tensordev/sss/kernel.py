@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tensordev._wordwise.dispatch import _contains_tracer
 from tensordev.core.utils.xp import xp
 from tensordev.util.combinatorics import build_multiindex_layout, num_multiindices_leq
 from tensordev.sss.coeffs import FSSKCoefficients
@@ -420,67 +421,51 @@ class FSSK:
         )
 
 
-# ``prepare_coef`` integrates on a parabola that crosses the real axis near 0.26 * quad_order and
-# the imaginary axis near 0.52 * quad_order. For quad_order=32 the coefficients of a step are
-# accurate to about 1e-12 while every eigenvalue mu of -Lambda * dt has Re mu <= _SAFE_RE and
-# |Im mu| <= _SAFE_IM; beyond _GUARD_RE or _GUARD_IM their error exceeds about 1e-5. The bounds
-# scale with quad_order / 32.
-_SAFE_RE, _SAFE_IM = 1.0, 4.0
-_GUARD_RE, _GUARD_IM = 5.0, 12.0
+# Bounds on (h Re mu, h |Im mu|) for a step of length h and the eigenvalues mu of -Lambda, at
+# quad_order = 32 and proportional to quad_order: within _SAFE the coefficients of the step are
+# accurate to about 1e-12, beyond _GUARD to less than 1e-5.
+_SAFE = (1.0, 4.0)
+_GUARD = (5.0, 12.0)
 
 
-def _concrete_eigenvalues(lam: Lambda) -> Optional[np.ndarray]:
-    """Eigenvalues of ``-Lambda`` from concrete parameters, or ``None`` while tracing."""
-    try:
-        if isinstance(lam, JordanLambda):
-            rates = np.asarray(lam.real_rates, dtype=float).ravel()
-            decays = np.asarray(lam.osc_decays, dtype=float).ravel()
-            freqs = np.asarray(lam.osc_freqs, dtype=float).ravel()
-            return np.concatenate([-rates + 0j, -decays + 1j * freqs])
-        if isinstance(lam, DenseLambda):
-            return -np.linalg.eigvals(np.asarray(lam.matrix, dtype=complex))
-    except (jax.errors.TracerArrayConversionError, jax.errors.ConcretizationTypeError):
+def _step_load(lam: Lambda, h, quad_order: int, bound: tuple[float, float], xnp):
+    r"""Return :math:`\frac{32 h}{N} \max\bigl(\max(0, \max \operatorname{Re}\mu) / b_1,
+    \max |\operatorname{Im}\mu| / b_2\bigr)`.
+
+    :math:`\mu` runs over the eigenvalues of :math:`-\Lambda`, :math:`N` = ``quad_order`` and
+    :math:`b` = ``bound``; ``xnp`` is NumPy for concrete values and ``jax.numpy`` inside a trace.
+    ``None`` for a traced :class:`DenseLambda`.
+    """
+    if isinstance(lam, JordanLambda):
+        re, im = -xnp.concatenate([lam.real_rates, lam.osc_decays]), xnp.asarray(lam.osc_freqs)
+    elif isinstance(lam, DenseLambda) and not _contains_tracer(lam.matrix):
+        mu = -np.linalg.eigvals(np.asarray(lam.matrix, dtype=complex))
+        re, im = mu.real, mu.imag
+    else:
         return None
-    return None
+    return 32 * h / quad_order * xnp.maximum(
+        xnp.max(re, initial=0.0) / bound[0], xnp.max(xnp.abs(im), initial=0.0) / bound[1]
+    )
 
 
 def contour_substeps(kernel: "FSSK", dt: Array | float) -> int:
-    """Number of equal sub-steps that keep the coefficients of every step accurate.
+    r"""Number :math:`k = \lceil \max(1, L) \rceil` of equal sub-steps per step.
 
-    Splitting a step of a piecewise-linear path into ``k`` sub-steps does not change the path,
-    so the recursion over the sub-steps gives the same states. Returns 1 when ``Lambda`` or
-    ``dt`` is traced.
+    :math:`L` is the load of the longest step against the bounds ``(1, 4)``. On a piecewise-linear
+    path, :math:`k` sub-steps of length :math:`dt/k` with increments :math:`dX/k` give the same
+    states. Returns 1 when ``Lambda`` or ``dt`` is traced.
     """
-    mu = _concrete_eigenvalues(kernel.Lambda)
-    try:
-        h = float(np.max(np.abs(np.asarray(dt, dtype=float)), initial=0.0))
-    except (jax.errors.TracerArrayConversionError, jax.errors.ConcretizationTypeError):
+    if _contains_tracer((kernel.Lambda, dt)):
         return 1
-    if mu is None or mu.size == 0 or not np.all(np.isfinite(mu)) or not np.isfinite(h):
-        return 1
-    scale = kernel.quad_order / 32
-    need = max(
-        float(np.max(mu.real)) * h / (_SAFE_RE * scale),
-        float(np.max(np.abs(mu.imag))) * h / (_SAFE_IM * scale),
-        1.0,
-    )
-    return int(np.ceil(need - 1e-9))
+    load = _step_load(kernel.Lambda, np.max(np.abs(dt), initial=0.0), kernel.quad_order, _SAFE, np)
+    return 1 if load is None or not np.isfinite(load) else max(1, int(np.ceil(load - 1e-9)))
 
 
 def _contour_out_of_range(lam: Lambda, dt_flat: Array, quad_order: int) -> Optional[Array]:
-    """Mask of the steps whose coefficients the contour cannot resolve (Jordan ``Lambda`` only)."""
+    """Steps whose load against the bounds ``(5, 12)`` exceeds one; ``None`` unless Jordan."""
     if not isinstance(lam, JordanLambda):
         return None
-    re = jnp.concatenate([-jnp.ravel(lam.real_rates), -jnp.ravel(lam.osc_decays)])
-    im = jnp.abs(jnp.ravel(lam.osc_freqs))
-    scale = quad_order / 32
-    h = jnp.abs(jax.lax.stop_gradient(dt_flat))
-    bad = jnp.zeros(dt_flat.shape, dtype=bool)
-    if re.size:
-        bad = bad | (jax.lax.stop_gradient(jnp.max(re)) * h > _GUARD_RE * scale)
-    if im.size:
-        bad = bad | (jax.lax.stop_gradient(jnp.max(im)) * h > _GUARD_IM * scale)
-    return bad
+    return jax.lax.stop_gradient(_step_load(lam, jnp.abs(dt_flat), quad_order, _GUARD, jnp)) > 1
 
 
 @partial(jax.jit, static_argnames=("quad_order", "dtype"))
@@ -542,7 +527,6 @@ def prepare_coef(
 
     bad = _contour_out_of_range(lam, dt_flat, quad_order)
     if bad is not None:
-        # Unresolvable steps give NaN coefficients instead of silently wrong ones.
         nan = jnp.asarray(jnp.nan, dtype=complex_dtype)
         r = jnp.where(bad[None, :, None], nan, r)
         u = jnp.where(bad[None, :, None, None], nan, u)

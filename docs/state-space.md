@@ -43,26 +43,32 @@ $$
 
 The recursion advances $Z$ over each step of a piecewise-linear path. There is no time
 discretization of the history, unlike the generic schemes of [`vsig`][tensordev.vsig] (see
-[Comparison with vsig](#comparison-with-vsig)). The per-step coefficients are contour
-integrals, evaluated by the trapezoidal rule on the parabolic contour of *Computational Aspects
-of the Volterra Signature*. `quad_order` (default 32) is the number of nodes in the upper
-half-plane ($m$ in that paper's algorithm EvalPhiPsi), so the rule uses $2\cdot$`quad_order`
-nodes in all. It is accurate only while the eigenvalues of $-\Lambda\,\mathrm{d}t$ lie well
-inside the contour. With the default `quad_order`, decaying modes of any stiffness are exact to
-rounding; weakly damped oscillations need $\omega\,\mathrm{d}t\lesssim 4$ and growing modes
-(a negative real rate $\lambda$) need $|\lambda|\,\mathrm{d}t\lesssim 1$. These bounds scale with
-`quad_order`.
+[Comparison with vsig](#comparison-with-vsig)). The per-step coefficients are contour integrals
+of resolvents of $-\Lambda\,\mathrm{d}t$, evaluated by the trapezoidal rule at the nodes
+
+$$
+\zeta_j=2m\bigl(0.1309-0.1194\,\theta_j^2+0.25\,i\,\theta_j\bigr),\qquad
+\theta_j=\frac{(2j-1)\pi}{2m},\quad j=1,\dots,m,
+$$
+
+and their complex conjugates, with $m$ = `quad_order` (default 32); see algorithm EvalPhiPsi of
+*Computational Aspects of the Volterra Signature*. For a step of length $h$ and the eigenvalues
+$\mu$ of $-\Lambda$, the coefficients are accurate to about $10^{-12}$ while
+
+$$
+h\max\bigl(0,\max\operatorname{Re}\mu\bigr)\le\frac{m}{32},\qquad
+h\max|\operatorname{Im}\mu|\le\frac{4m}{32}.
+$$
 
 [`fssk_state`][tensordev.fssk_state], [`fssk_vsig`][tensordev.fssk_vsig] and
-[`StateSpaceSignature.vsig`][tensordev.StateSpaceSignature.vsig] split longer steps into equal
-sub-steps. Inserting nodes on the segments does not change a piecewise-linear path, so the result
-is exact; only the cost grows with the number of sub-steps. The split needs concrete values of
-$\Lambda$ and `dt`. When they are traced, for example under `jax.jit` or `jax.grad` with respect to
-$\Lambda$, steps are not split: oscillations up to $\omega\,\mathrm{d}t\approx 12$ and growing
-modes up to $|\lambda|\,\mathrm{d}t\approx 5$ then lose up to about five digits, and beyond that
-the coefficients of a `JordanLambda` are NaN instead of silently wrong. Refine the grid yourself in
-that case. Raising `quad_order` widens the contour but costs accuracy to rounding, because the
-weights grow like `exp(0.26 * quad_order)` (about $10^{-10}$ at 64 and $10^{-3}$ at 128).
+[`StateSpaceSignature.vsig`][tensordev.StateSpaceSignature.vsig] split every step into the
+smallest number $k$ of equal sub-steps that satisfies these bounds, with increments
+$\Delta x/k$. The piecewise-linear path is the same, so the states are the same, at $k$ times the
+cost. Computing $k$ needs concrete $\Lambda$ and `dt`. Under `jax.jit`, or `jax.grad` with respect
+to $\Lambda$, steps are not split; for a `JordanLambda` the coefficients are then accurate to
+about $10^{-5}$ while the bounds hold with $5m/32$ and $12m/32$, and NaN beyond. A larger
+`quad_order` admits proportionally longer steps, but the trapezoidal weights grow like
+$e^{0.26\,m}$, which limits the accuracy to about $10^{-10}$ at $m=64$ and $10^{-3}$ at $m=128$.
 
 ## Constructing a kernel
 
