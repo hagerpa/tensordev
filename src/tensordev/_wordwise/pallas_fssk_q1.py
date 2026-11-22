@@ -556,11 +556,10 @@ def _ordered_fssk_call(
                             phi_step[prefix_length - 1 - prefix_index],
                         )
                     )
-                updated = (
+                prefixes[prefix_length - 1] = (
                     _right_matrix(prefixes[prefix_length - 1], E_step)
                     + horner * word_increments[prefix_length - 1][..., None]
                 )
-                prefixes[prefix_length - 1] = updated
             return tuple(prefixes)
 
         def store(block_index, prefixes):

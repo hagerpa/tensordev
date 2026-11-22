@@ -19,6 +19,7 @@ import pytest
 from jax import export as jax_export
 
 import tensordev as td
+from families import FAMILIES
 from tensordev._wordwise.fssk import (
     PreparedFSSKQ1Call,
     run_fssk_q1_wordwise,
@@ -31,25 +32,17 @@ from tensordev._wordwise.pallas_ordinary import (
     _load_pallas,
 )
 from tensordev.development.free import _prepare_free_development_call
+from tensordev.sss.state_update import _maximum_order
 
 
 _TRITON_CUSTOM_CALL = "__gpu$xla.gpu.triton"
-# JAX >= 0.11 needs an abstract GPU for CPU-side Triton lowering; the A10
-# shares the A40's sm_86 architecture.
+# On JAX >= 0.11, CPU-side Triton lowering needs an abstract GPU; any sm_86 device kind works.
 _ABSTRACT_GPU_KIND = "NVIDIA A10"
 _BATCH = 2
 _STEPS = 4
 _BLOCK_SIZE = 2
 _STATE_DIM = 3
 
-_FAMILIES = (
-    "total-standard",
-    "total-shear",
-    "bidegree-standard",
-    "bidegree-shear",
-    "bidegree-partial-standard",
-    "bidegree-partial-shear",
-)
 _DTYPES = ("float32", "float64")
 _BLOCK_MODES = ("terminal", "accumulated", "independent")
 _FSSK_OUTPUTS = ("terminal", "accumulated", "independent", "readout")
@@ -61,21 +54,20 @@ _FSSK_VARIANTS = ("shared", "batched")
 
 def _family(name):
     """Return a core, truncation, and alphabet width with degree-3 words."""
-    if name.startswith("total"):
-        if name == "total-standard":
-            return td.make_core(dims=2, max_trunc=3), 3, 2
-        return (
-            td.make_core(dims=(1, 1), max_trunc=3, coordinates="shear"),
-            3,
-            2,
-        )
-    core = td.make_core(
+    if name == "total-standard":
+        return td.make_core(dims=2, max_trunc=3), 3, 2
+    if name == "total-shear":
+        return td.make_core(dims=(1, 1), max_trunc=3, coordinates="shear"), 3, 2
+    return td.make_core(
         dims=(2, 1),
         max_trunc=(2, 1),
         partially_symmetrized="partial" in name,
         coordinates="shear" if name.endswith("shear") else "standard",
-    )
-    return core, (2, 1), 3
+    ), (2, 1), 3
+
+
+def _kind(family):
+    return "quotient" if "partial" in family else "ordered"
 
 
 def _abstract_gpu():
@@ -212,7 +204,7 @@ def _kernel_mode(block_mode: str) -> str:
 
 @pytest.mark.parametrize("block_mode", _BLOCK_MODES)
 @pytest.mark.parametrize("dtype", _DTYPES)
-@pytest.mark.parametrize("family", _FAMILIES)
+@pytest.mark.parametrize("family", FAMILIES)
 def test_ordinary_kernels_lower_for_cuda(
         cuda_export, triton_modules, family, dtype, block_mode
 ):
@@ -237,39 +229,34 @@ def test_ordinary_kernels_lower_for_cuda(
     )
 
     assert exported.platforms == ("cuda",)
-    kind = "quotient" if "partial" in family else "ordered"
-    _assert_lowered(
-        triton_modules,
-        f"tensordev_{kind}_ordinary_{_kernel_mode(block_mode)}",
-    )
+    _assert_lowered(triton_modules, f"tensordev_{_kind(family)}_ordinary_{_kernel_mode(block_mode)}")
 
 
 @pytest.mark.parametrize("variant", _FSSK_VARIANTS)
 @pytest.mark.parametrize("output", _FSSK_OUTPUTS)
 @pytest.mark.parametrize("dtype", _DTYPES)
-@pytest.mark.parametrize("family", _FAMILIES)
+@pytest.mark.parametrize("family", FAMILIES)
 def test_fssk_kernels_lower_for_cuda(
         cuda_export, triton_modules, family, dtype, output, variant
 ):
     core, truncation, alphabet_dim = _family(family)
     plan = build_layout_plan(core, truncation)
-    order = sum(truncation) if isinstance(truncation, tuple) else truncation
+    order = _maximum_order(truncation)
     batched = variant == "batched"
     coefficient_steps = _STEPS if batched else 1
     coefficient_batch = _BATCH if batched else 1
     block_size = None if output in ("terminal", "readout") else _BLOCK_SIZE
-    R = _STATE_DIM
     coefficient_axes = (coefficient_steps, coefficient_batch)
     shapes = [
         (_STEPS, _BATCH, alphabet_dim),
-        coefficient_axes + (R, R),
-        coefficient_axes + (order, R),
-        coefficient_axes + (order - 1, R, R),
+        coefficient_axes + (_STATE_DIM, _STATE_DIM),
+        coefficient_axes + (order, _STATE_DIM),
+        coefficient_axes + (order - 1, _STATE_DIM, _STATE_DIM),
     ]
     if output == "readout":
-        shapes.append((coefficient_batch, R))
+        shapes.append((coefficient_batch, _STATE_DIM))
     if batched:
-        shapes.extend((_BATCH, 1, 1, R, block.width) for block in plan.blocks[1:])
+        shapes.extend((_BATCH, 1, 1, _STATE_DIM, block.width) for block in plan.blocks[1:])
     specs = [jax.ShapeDtypeStruct(shape, dtype) for shape in shapes]
 
     def state(y_time, E_time, psi_time, phi_time, *rest):
@@ -296,6 +283,5 @@ def test_fssk_kernels_lower_for_cuda(
     exported = _export_cuda(state, *specs)
 
     assert exported.platforms == ("cuda",)
-    kind = "quotient" if "partial" in family else "ordered"
-    _assert_lowered(triton_modules, f"tensordev_{kind}_fssk_q1_{output}")
+    _assert_lowered(triton_modules, f"tensordev_{_kind(family)}_fssk_q1_{output}")
 

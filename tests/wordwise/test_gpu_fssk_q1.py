@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 import tensordev as td
+from families import FAMILIES
 import tensordev._wordwise.dispatch as dispatch_module
 from tensordev._wordwise import fssk as wordwise_fssk
 from tensordev._wordwise.dispatch import _supported_cuda_device
@@ -38,16 +39,6 @@ CPU_DEVICE = jax.devices("cpu")[0]
 pytestmark = pytest.mark.skipif(
     not GPU_DEVICES,
     reason="requires a supported NVIDIA JAX device",
-)
-
-
-_FAMILIES = (
-    "total-standard",
-    "total-shear",
-    "bidegree-standard",
-    "bidegree-shear",
-    "bidegree-partial-standard",
-    "bidegree-partial-shear",
 )
 
 
@@ -203,7 +194,7 @@ def _tree_square_norm(value):
     return sum(jnp.sum(jnp.square(leaf)) for leaf in jax.tree.leaves(value))
 
 
-@pytest.mark.parametrize("family", _FAMILIES)
+@pytest.mark.parametrize("family", FAMILIES)
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize("execution", ["auto", "wordwise"])
 def test_candidate_public_q1_apis_match_forced_portable(

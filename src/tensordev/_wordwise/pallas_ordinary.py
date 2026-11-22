@@ -247,7 +247,7 @@ def _advance_prefixes(
                 * (prefixes[prefix_index] + horner)
                 / jnp.asarray(prefix_length - prefix_index, dtype=dtype)
             )
-        prefixes[prefix_length] = prefixes[prefix_length] + horner
+        prefixes[prefix_length] += horner
     return tuple(prefixes)
 
 

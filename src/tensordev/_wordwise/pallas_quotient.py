@@ -270,19 +270,12 @@ def _resolve_letter(
 
 
 # The Pallas Triton backend cannot lower value scatter, slice, or gather, so
-# node-indexed state access below uses splits and selects.  Every helper is
-# bit-exact.
+# node-indexed state access below uses splits and selects.
 
 
 def _with_row(values, node_positions, index: int, row) -> Array:
-    """Return ``values`` with row ``index`` replaced from ``row``.
-
-    ``row`` broadcasts against ``values``; a full stack supplies its own row.
-    """
-    mask = (node_positions == index).reshape(
-        (-1,) + (1,) * (values.ndim - 1)
-    )
-    return jnp.where(mask, row, values)
+    """Return ``values`` with row ``index`` replaced by ``row``, which broadcasts against ``values``."""
+    return jnp.where((node_positions == index).reshape((-1,) + (1,) * (values.ndim - 1)), row, values)
 
 
 def _node_rows(values) -> tuple[Array, ...]:

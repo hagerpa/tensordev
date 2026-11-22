@@ -9,7 +9,6 @@ import pytest
 import tensordev as td
 from tensordev.core.bigraded.types import BigradedTensor
 from tensordev.sss import FSSK, StateSpaceSignature
-from tensordev.sss import state_update as state_update_module
 from tensordev.sss.recursion_scalar import eval_fg
 from tensordev.sss.state_update import (
     fssk_readout,
@@ -508,8 +507,7 @@ def test_bidegree_g_horner_retains_the_active_rectangle():
 
 
 def test_direct_fssk_vsig_uses_one_outer_compilation():
-    # Count backend compilations by name: jitted._cache_size() drifts out of
-    # sync late in a long test session.
+    # Compilations are counted from JAX's backend-compile events, by function name.
     compiled = []
 
     def record(event, duration, **kwargs):
@@ -519,10 +517,7 @@ def test_direct_fssk_vsig_uses_one_outer_compilation():
     jax.clear_caches()
     jax.monitoring.register_event_duration_secs_listener(record)
     try:
-        result = fssk_vsig(
-            _path(), kernel=_nontrivial_kernel(), dt=0.1, trunc=2
-        )
-        jax.block_until_ready(result)
+        jax.block_until_ready(fssk_vsig(_path(), kernel=_nontrivial_kernel(), dt=0.1, trunc=2))
     finally:
         jax.monitoring.unregister_event_duration_listener(record)
 
