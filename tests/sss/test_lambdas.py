@@ -4,8 +4,10 @@ import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import jax.scipy.linalg as jsp_linalg
+import numpy as np
 import pytest
 
+from phi_reference import phi
 from tensordev.sss.lambdas import DenseLambda, JordanLambda
 
 
@@ -24,21 +26,6 @@ def _sample_jordan_lambda() -> JordanLambda:
         osc_freqs=jnp.asarray([1.1]),
         osc_sizes=jnp.asarray([1]),
     )
-
-
-def _phi1_dense(matrix, dt):
-    """Compute phi_1(-dt * M) via the augmented exponential."""
-    matrix = jnp.asarray(matrix)
-    dt = jnp.asarray(dt, dtype=matrix.dtype)
-    r = matrix.shape[0]
-    eye = jnp.eye(r, dtype=matrix.dtype)
-    zero = jnp.zeros_like(matrix)
-
-    def one(h):
-        aug = jnp.block([[-h * matrix, eye], [zero, zero]])
-        return jsp_linalg.expm(aug)[:r, r:]
-
-    return one(dt) if dt.ndim == 0 else jax.vmap(one)(dt)
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +57,7 @@ def test_dense_lambda_phi1_matches_dense_block_formula(dt):
     matrix = jnp.asarray([[1.0, -0.2], [0.0, 0.5]])
     lam = DenseLambda(matrix)
 
-    expected = _phi1_dense(matrix, dt)
+    expected = phi(matrix, dt, 1)
     _assert_allclose(lam.phi1(dt), expected)
 
 
@@ -123,20 +110,16 @@ def test_dense_lambda_operator_actions_match_dense_materialization(batched_dt):
 
         exp_left_expected = jax.vmap(lambda h, x: jsp_linalg.expm(-h * matrix) @ x)(dt, rhs)
         exp_right_expected = jax.vmap(lambda h, x: x @ jsp_linalg.expm(-h * matrix).T)(dt, lhs)
-        phi_left_expected = jax.vmap(lambda h, x: _phi1_dense(matrix, h) @ x)(dt, rhs)
-        phi_right_expected = jax.vmap(lambda h, x: x @ _phi1_dense(matrix, h).T)(dt, lhs)
     else:
         exp_left_expected = jsp_linalg.expm(-dt * matrix) @ rhs
         exp_right_expected = lhs @ jsp_linalg.expm(-dt * matrix).T
-        phi_left_expected = _phi1_dense(matrix, dt) @ rhs
-        phi_right_expected = lhs @ _phi1_dense(matrix, dt).T
 
     _assert_allclose(lam.lambda_multiply_left(rhs), matrix @ rhs)
     _assert_allclose(lam.lambda_multiply_right(lhs), lhs @ matrix.T)
     _assert_allclose(lam.expm_multiply_left(dt, rhs), exp_left_expected)
     _assert_allclose(lam.expm_multiply_right(dt, lhs), exp_right_expected)
-    _assert_allclose(lam.phi1_multiply_left(dt, rhs), phi_left_expected)
-    _assert_allclose(lam.phi1_multiply_right(dt, lhs), phi_right_expected)
+    _assert_allclose(lam.phi1_multiply_left(dt, rhs), phi(matrix, dt, 1) @ rhs)
+    _assert_allclose(lam.phi1_multiply_right(dt, lhs), lhs @ np.swapaxes(phi(matrix, dt, 1), -1, -2))
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +143,7 @@ def test_jordan_lambda_expm_matches_dense_materialization(dt):
 @pytest.mark.parametrize("dt", [0.2, jnp.asarray([0.1, 0.3, 0.7])])
 def test_jordan_lambda_phi1_matches_dense_materialization(dt):
     lam = _sample_jordan_lambda()
-    expected = _phi1_dense(lam.matrix(), dt)
+    expected = phi(lam.matrix(), dt, 1)
     _assert_allclose(lam.phi1(dt), expected)
 
 
@@ -222,13 +205,11 @@ def test_jordan_lambda_operator_actions_match_dense_materialization(batched_dt):
     )
     _assert_allclose(
         lam.phi1_multiply_left(dt, rhs),
-        jax.vmap(lambda h, x: _phi1_dense(dense_matrix, h) @ x)(dt, rhs)
-        if batched_dt else _phi1_dense(dense_matrix, dt) @ rhs,
+        phi(dense_matrix, dt, 1) @ rhs,
     )
     _assert_allclose(
         lam.phi1_multiply_right(dt, lhs),
-        jax.vmap(lambda h, x: x @ _phi1_dense(dense_matrix, h).T)(dt, lhs)
-        if batched_dt else lhs @ _phi1_dense(dense_matrix, dt).T,
+        lhs @ np.swapaxes(phi(dense_matrix, dt, 1), -1, -2),
     )
 
 
@@ -261,26 +242,6 @@ def test_jordan_lambda_validates_block_parameters(kwargs, pattern):
 
 
 # ---------------------------------------------------------------------------
-# phi2 dense helper
-# ---------------------------------------------------------------------------
-
-
-def _phi2_dense(matrix, dt):
-    """Compute phi_2(-dt * M) via the augmented exponential."""
-    matrix = jnp.asarray(matrix)
-    dt = jnp.asarray(dt, dtype=matrix.dtype)
-    r = matrix.shape[0]
-    eye = jnp.eye(r, dtype=matrix.dtype)
-    zero = jnp.zeros_like(matrix)
-
-    def one(h):
-        aug = jnp.block([[-h * matrix, eye, zero], [zero, zero, eye], [zero, zero, zero]])
-        return jsp_linalg.expm(aug)[:r, 2 * r:]
-
-    return one(dt) if dt.ndim == 0 else jax.vmap(one)(dt)
-
-
-# ---------------------------------------------------------------------------
 # Parametrized phi1 / phi2 correctness tests for JordanLambda (real blocks)
 # ---------------------------------------------------------------------------
 
@@ -297,7 +258,7 @@ def test_jordan_lambda_phi1_real_pade_vs_dense(dt_val, size, rate):
     dense = DenseLambda(lam.matrix())
     dt = jnp.asarray([dt_val])
     got = lam.phi1(dt)
-    expected = _phi1_dense(lam.matrix(), dt)
+    expected = phi(lam.matrix(), dt, 1)
     _assert_allclose(got, expected, atol=1e-8, rtol=1e-8)
 
 
@@ -313,7 +274,7 @@ def test_jordan_lambda_phi2_real_pade_vs_dense(dt_val, size, rate):
     dense = DenseLambda(lam.matrix())
     dt = jnp.asarray([dt_val])
     got = lam.phi2(dt)
-    expected = _phi2_dense(lam.matrix(), dt)
+    expected = phi(lam.matrix(), dt, 2)
     _assert_allclose(got, expected, atol=1e-8, rtol=1e-8)
 
 
@@ -333,7 +294,7 @@ def test_jordan_lambda_phi1_small_dt_rate_vs_dense(dt_val, size, rate):
     )
     dt = jnp.asarray([dt_val])
     got = lam.phi1(dt)
-    expected = _phi1_dense(lam.matrix(), dt)
+    expected = phi(lam.matrix(), dt, 1)
     _assert_allclose(got, expected, atol=1e-8, rtol=1e-8)
 
 
@@ -348,7 +309,7 @@ def test_jordan_lambda_phi2_small_dt_rate_vs_dense(dt_val, size, rate):
     )
     dt = jnp.asarray([dt_val])
     got = lam.phi2(dt)
-    expected = _phi2_dense(lam.matrix(), dt)
+    expected = phi(lam.matrix(), dt, 2)
     _assert_allclose(got, expected, atol=1e-8, rtol=1e-8)
 
 
@@ -367,7 +328,7 @@ def test_jordan_lambda_phi1_large_block_sizes(dt_val, size):
     )
     dt = jnp.asarray([dt_val])
     got = lam.phi1(dt)
-    expected = _phi1_dense(lam.matrix(), dt)
+    expected = phi(lam.matrix(), dt, 1)
     _assert_allclose(got, expected, atol=1e-8, rtol=1e-8)
 
 
@@ -381,7 +342,7 @@ def test_jordan_lambda_phi2_large_block_sizes(dt_val, size):
     )
     dt = jnp.asarray([dt_val])
     got = lam.phi2(dt)
-    expected = _phi2_dense(lam.matrix(), dt)
+    expected = phi(lam.matrix(), dt, 2)
     _assert_allclose(got, expected, atol=1e-8, rtol=1e-8)
 
 
@@ -401,7 +362,7 @@ def test_jordan_lambda_phi1_oscillatory_vs_dense(dt_val, osc_size):
     )
     dt = jnp.asarray([dt_val])
     got = lam.phi1(dt)
-    expected = _phi1_dense(lam.matrix(), dt)
+    expected = phi(lam.matrix(), dt, 1)
     _assert_allclose(got, expected, atol=1e-8, rtol=1e-8)
 
 
@@ -416,7 +377,7 @@ def test_jordan_lambda_phi2_oscillatory_vs_dense(dt_val, osc_size):
     )
     dt = jnp.asarray([dt_val])
     got = lam.phi2(dt)
-    expected = _phi2_dense(lam.matrix(), dt)
+    expected = phi(lam.matrix(), dt, 2)
     _assert_allclose(got, expected, atol=1e-8, rtol=1e-8)
 
 
@@ -430,5 +391,5 @@ def test_jordan_lambda_phi2_matches_dense_materialization(dt):
     """phi2 for the standard mixed JordanLambda matches DenseLambda."""
     lam = _sample_jordan_lambda()
     got = lam.phi2(dt)
-    expected = _phi2_dense(lam.matrix(), dt)
+    expected = phi(lam.matrix(), dt, 2)
     _assert_allclose(got, expected, atol=1e-8, rtol=1e-8)
