@@ -203,7 +203,9 @@ def _tree(plan: WordwiseLayoutPlan, tree: int) -> Launch:
     pairs = tuple((k, 0, 0, None, False) for k in range(1, depth + 1)) + tuple(
         (depth + j, i, i // d, i % d, False) for j in range(1, tree + 1) for i in range(levels[depth + j - 1])
     )
-    return Launch(levels, pairs, 1, (d ** depth, 1), d ** tree, _table([nodes]), _table(np.full((1, depth), -1)))
+    return Launch(
+        levels, pairs, 1, (d ** depth, 1), d ** tree, _table([nodes]), _table(np.full((1, depth), -1))
+    )
 
 
 def _patterns(plan: WordwiseLayoutPlan) -> tuple[Launch, ...]:
@@ -256,8 +258,10 @@ def _patterns(plan: WordwiseLayoutPlan) -> tuple[Launch, ...]:
         group = min(count, _MAX_LETTER_GROUP)
         launches.append(Launch(
             (1,) * (N - 1) + (group,),
-            tuple((k, 0, 0, None, False) for k in range(1, N)) + tuple((N, i, 0, first + i, False) for i in range(group)),
-            codes.size, inner, count, _table(nodes), _table(np.where(prime, -1, -2 if d_doubleprime > 1 else d_prime)),
+            tuple((k, 0, 0, None, False) for k in range(1, N))
+            + tuple((N, i, 0, first + i, False) for i in range(group)),
+            codes.size, inner, count, _table(nodes),
+            _table(np.where(prime, -1, -2 if d_doubleprime > 1 else d_prime)),
         ))
     return tuple(launches)
 
@@ -300,7 +304,8 @@ def _lattices(plan: WordwiseLayoutPlan) -> tuple[Launch, ...]:
     start = graph.graph_node_offsets[edge_owner].astype(np.int64)
     destination, predecessor = start + graph.destination_indices, start + graph.predecessor_indices
     triples, column = np.unique(
-        np.stack([level[destination], slot[destination], slot[predecessor]], axis=1), axis=0, return_inverse=True
+        np.stack([level[destination], slot[destination], slot[predecessor]], axis=1),
+        axis=0, return_inverse=True,
     )
     edges = np.zeros((rows, len(triples)), dtype=np.int64)
     edges[edge_owner, column.reshape(-1)] = np.maximum(graph.letter_codes, -1)
@@ -317,7 +322,9 @@ _LAUNCHES_LOCK = RLock()
 def launches(plan: WordwiseLayoutPlan, tree: int = 1) -> tuple[Launch, ...]:
     """The launches of a plan; ``tree`` is the number of tree levels of a total-degree launch."""
     if len(plan.blocks) < 2 or plan.blocks[0].total_degree != 0 or plan.blocks[0].width != 1:
-        raise WordwisePlanError("the layout plan must begin with its scalar block and have a positive truncation.")
+        raise WordwisePlanError(
+            "the layout plan must begin with its scalar block and have a positive truncation."
+        )
     if plan.blocks[-1].total_degree > _MAX_DEGREE:
         raise WordwiseResourceError(
             f"degree {plan.blocks[-1].total_degree} exceeds the {_MAX_DEGREE}-degree kernel guard."
@@ -430,8 +437,10 @@ def _call(
             _, field = record(level, slot)
             inner = div(prime_word, field(1)) % d_prime
             if doubleprime_width > 1:
-                inner = jnp.where(code == -2, d_prime + div(doubleprime_word, field(3)) % d_doubleprime, inner)
-            return jnp.where(code < 0, inner, code), {"mask": valid & (code != 0), "other": 0} if partial else {}
+                doubleprime_letter = d_prime + div(doubleprime_word, field(3)) % d_doubleprime
+                inner = jnp.where(code == -2, doubleprime_letter, inner)
+            mask = {"mask": valid & (code != 0), "other": 0} if partial else {}
+            return jnp.where(code < 0, inner, code), mask
 
         letters = tuple(map(letter, range(len(pairs))))
 
@@ -441,12 +450,13 @@ def _call(
         def coefficients(t):
             if not R:
                 return None, constants, constants
-            state = range(R)
+            axis = range(R)
+            E_axes, psi_axes, phi_axes = coefficient_axes
             return (
-                tuple(tuple(coefficient(E_ref, coefficient_axes[0], t, r, c) for c in state) for r in state),
-                tuple(tuple(coefficient(psi_ref, coefficient_axes[1], t, k, r) for r in state) for k in range(N)),
+                tuple(tuple(coefficient(E_ref, E_axes, t, r, c) for c in axis) for r in axis),
+                tuple(tuple(coefficient(psi_ref, psi_axes, t, k, r) for r in axis) for k in range(N)),
                 tuple(
-                    tuple(tuple(coefficient(phi_ref, coefficient_axes[2], t, n, r, c) for c in state) for r in state)
+                    tuple(tuple(coefficient(phi_ref, phi_axes, t, n, r, c) for c in axis) for r in axis)
                     for n in range(N - 1)
                 ),
             )
@@ -467,7 +477,9 @@ def _call(
                 if (s, level, slot) not in sources:
                     sources[s, level, slot] = (
                         (psi[s - 1] if R else (jnp.asarray(psi[s - 1], dtype=dtype),)) if level == 0
-                        else tuple(map(add, times(P[level - 1][slot], phi[s - 1]), action(s + 1, level, slot)))
+                        else tuple(map(
+                            add, times(P[level - 1][slot], phi[s - 1]), action(s + 1, level, slot)
+                        ))
                     )
                 return sources[s, level, slot]
 
@@ -482,14 +494,14 @@ def _call(
 
             return tuple(
                 tuple(
-                    tuple(map(add, times(P[level - 1][slot], E) if R else P[level - 1][slot], action(1, level, slot)))
-                    for slot in range(count)
+                    tuple(map(add, times(state, E) if R else state, action(1, level, slot)))
+                    for slot, state in enumerate(P[level - 1])
                 )
-                for level, count in enumerate(levels, start=1)
+                for level in range(1, N + 1)
             )
 
         def seed(level, slot):
-            exists, index, *_ = node(level, slot)
+            exists, index, _ = node(level, slot)
             return tuple(
                 pltriton.load(initial_ref.at[0 if seed_batch == 1 else b, index, r], mask=exists, other=0)
                 for r in range(R)
@@ -509,14 +521,15 @@ def _call(
             lead = (b,) if emission is None else (b, block)
             for level, count in enumerate(levels, start=1):
                 for slot in range(count):
-                    _, index, stores, *_ = node(level, slot)
+                    _, index, stores = node(level, slot)
                     # Masked elements point at the spare coordinate: the Pallas interpreter writes them back.
                     index = jnp.where(stores, index, width)
                     state = P[level - 1][slot]
                     if readout_batch:
                         state = (reduce(add, (x * w for x, w in zip(state, weights))),)
                     for r, value in enumerate(state):
-                        pltriton.store(output_ref.at[lead + ((r,) if components else ()) + (index,)], value, mask=stores)
+                        coordinate = lead + ((r,) if components else ()) + (index,)
+                        pltriton.store(output_ref.at[coordinate], value, mask=stores)
 
         if emission is None:
             emit(None, jax.lax.fori_loop(0, steps, step, initial))
@@ -540,7 +553,9 @@ def _call(
             dtype,
         ),
         grid=(batch, -(-lanes // tile), -(-top // levels[-1])),
-        input_output_aliases={3 + (3 if R else 0) + bool(seed_batch) + bool(readout_batch): 0} if aliased else {},
+        input_output_aliases=(
+            {3 + (3 if R else 0) + bool(seed_batch) + bool(readout_batch): 0} if aliased else {}
+        ),
         compiler_params=pltriton.CompilerParams(num_warps=min(max(tile // 32, 1), 8), num_stages=1),
         interpret=interpret,
         name="tensordev_wordwise",
@@ -560,7 +575,7 @@ def wordwise_blocks(
         tree: int | None = None,
         interpret: bool = False,
 ) -> tuple[Array, ...]:
-    r"""The blocks of positive degree of ``plan`` in standard coordinates.
+    r"""The blocks of ``plan`` in standard coordinates: those of positive degree for a state.
 
     ``increments`` has shape ``(B, S, d)``.  Without ``coefficients`` the blocks are those of the
     signature, of shape ``(B, w)``, and ``(B, blocks, w)`` for several emitted blocks.
@@ -568,8 +583,8 @@ def wordwise_blocks(
     ``(cb, cs, >= N - 1, R, R)``, ``cb`` in ``{1, B}`` and ``cs`` in ``{1, S}``, gives the FSSK
     state ``(B, [blocks,] R, w)`` from ``initial``, of shape ``(1 or B, W, R)`` over the :math:`W`
     positive coordinates and zero by default; ``weights`` of shape ``(1 or B, R)`` replace the
-    state by its readout ``(B, w)``.  With ``accumulate=False`` every block starts from
-    ``initial``.  ``tree`` is the number :math:`L` of tree levels of a total-degree launch.
+    state by its readout ``(B, w)``, a signature.  With ``accumulate=False`` every block starts
+    from ``initial``.  ``tree`` is the number :math:`L` of tree levels of a total-degree launch.
     """
     increments = jnp.asarray(increments)
     if increments.ndim != 3 or min(increments.shape) <= 0:
@@ -602,7 +617,9 @@ def wordwise_blocks(
         if any(cb not in (1, batch) or cs not in (1, steps) for cb, cs in axes):
             raise ValueError(f"coefficient axes must be (1 or {batch}, 1 or {steps}), got {axes}.")
         if phi.shape[2] == 0:  # zero-length Pallas operands are not portable across JAX versions
-            phi = jnp.zeros(phi.shape[:2] + (1, R, R), dtype=dtype, device=_concrete_single_device(increments))
+            phi = jnp.zeros(
+                phi.shape[:2] + (1, R, R), dtype=dtype, device=_concrete_single_device(increments)
+            )
         operands += [E, psi, phi]
     elif initial is not None or weights is not None:
         raise ValueError("initial and weights require coefficients.")
@@ -620,9 +637,14 @@ def wordwise_blocks(
             raise ValueError(f"weights must have shape (1 or {batch}, {R}), got {weights.shape}.")
         tail.append(weights)
 
-    shape = (batch,) + (() if emission is None else (blocks,)) + ((R,) if R and weights is None else ()) + (width + 1,)
+    shape = (
+        (batch,) + (() if emission is None else (blocks,)) + ((R,) if R and weights is None else ())
+        + (width + 1,)
+    )
     if max(math.prod(shape), steps) > _INT32_MAX:
-        raise WordwiseResourceError(f"the output has {math.prod(shape)} elements, exceeding signed int32 indexing.")
+        raise WordwiseResourceError(
+            f"the output has {math.prod(shape)} elements, exceeding signed int32 indexing."
+        )
     if plan.grading != "total_degree":
         tree = 1
     elif tree is None:
@@ -633,7 +655,8 @@ def wordwise_blocks(
     for launch in plan_launches:
         if launch.operations(R) > _MAX_STEP_OPERATIONS:
             raise WordwiseResourceError(
-                f"one time step needs {launch.operations(R)} tile operations, exceeding {_MAX_STEP_OPERATIONS}."
+                f"one time step needs {launch.operations(R)} tile operations, "
+                f"exceeding {_MAX_STEP_OPERATIONS}."
             )
 
     output = None
@@ -642,16 +665,21 @@ def wordwise_blocks(
             (batch, steps, d), dtype, R, axes,
             (launch.levels, launch.pairs, launch.rows, launch.inner, launch.top),
             plan.dims if plan.grading == "bidegree" else (d, 0),
-            width, 0 if initial is None else int(initial.shape[0]), 0 if weights is None else int(weights.shape[0]),
+            width,
+            0 if initial is None else int(initial.shape[0]),
+            0 if weights is None else int(weights.shape[0]),
             emission, _tile(launch.lanes, tile), len(plan_launches) > 1, interpret,
         )
-        arguments = operands + [_colocate_array(launch.nodes, increments), _colocate_array(launch.edges, increments)] + tail
+        tables = [_colocate_array(table, increments) for table in (launch.nodes, launch.edges)]
+        arguments = operands + tables + tail
         if len(plan_launches) > 1:
             arguments.append(
-                jnp.zeros(shape, dtype=dtype, device=_concrete_single_device(increments)) if output is None else output
+                jnp.zeros(shape, dtype=dtype, device=_concrete_single_device(increments))
+                if output is None else output
             )
         output = call(*arguments)
-    return tuple(output[..., block.flat_offset - 1:block.flat_stop - 1] for block in plan.blocks[1:])
+    blocks = tuple(output[..., block.flat_offset - 1:block.flat_stop - 1] for block in plan.blocks[1:])
+    return blocks if R and weights is None else (jnp.ones_like(blocks[0][..., :1]),) + blocks
 
 
 def clear_kernel_caches() -> None:

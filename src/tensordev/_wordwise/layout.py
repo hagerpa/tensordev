@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from math import comb
 from numbers import Integral
 from threading import RLock
@@ -94,8 +94,6 @@ class WordwiseBlockPlan:
     width: int
     flat_offset: int
     dense_prime_width: int
-    execution_group: int = 0
-    group_offset: int = 0
     word_codes: np.ndarray | None = None
     prefix_plan: PrefixGraphPlan | None = None
 
@@ -114,17 +112,6 @@ class WordwiseBlockPlan:
 
 
 @dataclass(frozen=True, slots=True, eq=False)
-class WordwiseExecutionGroup:
-    """Blocks of one total degree sharing one kernel launch."""
-
-    total_degree: int
-    block_indices: tuple[int, ...]
-    block_slices: tuple[tuple[int, int], ...]
-    width: int
-    decoder_codes: np.ndarray | None = None
-
-
-@dataclass(frozen=True, slots=True, eq=False)
 class WordwiseLayoutPlan:
     """One active standard-coordinate output layout.
 
@@ -138,7 +125,6 @@ class WordwiseLayoutPlan:
     truncation: int | tuple[int, int]
     partially_symmetrized: bool
     blocks: tuple[WordwiseBlockPlan, ...]
-    execution_groups: tuple[WordwiseExecutionGroup, ...]
     estimate: PlanEstimate
 
     @property
@@ -598,6 +584,7 @@ def build_layout_plan(
                         "ordered bidegree decoder exceeds signed int32 range.",
                         estimate=estimate,
                     )
+                word_codes = _readonly(word_codes.astype(np.int32))
                 prefix_plan = None
             blocks.append(
                 WordwiseBlockPlan(
@@ -615,66 +602,12 @@ def build_layout_plan(
     if offset != estimate.output_coordinates:
         raise AssertionError("layout estimate and constructed width disagree.")
 
-    # Bidegrees of the same total order are contiguous in the canonical
-    # layout.  Ordered decoders are packed once per total degree so the
-    # executor can issue one launch without either one operand per grade or a
-    # second device-side concatenation.  Block decoders become zero-copy views
-    # into this authoritative wordwise buffer.
-    grouped_indices: dict[int, list[int]] = {}
-    for index, block in enumerate(blocks):
-        grouped_indices.setdefault(block.total_degree, []).append(index)
-    execution_groups = []
-    for group_index, (degree, indices_list) in enumerate(grouped_indices.items()):
-        indices = tuple(indices_list)
-        starts = []
-        group_width = 0
-        for index in indices:
-            starts.append(group_width)
-            group_width += blocks[index].width
-        slices = tuple(
-            (start, start + blocks[index].width)
-            for start, index in zip(starts, indices)
-        )
-        if grading == "bidegree" and not partially_symmetrized:
-            decoder = _readonly(
-                np.concatenate(
-                    tuple(
-                        np.asarray(blocks[index].word_codes, dtype=np.int32)
-                        for index in indices
-                    )
-                )
-            )
-            for index, (start, stop) in zip(indices, slices):
-                blocks[index] = replace(
-                    blocks[index],
-                    execution_group=group_index,
-                    group_offset=start,
-                    word_codes=decoder[start:stop],
-                )
-        else:
-            decoder = None
-            for index, (start, _stop) in zip(indices, slices):
-                blocks[index] = replace(
-                    blocks[index],
-                    execution_group=group_index,
-                    group_offset=start,
-                )
-        execution_groups.append(
-            WordwiseExecutionGroup(
-                total_degree=degree,
-                block_indices=indices,
-                block_slices=slices,
-                width=group_width,
-                decoder_codes=decoder,
-            )
-        )
     result = WordwiseLayoutPlan(
         grading=grading,
         dims=dims,
         truncation=active,
         partially_symmetrized=partially_symmetrized,
         blocks=tuple(blocks),
-        execution_groups=tuple(execution_groups),
         estimate=estimate,
     )
     with _PLAN_CACHE_LOCK:
@@ -700,7 +633,6 @@ __all__ = [
     "PlanLimits",
     "PlanResourceError",
     "WordwiseBlockPlan",
-    "WordwiseExecutionGroup",
     "WordwiseLayoutPlan",
     "build_layout_plan",
     "check_plan_resources",

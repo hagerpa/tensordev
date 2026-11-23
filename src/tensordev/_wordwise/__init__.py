@@ -16,7 +16,6 @@ _LAYOUT_NAMES = frozenset(
         "PlanLimits",
         "PlanResourceError",
         "WordwiseBlockPlan",
-        "WordwiseExecutionGroup",
         "WordwiseLayoutPlan",
         "build_layout_plan",
         "check_plan_resources",

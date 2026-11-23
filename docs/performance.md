@@ -150,8 +150,31 @@ $$
 \frac{\Delta_k^{i_{j+1}}\cdots\Delta_k^{i_n}}{(n-j)!} .
 $$
 
-A word needs only its own prefixes, so the wordwise kernels process the words and the paths in
-parallel. The approach is from `pathsig` ([Acknowledgements](background.md#acknowledgements)); the
+A word needs only its own prefixes, so words and paths are processed in parallel. One kernel
+serves ordinary and `q = 1` FSSK signatures. With a state $P_v\in\mathbb{R}^R$ for every word $v$
+and $(A_\Delta X)_{u\ell}=X_u\,\Delta^{\ell}$ for a word $u$ and a letter $\ell$, a step is
+
+$$
+P\leftarrow PE+\sum_{n=1}^{N}X_nA_\Delta^{\,n},\qquad
+X_n=P\varphi_{n-1},\quad X_n=\psi_{n-1}\ \text{at the empty word,}
+$$
+
+with the [coefficients](state-space.md#per-step-coefficients) `E`, `psi`, `phi` of the FSSK recursion; the
+signature is $R=1$, $E=1$, $\psi_{n-1}=\varphi_{n-1}=1/n!$, the formula above. For a partially
+symmetrized core the words are replaced by their classes, and $A_\Delta$ sums over the letters
+that a class can end with.
+
+One launch computes all levels. A lane of the GPU owns a set of words that contains their
+prefixes:
+
+| Core | Words of one lane |
+|---|---|
+| Total degree | A word of length $N-L$, its prefixes and its extensions by at most $L$ letters. |
+| Ordered bidegree | A word of length $N-1$, its prefixes and its extensions by one prime letter, or by one double-prime letter. |
+| Partially symmetrized | A class of the top bidegree and the classes of its prefixes. |
+
+A word owned by several lanes is computed by each of them and stored by one. The approach is from
+`pathsig` ([Acknowledgements](background.md#acknowledgements)); the
 [technical note](background.md#technical-note) adapts it to the bidegree layouts.
 
 ## JIT and compilation

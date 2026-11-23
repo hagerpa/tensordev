@@ -82,26 +82,12 @@ def test_ordered_bidegree_decoder_matches_independent_word_enumeration():
     plan = build_layout_plan(core, (2, 1))
 
     assert plan.grades == ((0, 0), (1, 0), (0, 1), (2, 0), (1, 1), (2, 1))
-    for block_index, block in enumerate(plan.blocks):
+    for block in plan.blocks:
         np.testing.assert_array_equal(
             block.word_codes,
             _ordered_word_codes(core.dims, block.grade),
         )
         assert not block.word_codes.flags.writeable
-        group = plan.execution_groups[block.execution_group]
-        start, stop = group.block_slices[
-            group.block_indices.index(block_index)
-        ]
-        assert (start, stop) == (
-            block.group_offset,
-            block.group_offset + block.width,
-        )
-        assert np.shares_memory(block.word_codes, group.decoder_codes)
-    assert tuple(group.total_degree for group in plan.execution_groups) == (0, 1, 2, 3)
-    assert all(
-        len({plan.blocks[index].total_degree for index in group.block_indices}) == 1
-        for group in plan.execution_groups
-    )
     assert plan.memory_bytes() == plan.estimate.metadata_bytes
 
 

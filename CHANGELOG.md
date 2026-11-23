@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Changed
+
+- The alpha wordwise execution (`execution="wordwise"`) is one kernel for
+  ordinary and `q = 1` FSSK signatures on every core type, in place of one
+  kernel for each combination of signature or FSSK state and ordered or
+  partially symmetrized coordinates. It computes all levels in one launch,
+  two for an ordered bidegree core, and its results agree with the previous
+  kernels to rounding. An FSSK step of more than `2**16` tile operations is
+  refused: for two letters a state dimension above 76 at truncation 4 and
+  above 28 at truncation 12, where the previous kernels accepted state
+  dimensions up to 128.
+
 ### Fixed
 
 - `RBF_SQR_Kernel` and `RBF_CEXP_Kernel` act on the node values

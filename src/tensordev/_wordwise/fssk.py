@@ -7,7 +7,6 @@ from typing import Any
 
 import jax.numpy as jnp
 
-from tensordev._wordwise.dispatch import _concrete_single_device
 from tensordev._wordwise.kernel import WordwiseError, WordwiseUnsupportedError, wordwise_blocks
 from tensordev._wordwise.layout import PlanResourceError, WordwiseLayoutPlan, build_layout_plan
 
@@ -49,7 +48,10 @@ def _kernel_blocks(
         weights: Any = None,
         **options: Any,
 ) -> tuple[WordwiseLayoutPlan, tuple[Any, ...]]:
-    """Plan of a prepared call and its kernel blocks, batch first."""
+    """Plan of a prepared call and its kernel blocks, batch first.
+
+    ``options`` are those of :func:`~tensordev._wordwise.kernel.wordwise_blocks`.
+    """
     y, E, psi, phi = (
         jnp.moveaxis(value, 0, 1) for value in (call.y_time, call.E_time, call.psi_time, call.phi_time)
     )
@@ -101,10 +103,7 @@ def run_fssk_q1_wordwise_readout(
     if call.output_starting_state:
         raise WordwiseUnsupportedError("direct scalar-FSSK readout cannot emit the starting state.")
     plan, blocks = _kernel_blocks(call, plan=plan, weights=weights, **options)
-    unit = jnp.ones(
-        (blocks[0].shape[0], 1), dtype=blocks[0].dtype, device=_concrete_single_device(call.y_time)
-    )
-    return plan.assemble_signature((unit, *blocks))
+    return plan.assemble_signature(blocks)
 
 
 def try_fssk_q1_wordwise(call: PreparedFSSKQ1Call, **options: Any) -> Any | None:

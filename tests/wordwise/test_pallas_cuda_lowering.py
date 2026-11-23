@@ -1,4 +1,4 @@
-"""Lower every wordwise Pallas kernel family for CUDA on a CPU host.
+"""Lower the wordwise kernel of every core family for CUDA on a CPU host.
 
 Interpret mode accepts value-level primitives (scatter, slice, gather) that
 the Pallas Triton backend cannot lower, so the interpreter tests alone do not
@@ -25,12 +25,9 @@ from tensordev._wordwise.fssk import (
     run_fssk_q1_wordwise,
     run_fssk_q1_wordwise_readout,
 )
+from tensordev._wordwise.kernel import WordwiseUnavailableError, _load_pallas, wordwise_blocks
 from tensordev._wordwise.layout import build_layout_plan
 from tensordev._wordwise.ordinary import run_ordinary_wordwise
-from tensordev._wordwise.pallas_ordinary import (
-    PallasOrdinaryUnavailableError,
-    _load_pallas,
-)
 from tensordev.development.free import _prepare_free_development_call
 from tensordev.sss.state_update import _maximum_order
 
@@ -66,10 +63,6 @@ def _family(name):
     ), (2, 1), 3
 
 
-def _kind(family):
-    return "quotient" if "partial" in family else "ordered"
-
-
 def _abstract_gpu():
     if importlib.util.find_spec("jax._src.pallas.triton.gpu_info") is None:
         return contextlib.nullcontext()
@@ -98,7 +91,7 @@ def _export_cuda(function, *specs):
 def _cuda_export_unavailable_reason() -> str | None:
     try:
         pl, pltriton = _load_pallas()
-    except PallasOrdinaryUnavailableError as exc:
+    except WordwiseUnavailableError as exc:
         return str(exc)
 
     def kernel(x_ref, output_ref):
@@ -191,15 +184,9 @@ def triton_modules(monkeypatch):
     yield modules
 
 
-def _assert_lowered(modules, expected_kernel: str) -> None:
-    if modules is None:
-        return
-    assert set(modules) == {expected_kernel}
-    assert modules[expected_kernel] == []
-
-
-def _kernel_mode(block_mode: str) -> str:
-    return "terminal" if block_mode == "independent" else block_mode
+def _assert_lowered(modules) -> None:
+    if modules is not None:
+        assert modules == {"tensordev_wordwise": []}
 
 
 @pytest.mark.parametrize("block_mode", _BLOCK_MODES)
@@ -229,7 +216,20 @@ def test_ordinary_kernels_lower_for_cuda(
     )
 
     assert exported.platforms == ("cuda",)
-    _assert_lowered(triton_modules, f"tensordev_{_kind(family)}_ordinary_{_kernel_mode(block_mode)}")
+    _assert_lowered(triton_modules)
+
+
+@pytest.mark.parametrize("tree", (2, 3))
+def test_tree_levels_lower_for_cuda(cuda_export, triton_modules, tree):
+    plan = build_layout_plan(td.make_core(dims=2, max_trunc=3), 3)
+
+    exported = _export_cuda(
+        lambda increments: wordwise_blocks(increments, plan=plan, tree=tree),
+        jax.ShapeDtypeStruct((_BATCH, _STEPS, 2), "float32"),
+    )
+
+    assert exported.platforms == ("cuda",)
+    _assert_lowered(triton_modules)
 
 
 @pytest.mark.parametrize("variant", _FSSK_VARIANTS)
@@ -283,5 +283,5 @@ def test_fssk_kernels_lower_for_cuda(
     exported = _export_cuda(state, *specs)
 
     assert exported.platforms == ("cuda",)
-    _assert_lowered(triton_modules, f"tensordev_{_kind(family)}_fssk_q1_{output}")
+    _assert_lowered(triton_modules)
 

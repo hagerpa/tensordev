@@ -70,13 +70,12 @@ from tensordev._wordwise.dispatch import (
     fssk_q1_wordwise_candidate_eligible,
     ordinary_wordwise_candidate_eligible,
 )
+from tensordev._wordwise.kernel import clear_kernel_caches
 from tensordev._wordwise.layout import (
     build_layout_plan,
     clear_layout_plan_cache,
 )
 from tensordev._wordwise.ordinary import run_ordinary_wordwise
-from tensordev._wordwise.pallas_ordinary import clear_pallas_ordinary_cache
-from tensordev._wordwise.pallas_quotient import clear_pallas_quotient_cache
 from tensordev.development.free import (
     _execute_portable_free_development_call,
     _finalize_free_development_call,
@@ -161,8 +160,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--block-size", type=int, default=4)
     parser.add_argument("--warmups", type=int, default=5)
     parser.add_argument("--repeats", type=int, default=30)
-    parser.add_argument("--tile-words", type=int, default=128)
-    parser.add_argument("--tile-prime-words", type=int, default=16)
+    parser.add_argument("--tile", type=int, default=32)
     parser.add_argument(
         "--fssk-outputs",
         nargs="+",
@@ -208,13 +206,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         )
     if args.quad_order <= 0 or args.quad_order > 256:
         raise SystemExit("--quad-order must be between 1 and 256")
-    if args.tile_words <= 0 or args.tile_words & (args.tile_words - 1):
-        raise SystemExit("--tile-words must be a positive power of two")
-    if (
-        args.tile_prime_words <= 0
-        or args.tile_prime_words & (args.tile_prime_words - 1)
-    ):
-        raise SystemExit("--tile-prime-words must be a positive power of two")
+    if args.tile <= 0 or args.tile & (args.tile - 1):
+        raise SystemExit("--tile must be a positive power of two")
     if any(mode != "terminal" for mode in args.block_modes):
         if args.steps % args.block_size:
             raise SystemExit(
@@ -342,8 +335,7 @@ def _ordinary_runners(
     truncation: int | tuple[int, int],
     block_size: int | None,
     accumulate: bool,
-    tile_words: int,
-    tile_prime_words: int,
+    tile: int,
 ) -> dict[str, _Runner]:
     def automatic(increments):
         return td.path_signature(
@@ -364,11 +356,7 @@ def _ordinary_runners(
             block_size=block_size,
             accumulate=accumulate,
         )
-        result = run_ordinary_wordwise(
-            call,
-            tile_words=tile_words,
-            tile_prime_words=tile_prime_words,
-        )
+        result = run_ordinary_wordwise(call, tile=tile)
         return _finalize_free_development_call(
             call,
             result,
@@ -679,18 +667,8 @@ def _synchronize(value: Any) -> Any:
 
 
 def _clear_execution_caches() -> None:
-    from tensordev._wordwise.pallas_fssk_q1 import (
-        clear_pallas_fssk_q1_cache,
-    )
-    from tensordev._wordwise.pallas_fssk_quotient import (
-        clear_pallas_fssk_quotient_cache,
-    )
-
     clear_layout_plan_cache()
-    clear_pallas_ordinary_cache()
-    clear_pallas_quotient_cache()
-    clear_pallas_fssk_q1_cache()
-    clear_pallas_fssk_quotient_cache()
+    clear_kernel_caches()
     jax.clear_caches()
 
 
@@ -1105,8 +1083,7 @@ def _metadata(args: argparse.Namespace, device: Any) -> dict[str, Any]:
             "block_size": args.block_size,
             "warmups": args.warmups,
             "repeats": args.repeats,
-            "tile_words": args.tile_words,
-            "tile_prime_words": args.tile_prime_words,
+            "tile": args.tile,
             "fssk_outputs": list(args.fssk_outputs),
             "coefficient_modes": list(args.coefficient_modes),
             "initial_states": list(args.initial_states),
@@ -1200,8 +1177,7 @@ def _measure_ordinary_case(
         truncation=truncation,
         block_size=block_size,
         accumulate=accumulate,
-        tile_words=args.tile_words,
-        tile_prime_words=args.tile_prime_words,
+        tile=args.tile,
     )
     measurements = _measure_runners(
         runners,
