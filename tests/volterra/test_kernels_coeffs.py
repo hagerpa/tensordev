@@ -240,7 +240,7 @@ _GAMMA_SERIES_REFERENCE = [
       0.0014987900665763897, 0.00024373005385932697)),
 ]
 
-# The same for rate * (t - s) above the float64 series threshold 13.8, where the
+# The same for rate * (t - s) above the float64 series threshold 13.85, where the
 # coefficients come from tanh-sinh quadrature.
 _GAMMA_QUAD_REFERENCE = [
     ((0.0, 0.5, 0.5, 0.3, 1.3, 60.0, 0.0),
