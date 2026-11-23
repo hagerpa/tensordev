@@ -367,6 +367,24 @@ def _broadcast_pairwise(
     return dx, dy
 
 
+def _boundary_developments(driving, *, refine: int, out_trunc: int, batch_shape) -> tuple:
+    """Levels ``1, ..., out_trunc`` of the development of ``driving`` at every fine node.
+
+    Each interval of ``driving`` is split into ``refine`` equal sub-intervals, the path the
+    solver integrates, so the result has ``refine * S + 1`` nodes on the step axis.
+    """
+    if out_trunc == 0:
+        return tuple()
+    development = free_development(
+        tuple(jnp.repeat(level / refine, refine, axis=-2) for level in driving),
+        increment_input=True, seq_core=_TOTAL_DEGREE_SEQ_CORE, trunc=out_trunc, axis=-2,
+        block_size=1, accumulate=True, output_starting_point=True, core=_TOTAL_DEGREE_CORE,
+    )
+    return tuple(
+        jnp.broadcast_to(level, batch_shape + level.shape[-2:]) for level in development[1:]
+    )
+
+
 def _build_scan_boundaries(
         dx: DenseElemFirstOn,
         dy: DenseElemFirstOn,
@@ -376,9 +394,8 @@ def _build_scan_boundaries(
     """
     Build the exact boundary data for the rowwise scan solver.
 
-    Increments ``dx``, ``dy`` are on the **coarse** grid.  When
-    ``dyadic_order > (0, 0)`` the boundaries are computed on the coarse grid and
-    the solver indexes them lazily via ``i >> dyadic_order_x`` / ``j >> dyadic_order_y``.
+    Increments ``dx``, ``dy`` are on the **coarse** grid; the boundary developments are
+    those of the refined paths at every fine node.
 
     Returns
     -------
@@ -403,61 +420,6 @@ def _build_scan_boundaries(
     S_fine = S_coarse * r_x
     T_fine = T_coarse * r_y
 
-    def _boundary_development(
-            driving,
-            *,
-            out_trunc,
-            nodes,
-            template,
-    ):
-        if out_trunc == 0:
-            return tuple()
-
-        if len(driving) == 0:
-            return tuple(
-                jnp.zeros(batch_shape + (nodes, template[k].shape[-1]), dtype=dtype)
-                for k in range(out_trunc)
-            )
-
-        boundary_full = free_development(driving, increment_input=True, seq_core=_TOTAL_DEGREE_SEQ_CORE, trunc=out_trunc, axis=-2,
-                                         block_size=1, accumulate=True, output_starting_point=True, core=_TOTAL_DEGREE_CORE)
-        return tuple(
-            jnp.broadcast_to(
-                boundary_full[k + 1],
-                batch_shape + boundary_full[k + 1].shape[-2:],
-            )
-            for k in range(out_trunc)
-        )
-
-    # Boundary developments on the coarse grid (S_coarse+1 / T_coarse+1 nodes)
-    f_boundary_coarse = _boundary_development(
-        dx,
-        out_trunc=n,
-        nodes=S_coarse + 1,
-        template=dy,
-    )
-    g_boundary_coarse = _boundary_development(
-        dy,
-        out_trunc=m,
-        nodes=T_coarse + 1,
-        template=dx,
-    )
-
-    # Row 0 boundary: needs T_fine+1 nodes.  The coarse boundary at coarse
-    # node j maps to fine nodes j*r … (j+1)*r-1.  We index via j >> order.
-    def _expand_boundary_to_fine(coarse_levels, fine_nodes, order):
-        """Expand coarse-grid boundary to fine grid.
-
-        Fine node ``i`` maps to coarse node ``min(i >> order, n_coarse-1)``.
-        """
-        if not coarse_levels:
-            return tuple()
-        if order == 0:
-            return coarse_levels
-        n_coarse = coarse_levels[0].shape[-2]
-        idx = jnp.minimum(jnp.arange(fine_nodes) >> order, n_coarse - 1)
-        return tuple(level[..., idx, :] for level in coarse_levels)
-
     # south / west scalar boundary for w (all ones on fine grid)
     w_row_0 = jnp.broadcast_to(one[..., None], batch_shape + (T_fine + 1,))
     w_col_0 = jnp.broadcast_to(one[..., None], batch_shape + (S_fine + 1,))
@@ -468,9 +430,8 @@ def _build_scan_boundaries(
         for k in range(n)
     )
 
-    # south boundary for g is the boundary development in y, expanded to fine grid
-    g_row_0_coarse = g_boundary_coarse  # (T_coarse+1 nodes)
-    g_row_0 = _expand_boundary_to_fine(g_row_0_coarse, T_fine + 1, dyadic_order_y)
+    # south boundary for g is the boundary development in y
+    g_row_0 = _boundary_developments(dy, refine=r_y, out_trunc=m, batch_shape=batch_shape)
 
     # west boundary for g is zero (per-cell, no grid axis)
     g_col_0 = tuple(
@@ -490,10 +451,11 @@ def _build_scan_boundaries(
     w_boundary_steps = jnp.moveaxis(w_col_0[..., 1:], -1, 0)
 
     # West f-boundary values for rows i = 1, ..., S_fine
-    # Expand coarse f_boundary to fine grid, then extract rows 1..S_fine
-    f_boundary_fine = _expand_boundary_to_fine(f_boundary_coarse, S_fine + 1, dyadic_order_x)
     f_boundary_steps = _TOTAL_DEGREE_CORE.tensor_moveaxis(
-        tuple(level[..., 1:, :] for level in f_boundary_fine),
+        tuple(
+            level[..., 1:, :]
+            for level in _boundary_developments(dx, refine=r_x, out_trunc=n, batch_shape=batch_shape)
+        ),
         source=-2,
         destination=0,
     )
@@ -895,9 +857,8 @@ def _solve_wavefront(
     ``jax.vmap``, keeping only two diagonal buffers in memory.  This trades
     sequential depth for parallelism compared to the row-scan backend.
 
-    Boundary developments (f on column 0, g on row 0) are pre-computed on the
-    coarse grid, expanded to the fine grid, and injected into each fresh
-    diagonal buffer before interior cells are written.
+    Boundary developments (f on column 0, g on row 0) of the refined paths are
+    injected into each fresh diagonal buffer before interior cells are written.
     """
     dyadic_order_x, dyadic_order_y = dyadic_order
     r_x = 1 << dyadic_order_x
@@ -929,29 +890,9 @@ def _solve_wavefront(
     dx_steps = _TOTAL_DEGREE_CORE.tensor_moveaxis(dx_sc, source=-2, destination=0)
     dy_steps = _TOTAL_DEGREE_CORE.tensor_moveaxis(dy_sc, source=-2, destination=0)
 
-    # --- Boundary developments on the fine grid ---
-
-    def _bdev(driving, *, out_trunc):
-        if out_trunc == 0:
-            return tuple()
-        bnd = free_development(driving, increment_input=True, seq_core=_TOTAL_DEGREE_SEQ_CORE, trunc=out_trunc, axis=-2,
-                               block_size=1, accumulate=True, output_starting_point=True, core=_TOTAL_DEGREE_CORE)
-        return tuple(
-            jnp.broadcast_to(bnd[k + 1], batch_shape + bnd[k + 1].shape[-2:])
-            for k in range(out_trunc)
-        )
-
-    def _expand(coarse, fine_nodes, order):
-        if not coarse or order == 0:
-            return coarse
-        nc = coarse[0].shape[-2]
-        idx = jnp.minimum(jnp.arange(fine_nodes) >> order, nc - 1)
-        return tuple(lev[..., idx, :] for lev in coarse)
-
-    # f_col0: f-boundary at column 0, nodes i = 0..S_fine  (n levels)
-    # g_row0: g-boundary at row 0, nodes j = 0..T_fine     (m levels)
-    f_col0 = _expand(_bdev(dx, out_trunc=n), S_fine + 1, dyadic_order_x)
-    g_row0 = _expand(_bdev(dy, out_trunc=m), T_fine + 1, dyadic_order_y)
+    # f on column 0 (nodes i = 0..S_fine) and g on row 0 (nodes j = 0..T_fine)
+    f_col0 = _boundary_developments(dx, refine=r_x, out_trunc=n, batch_shape=batch_shape)
+    g_row0 = _boundary_developments(dy, refine=r_y, out_trunc=m, batch_shape=batch_shape)
 
     # Index-ready: move node axis to 0 → (nodes,) + batch + (width,)
     f_col0_i = tuple(jnp.moveaxis(lev, -2, 0) for lev in f_col0)

@@ -22,6 +22,12 @@
 - Reverse-mode gradients of `GammaKernel` coefficients were NaN for
   `rate * (t - s)` above about 37.4 in float64 and above 18.93, the whole
   quadrature range, in float32.
+- With `dyadic_order > 0` and tensor-valued inputs, `free_kernel`,
+  `FreeKernel` and `HigherOrderKernel` built the boundary developments from
+  the unrefined paths, so the refined solution converged only at first order
+  and at low orders could be less accurate than no refinement. The boundary
+  developments now follow the refined paths, and `dyadic_order` gives the
+  result of splitting every interval into `2**dyadic_order` equal parts.
 
 ## 0.1.1
 

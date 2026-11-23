@@ -537,3 +537,23 @@ def test_callable_input_matches_increment_input(quadrature):
             rtol=1e-12,
             atol=1e-12,
         )
+
+
+def _split(increments, order):
+    return tuple(jnp.repeat(level / 2 ** order, 2 ** order, axis=-2) for level in increments)
+
+
+@pytest.mark.parametrize("backend", ["scan", "wavefront"])
+@pytest.mark.parametrize("levels, dyadic_order", [((2, 2), 2), ((2, 3), (1, 2)), ((3, 1), 2)])
+def test_dyadic_order_equals_explicit_refinement(backend, levels, dyadic_order):
+    """``dyadic_order`` solves the problem of the paths with every interval split by hand."""
+    rng = np.random.default_rng(7)
+    dx, dy = (
+        tuple(jnp.asarray(rng.normal(size=(2, 4, 2 ** k)) / k) for k in range(1, M + 1))
+        for M in levels
+    )
+    order_x, order_y = (dyadic_order,) * 2 if isinstance(dyadic_order, int) else dyadic_order
+    got = free_kernel(dx, dy, increment_in=True, backend=backend, dyadic_order=dyadic_order, pairwise=True)
+    want = free_kernel(_split(dx, order_x), _split(dy, order_y), increment_in=True, backend=backend,
+                       pairwise=True)
+    np.testing.assert_allclose(got, want, rtol=1e-12)
