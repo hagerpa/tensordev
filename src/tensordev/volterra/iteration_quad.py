@@ -135,7 +135,7 @@ def quadratic_iteration(
     source_indices = xp.arange(S, dtype=jnp.int32)
     h_all = times_arr[1:] - times_arr[:-1]
     interp_inv_all = xp.linalg.inv(
-        _basis_interpolation_matrix_batched(h_all, thetas=thetas, rhos=rhos, dtype=dtype)
+        _basis_interpolation_matrix(h_all, thetas=thetas, rhos=rhos)
     )
 
     def step_basis(
@@ -472,66 +472,16 @@ def _chebyshev_lobatto_thetas(
     return tuple(nodes[i] for i in range(n))
 
 
-def _basis_interpolation_matrix(
-        *,
-        h: Array,
-        thetas: tuple[Array, ...],
-        rhos: tuple[Array, ...],
-        dtype: jnp.dtype,
-) -> Array:
-    """Matrix mapping basis coefficients to point evaluations.
+def _basis_interpolation_matrix(h: Array, *, thetas: tuple[Array, ...], rhos: tuple[Array, ...]) -> Array:
+    r"""Matrices :math:`V_{ab} = \theta_a^{\rho_b} h^{\rho_b}` of the basis values at the interpolation points.
 
-    Entry ``V[a, b]`` is the value of basis component ``b`` at interpolation
-    point ``theta[a]``.  ``h`` must be a scalar.
+    ``h`` may have any shape; the result has shape ``h.shape + (len(thetas), len(rhos))``.
+    Splitting :math:`(\theta h)^\rho` keeps the derivative in ``h`` finite at :math:`\theta = 0`.
     """
-    rows = []
-    for theta in thetas:
-        row = []
-        for rho in rhos:
-            is_const = rho == jnp.asarray(0.0, dtype=dtype)
-            value = jnp.where(
-                is_const,
-                jnp.asarray(1.0, dtype=dtype),
-                (theta * h) ** rho,
-            )
-            row.append(value)
-        rows.append(jnp.stack(row, axis=0))
-    return jnp.stack(rows, axis=0)
-
-
-def _basis_interpolation_matrix_batched(
-        h_all: Array,
-        *,
-        thetas: tuple[Array, ...],
-        rhos: tuple[Array, ...],
-        dtype: jnp.dtype,
-) -> Array:
-    """Vectorised version of :func:`_basis_interpolation_matrix` over a grid.
-
-    Parameters
-    ----------
-    h_all:
-        Per-step sizes, shape ``(S,)``.
-
-    Returns
-    -------
-    Array
-        Shape ``(S, B, B)`` — one interpolation matrix per step, suitable for
-        a single batched :func:`jnp.linalg.inv` call.
-    """
-    rows = []
-    for theta in thetas:
-        row = []
-        for rho in rhos:
-            is_const = rho == jnp.asarray(0.0, dtype=dtype)
-            value = jnp.where(
-                is_const,
-                jnp.ones_like(h_all),
-                (theta * h_all) ** rho,
-            )
-            row.append(value)
-        rows.append(jnp.stack(row, axis=0))
-    return jnp.moveaxis(jnp.stack(rows, axis=0), -1, 0)
+    h = jnp.asarray(h)
+    return jnp.stack(
+        [jnp.stack([theta ** rho * h ** rho for rho in rhos], axis=-1) for theta in thetas], axis=-2
+    )
 
 
 __all__ = ["quadratic_iteration", "BasisExpansionSpec"]

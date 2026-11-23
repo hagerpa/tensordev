@@ -55,6 +55,11 @@ class ConvolutionKernel:
     where :math:`A_p \in \mathbb{R}^{m \times d}` and :math:`\beta_p > 0` is
     the fractional order of :math:`k_p` (:math:`\beta_p = 1` for smooth kernels).
     Concrete subclasses implement :meth:`alpha`.
+
+    At ``tau == t`` the one-sided partial derivative of a degree-:math:`n` coefficient in ``tau``
+    is infinite when :math:`n\beta_p < 1`.  There :math:`(t-s)/(\tau-s)` and :math:`\tau-t` are
+    held constant in differentiation, so the returned derivatives in ``t`` and ``tau`` are finite
+    but are not the partial derivatives; their sum, the derivative along ``tau == t``, is exact.
     """
 
     A: Array
@@ -431,11 +436,8 @@ class GammaKernel(ConvolutionKernel):
     exponent of the integrand factor :math:`(\tau-u)^{n\beta-1}`.  In
     float32 it is about ``1e-5``.
 
-    At ``tau == t`` the one-sided partial derivative in ``tau`` is infinite
-    for :math:`\beta < 1`.  There :math:`(t-s)/(\tau-s)` and :math:`\tau-t`
-    are held constant in differentiation, so the returned derivatives in
-    ``t`` and ``tau`` are not the partial derivatives, but their sum, the
-    derivative of :math:`\alpha_n(s, t, t; \rho)` in :math:`t`, is exact.
+    Second derivatives that involve ``s``, ``t`` or ``tau`` are NaN at ``tau == t``, for
+    ``tau < t`` and for ``rate * (t - s)`` above the series threshold.
 
     Parameters
     ----------
@@ -535,8 +537,7 @@ def _fractional_alpha(
 
     Returns ``(vals, valid)`` with ``vals`` of shape ``leading + (n, M)``.
     """
-    valid, h_safe, tau_s_safe = _safe_intervals(s, t, tau)
-    z = jnp.clip(h_safe / tau_s_safe, 0.0, 1.0)
+    valid, h_safe, tau_s_safe, z = _safe_intervals(s, t, tau)
 
     prefix = xp.matmul(ell, beta)            # (M,)
     total = prefix[:, None] + beta[None, :]  # (M, n)
@@ -551,16 +552,24 @@ def _fractional_alpha(
         tau_s_safe[..., None, None],
         h_safe[..., None, None],
     )
-    vals = jnp.exp(log_scale) * betainc(a, b, z[..., None, None])
+    # I_1(a, b) = 1; betainc at z = 1 would pass its infinite density (b < 1) into the gradient.
+    below = (z < 1.0)[..., None, None]
+    vals = jnp.exp(log_scale) * jnp.where(below, betainc(a, b, jnp.where(below, z[..., None, None], 0.5)), 1.0)
     vals = jnp.where(valid[..., None, None], vals, 0.0)
     return jnp.swapaxes(vals, -1, -2), valid  # leading + (n, M)
 
 
-def _safe_intervals(s: Array, t: Array, tau: Array) -> tuple[Array, Array, Array]:
-    """Mask ``s < t <= tau`` and ``(t - s, tau - s)``, set to 1 where it is false."""
+def _safe_intervals(s: Array, t: Array, tau: Array) -> tuple[Array, Array, Array, Array]:
+    """Mask ``s < t <= tau``, ``(t - s, tau - s)`` set to 1 where it is false, and their ratio ``z``.
+
+    ``z`` is held at 1, with zero derivative, where the ratio reaches 1: at ``tau == t`` the
+    derivative in ``tau`` alone is infinite for ``beta < 1``.
+    """
     h = t - s
     valid = (h > 0) & (tau >= t)
-    return valid, jnp.where(valid, h, 1.0), jnp.where(valid, tau - s, 1.0)
+    h_safe, tau_s_safe = jnp.where(valid, h, 1.0), jnp.where(valid, tau - s, 1.0)
+    z = h_safe / tau_s_safe
+    return valid, h_safe, tau_s_safe, jnp.where(z < 1.0, z, 1.0)
 
 
 def _fractional_log_scale(
@@ -694,12 +703,9 @@ def _gamma_alpha(
 
     Returns ``(vals, valid)`` with ``vals`` of shape ``leading + (1, M)``.
     """
-    valid, h_safe, tau_s_safe = _safe_intervals(s, t, tau)
-    # z and tau - t are held constant at tau == t, where the derivative in
-    # tau alone is infinite for beta < 1 (see GammaKernel).
+    valid, h_safe, tau_s_safe, z = _safe_intervals(s, t, tau)
+    # tau - t is held constant at tau == t, like z.
     delta = jnp.where(valid & (tau > t), tau - t, 0.0)
-    z = h_safe / tau_s_safe
-    z = jnp.where(z < 1.0, z, 1.0)
     x = rate * h_safe
     n = degree + 1.0
 

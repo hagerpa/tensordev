@@ -346,10 +346,11 @@ coordinates.
 
 ## Gradients
 
-`vsig` is differentiable with respect to the path, the matrices `A` and the kernel parameters:
-`beta` of a `FractionalKernel`, and `beta`, `scale` and `rate` of a `GammaKernel`. This holds for
-the quadratic and FFT schemes at `order` 0, 1 and 2, and for `scheme="adams"`, which accepts a
-`FractionalKernel`. Build the kernel inside the differentiated function:
+`vsig` is differentiable with respect to the path, the step size `dt`, the matrices `A` and the
+kernel parameters: `beta` of a `FractionalKernel`, and `beta`, `scale` and `rate` of a
+`GammaKernel`. This holds for the quadratic and FFT schemes at `order` 0, 1 and 2, and for
+`scheme="adams"`, which accepts a `FractionalKernel`. Build the kernel inside the differentiated
+function:
 
 ```python
 def level_two_energy(beta):
@@ -390,4 +391,5 @@ incomplete beta function that is differentiable in all three arguments.
       `jax.hessian` raises for a `GammaKernel`.
     - With `order > 0` and a scheme other than `"adams"`, a traced `beta` runs without the cached
       solver (see [Compilation](#compilation)).
-    - Gradients with respect to the step size `dt` are not supported.
+    - Second derivatives through a `GammaKernel` are NaN once `dt` is among the differentiated
+      arguments; second derivatives in the kernel parameters alone are finite.

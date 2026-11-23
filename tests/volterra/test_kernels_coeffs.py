@@ -351,20 +351,23 @@ def test_gamma_rate_gradient_at_zero(beta, tau):
 
 
 @pytest.mark.parametrize("beta", [0.3, 1.0, 1.7])
-@pytest.mark.parametrize("rate", [0.0, 2.5, 40.0])
-def test_gamma_gradients_are_finite_on_diagonal_and_invalid_triples(beta, rate):
+@pytest.mark.parametrize("kernel, rate", [("fractional", None), ("gamma", 0.0), ("gamma", 2.5), ("gamma", 40.0)])
+def test_gradients_are_finite_on_diagonal_and_invalid_triples(kernel, rate, beta):
     """Gradients are finite at ``tau == t`` and zero for ``tau < t``.
 
     The derivative along ``t == tau`` matches central differences.
     """
-    f = functools.partial(_gamma_coef_sum, beta=beta)
-    grad_f = jax.grad(f, argnums=range(5))
-    assert all(np.isfinite(float(g)) for g in grad_f(1.3, rate, 0.1, 0.6, 0.6))
+    f, params = (
+        (functools.partial(_gamma_coef_sum, beta=beta), (1.3, rate)) if kernel == "gamma"
+        else (lambda s, t, tau: _weighted_coef_sum(_fractional_kernel(beta), s, t, tau, rho=beta), ())
+    )
+    grad_f = jax.grad(f, argnums=range(len(params) + 3))
+    assert all(np.isfinite(float(g)) for g in grad_f(*params, 0.1, 0.6, 0.6))
     check_grads(
-        lambda c: f(1.3, rate, 0.1, c, c), (0.6,),
+        lambda c: f(*params, 0.1, c, c), (0.6,),
         order=1, modes=("rev",), eps=1e-6, rtol=1e-6, atol=0.0,
     )
-    assert all(float(g) == 0.0 for g in grad_f(1.3, rate, 0.1, 0.6, 0.5))
+    assert all(float(g) == 0.0 for g in grad_f(*params, 0.1, 0.6, 0.5))
 
 
 def test_gamma_float32_quadrature_gradients_match_float64():

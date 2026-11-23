@@ -477,16 +477,10 @@ def _basis_spec(
 ) -> BasisExpansionSpec:
     rhos = _basis_rhos_multicomp(order, betas=kernel.beta, dtype=ctx.dtype)
     thetas = _chebyshev_lobatto_thetas(n=len(rhos), dtype=ctx.dtype)
-    interpolation = _basis_interpolation_matrix(
-        h=ctx.h,
-        thetas=thetas,
-        rhos=rhos,
-        dtype=ctx.dtype,
-    )
     return BasisExpansionSpec(
         rhos=rhos,
         thetas=thetas,
-        interpolation_inverse=jnp.linalg.inv(interpolation),
+        interpolation_inverse=jnp.linalg.inv(_basis_interpolation_matrix(ctx.h, thetas=thetas, rhos=rhos)),
     )
 
 

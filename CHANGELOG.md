@@ -28,6 +28,11 @@
   and at low orders could be less accurate than no refinement. The boundary
   developments now follow the refined paths, and `dyadic_order` gives the
   result of splitting every interval into `2**dyadic_order` equal parts.
+- `jax.grad` of `vsig` with respect to `dt` was NaN for kernels with
+  `beta < 1`; it now matches finite differences for every scheme.
+- `FractionalKernel` coefficient gradients at `tau == t` were NaN or
+  infinite. As for `GammaKernel`, they are now finite there, and their sum in
+  `t` and `tau` is the exact derivative along `tau == t`.
 - Kernel parameters can be traced under `jax.jit`: the constructors of
   `FractionalKernel`, `GammaKernel` and `FSSKConvolutionKernel` check only
   concrete values. For `order > 0` with the `"fft"` or `"quadratic"` scheme,

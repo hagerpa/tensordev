@@ -322,6 +322,25 @@ def test_vsig_parameter_gradients_match_finite_differences(fn, name, params, ord
     check_grads_each(f, (jnp.asarray(params, dtype=jnp.float64),), eps=1e-5, rtol=1e-7, atol=1e-9)
 
 
+@pytest.mark.parametrize("name, params, scheme", [
+    pytest.param(name, params, scheme, id=f"{name}-{params[0]}-{scheme}")
+    for name, params in [("fractional", (0.7,)), ("fractional", (1.3,)), ("gamma", (0.7, 1.3, 1.5))]
+    for scheme in ("fft", "quadratic", "adams")
+    if not (name == "gamma" and scheme == "adams")      # adams supports FractionalKernel only
+])
+def test_vsig_dt_gradient_matches_finite_differences(name, params, scheme):
+    """``jax.grad`` through vsig w.r.t. the step size ``dt`` matches central differences."""
+    kernel = parameter_kernel(name, jnp.asarray(params, dtype=jnp.float64), jnp.eye(2, dtype=jnp.float64)[None])
+
+    def f(dt):
+        levels = vsig(_X, kernel=kernel, dt=dt, trunc=2, order=1, scheme=scheme)
+        return sum(
+            jnp.sum(jnp.sin(jnp.arange(level.size) + 1.0) * level.ravel()) for level in levels
+        )
+
+    check_grads_each(f, (0.25,), eps=1e-6, rtol=1e-6, atol=1e-9)
+
+
 @pytest.mark.parametrize("name, params, order, scheme", [
     ("fractional", (0.7,), 0, "auto"), ("fractional", (0.7,), 1, "adams"), ("gamma", (0.7, 1.3, 1.5), 0, "auto"),
 ])
