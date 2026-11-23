@@ -312,15 +312,15 @@ def test_gamma_series_and_quadrature_agree_at_threshold():
         _assert_allclose(outside, inside, atol=0.0, rtol=1e-10)
 
 
-def _gamma_coef_sum(scale, rate, s, t, tau, *, beta):
-    return _weighted_coef_sum(_gamma_kernel(beta, scale=scale, rate=rate), s, t, tau, rho=beta)
+def _gamma_coef_sum(scale, rate, s, t, tau, *, beta, dtype=jnp.float64):
+    return _weighted_coef_sum(_gamma_kernel(beta, scale=scale, rate=rate, dtype=dtype), s, t, tau, rho=beta)
 
 
 @pytest.mark.parametrize("beta", [0.3, 1.7])
 @pytest.mark.parametrize(
     "s, t, tau, rate",
-    [(0.1, 0.6, 0.85, 2.5), (0.0, 0.5, 0.7, 40.0)],
-    ids=["series", "quad"],
+    [(0.1, 0.6, 0.85, 2.5), (0.0, 0.5, 0.7, 40.0), (0.1, 0.6, 0.85, 80.0)],
+    ids=["series", "quad", "quad_c_is_1"],
 )
 def test_gamma_gradients_match_finite_differences(beta, s, t, tau, rate):
     """Gradients w.r.t. scale, rate, s, t and tau."""
@@ -365,6 +365,18 @@ def test_gamma_gradients_are_finite_on_diagonal_and_invalid_triples(beta, rate):
         order=1, modes=("rev",), eps=1e-6, rtol=1e-6, atol=0.0,
     )
     assert all(float(g) == 0.0 for g in grad_f(1.3, rate, 0.1, 0.6, 0.5))
+
+
+def test_gamma_float32_quadrature_gradients_match_float64():
+    """Reverse-mode gradients at rate * (t - s) = 25, on the float32 quadrature path."""
+    got, ref = (
+        np.array(jax.grad(functools.partial(_gamma_coef_sum, beta=0.3, dtype=dtype), argnums=range(5))(
+            *(jnp.asarray(v, dtype) for v in (1.3, 50.0, 0.1, 0.6, 0.85))
+        ))
+        for dtype in (jnp.float32, jnp.float64)
+    )
+    assert np.all(np.isfinite(got))
+    np.testing.assert_allclose(got, ref, rtol=1e-3, atol=1e-3 * np.max(np.abs(ref)))
 
 
 def test_gamma_float32_matches_float64():

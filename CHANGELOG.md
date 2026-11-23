@@ -19,6 +19,9 @@
   `quad_order`), which leaves a piecewise-linear path unchanged. Under
   `jax.jit`, or `jax.grad` with respect to `Lambda`, steps are not split, and
   a `JordanLambda` gives NaN for `omega * dt > 12` or `|rate| * dt > 5`.
+- Reverse-mode gradients of `GammaKernel` coefficients were NaN for
+  `rate * (t - s)` above about 37.4 in float64 and above 18.93, the whole
+  quadrature range, in float32.
 
 ## 0.1.1
 

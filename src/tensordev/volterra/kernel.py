@@ -847,8 +847,11 @@ def _gamma_alpha_quad(
     nb = n * beta
 
     def log_f(y: Array, yc: Array, log_y: Array, log_yc: Array, log_w: Array) -> Array:
-        # x v = -log(1 - c y) and x (1 - v) = log(y + (1 - y) e^x)
-        xv = jnp.where(y <= 0.5, -jnp.log1p(-c * y), -jnp.log(yc + y * jnp.exp(-xe)))
+        # x v = -log(1 - c y) and x (1 - v) = log(y + (1 - y) e^x).  The inner
+        # where keeps log1p away from -1 where y rounds to 1 and c to 1, whose
+        # infinite derivative would turn the reverse-mode gradient into NaN.
+        lower = y <= 0.5
+        xv = jnp.where(lower, -jnp.log1p(-c * jnp.where(lower, y, 0.0)), -jnp.log(yc + y * jnp.exp(-xe)))
         xw = jnp.logaddexp(log_y, log_yc + xe)
         t_u = he * xv / xe
         tau_u = de + t_u
