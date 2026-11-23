@@ -304,3 +304,12 @@ def test_signature_class_matches_function(path_kind, dim, trunc, steps, batch):
         atol=1e-12,
         rtol=1e-12,
     )
+
+
+@pytest.mark.parametrize("increment_input", [False, True])
+def test_path_signature_accepts_numpy_input(increment_input):
+    X = np.asarray(_random_level_one_path("trig", jr.PRNGKey(0), batch=2, steps=8, dim=2))
+    got = path_signature(X, trunc=3, increment_input=increment_input)
+    want = path_signature(jnp.asarray(X), trunc=3, increment_input=increment_input)
+    for a, b in zip(got, want):
+        np.testing.assert_array_equal(a, b)

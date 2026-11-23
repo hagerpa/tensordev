@@ -37,6 +37,9 @@
   `FractionalKernel`, `GammaKernel` and `FSSKConvolutionKernel` check only
   concrete values. For `order > 0` with the `"fft"` or `"quadratic"` scheme,
   a traced `beta` raises a `ValueError` that says it must be concrete.
+- `path_signature` and the free developments raised a `ValueError` for NumPy
+  increments (`increment_input=True`) with NumPy 2, whose arrays carry a
+  `device` attribute that is not a JAX device.
 
 ## 0.1.1
 

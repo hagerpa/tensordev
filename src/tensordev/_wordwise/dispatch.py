@@ -65,7 +65,7 @@ def _concrete_single_device(value: Any) -> Any | None:
     device = getattr(value, "device", None)
     if callable(device):
         device = device()
-    return device
+    return device if isinstance(device, jax.Device) else None
 
 
 def _colocate_array(value: Any, reference: Any) -> Any:

@@ -281,7 +281,7 @@ def test_metadata_colocation_does_not_materialize_on_default_device_first(
     monkeypatch,
 ):
     metadata = np.asarray([1, 2, 3], dtype=np.int32)
-    device = object()
+    device = jax.devices("cpu")[0]
     reference = SimpleNamespace(device=device)
     sentinel = object()
     observed = []
