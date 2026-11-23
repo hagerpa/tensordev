@@ -286,8 +286,7 @@ def test_forced_interpreter_public_path_matches_portable(monkeypatch):
         lambda call: fssk_assembly.run_fssk_q1_wordwise(
             call,
             interpret=True,
-            tile_words=4,
-            tile_prime_words=2,
+            tile=2,
         ),
     )
     actual = state_update_module.fssk_state(path, **kwargs)
@@ -531,8 +530,7 @@ def test_forced_interpreter_fused_vsig_matches_portable(
             call,
             weights,
             interpret=True,
-            tile_words=4,
-            tile_prime_words=2,
+            tile=2,
         ),
     )
     actual = state_update_module.fssk_vsig(path, **kwargs)

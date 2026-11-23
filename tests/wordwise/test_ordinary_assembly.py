@@ -85,7 +85,7 @@ def test_wordwise_assembly_matches_portable_blocks_and_coordinates(
     raw = run_ordinary_wordwise(
         call,
         interpret=True,
-        tile_words=4,
+        tile=4,
     )
     actual = _finalize_free_development_call(
         call,
@@ -146,7 +146,7 @@ def test_partial_assembly_preserves_seed_axis_and_block_policy(
     raw = run_ordinary_wordwise(
         call,
         interpret=True,
-        tile_prime_words=2,
+        tile=2,
     )
     actual = _finalize_free_development_call(
         call,
@@ -175,7 +175,7 @@ def test_dimension_free_total_assembly_infers_alphabet_width():
     actual = run_ordinary_wordwise(
         call,
         interpret=True,
-        tile_words=4,
+        tile=4,
     )
     expected = _execute_portable_free_development_call(call)
 
@@ -236,7 +236,7 @@ def test_forced_interpreter_preserves_seed_axis_and_block_policy(
     raw = run_ordinary_wordwise(
         call,
         interpret=True,
-        tile_words=4,
+        tile=4,
     )
     actual = _finalize_free_development_call(
         call,

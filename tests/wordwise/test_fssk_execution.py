@@ -11,7 +11,7 @@ import pytest
 import tensordev as td
 import tensordev._wordwise.dispatch as dispatch
 import tensordev._wordwise.fssk as fssk_assembly
-from tensordev._wordwise.pallas_ordinary import PallasOrdinaryResourceError
+from tensordev._wordwise.kernel import WordwiseResourceError
 from tensordev.sss import FSSK, StateSpaceSignature
 from tensordev.sss import state as state_module
 from tensordev.sss import state_update
@@ -153,7 +153,7 @@ def test_explicit_wordwise_propagates_resource_failure(api, monkeypatch):
     monkeypatch.setattr(dispatch, "_supported_cuda_device", lambda device: True)
 
     def unavailable(*args, **kwargs):
-        raise PallasOrdinaryResourceError("local state exceeds the configured limit")
+        raise WordwiseResourceError("local state exceeds the configured limit")
 
     def portable(*args, **kwargs):
         raise AssertionError("explicit wordwise execution silently fell back")
@@ -162,7 +162,7 @@ def test_explicit_wordwise_propagates_resource_failure(api, monkeypatch):
     monkeypatch.setattr(fssk_assembly, "run_fssk_q1_wordwise_readout", unavailable)
     monkeypatch.setattr(state_update, "_execute_portable_prepared_fssk_state", portable)
     monkeypatch.setattr(state_update, "_execute_portable_prepared_fssk_vsig", portable)
-    with pytest.raises(PallasOrdinaryResourceError, match="local state"):
+    with pytest.raises(WordwiseResourceError, match="local state"):
         _call(api, execution="wordwise")
 
 
@@ -214,12 +214,12 @@ def test_explicit_wordwise_matches_jax_in_interpreter(core_kwargs, monkeypatch):
 
     def state(call):
         routes.append("state")
-        return original_state(call, interpret=True, tile_words=4, tile_prime_words=4)
+        return original_state(call, interpret=True, tile=4)
 
     def readout(call, weights):
         routes.append("readout")
         return original_readout(
-            call, weights, interpret=True, tile_words=4, tile_prime_words=4
+            call, weights, interpret=True, tile=4
         )
 
     monkeypatch.setattr(fssk_assembly, "run_fssk_q1_wordwise", state)

@@ -18,9 +18,7 @@ from tensordev._wordwise.fssk import (
     try_fssk_q1_wordwise_readout,
 )
 from tensordev._wordwise.layout import build_layout_plan
-from tensordev._wordwise.pallas_ordinary import (
-    PallasOrdinaryResourceError,
-)
+from tensordev._wordwise.kernel import WordwiseResourceError
 from tensordev.sss import DenseLambda, FSSK
 from tensordev.sss.state_update import fssk_state_from_coef
 
@@ -256,8 +254,7 @@ def test_terminal_all_core_families_match_portable_with_r3_seed(core, trunc):
         prepared,
         plan=plan,
         interpret=True,
-        tile_words=4,
-        tile_prime_words=2,
+        tile=2,
     )
 
     _assert_state_close(actual, expected)
@@ -283,8 +280,7 @@ def test_fused_terminal_readout_all_core_families(core, trunc, weight_batch):
         prepared,
         plan=plan,
         interpret=True,
-        tile_words=4,
-        tile_prime_words=2,
+        tile=2,
     )
 
     got = run_fssk_q1_wordwise_readout(
@@ -292,8 +288,7 @@ def test_fused_terminal_readout_all_core_families(core, trunc, weight_batch):
         weights,
         plan=plan,
         interpret=True,
-        tile_words=4,
-        tile_prime_words=2,
+        tile=2,
     )
     hidden_blocks = hidden.blocks if hasattr(hidden, "blocks") else hidden
     broadcast_weights = jnp.broadcast_to(weights, (2, 3))
@@ -336,8 +331,7 @@ def test_blocked_all_core_families_return_canonical_standard_states(
         prepared,
         plan=plan,
         interpret=True,
-        tile_words=4,
-        tile_prime_words=2,
+        tile=2,
     )
 
     _assert_state_close(actual, expected)
@@ -363,7 +357,7 @@ def test_single_coefficient_time_step_is_preserved():
         prepared,
         plan=plan,
         interpret=True,
-        tile_words=4,
+        tile=4,
     )
 
     assert prepared.E_time.shape[:2] == (1, 2)
@@ -373,7 +367,7 @@ def test_single_coefficient_time_step_is_preserved():
 @pytest.mark.parametrize(
     "error",
     [
-        PallasOrdinaryResourceError("bounded resource failure"),
+        WordwiseResourceError("bounded resource failure"),
     ],
 )
 def test_fallback_helper_returns_none_only_for_bounded_errors(monkeypatch, error):

@@ -12,7 +12,7 @@ import tensordev as td
 import tensordev._wordwise.dispatch as dispatch_module
 from tensordev._wordwise import ordinary
 from tensordev._wordwise.layout import PlanResourceError, estimate_layout_plan
-from tensordev._wordwise.pallas_ordinary import PallasOrdinaryError
+from tensordev._wordwise.kernel import WordwiseError
 from tensordev.development import sig as signature_module
 
 
@@ -112,7 +112,7 @@ def test_jax_selection_bypasses_automatic_wordwise(monkeypatch):
     _assert_close(actual, expected)
 
 
-@pytest.mark.parametrize("error_type", [PlanResourceError, PallasOrdinaryError])
+@pytest.mark.parametrize("error_type", [PlanResourceError, WordwiseError])
 def test_explicit_wordwise_propagates_executor_errors(monkeypatch, error_type):
     monkeypatch.setattr(dispatch_module, "_supported_cuda_device", lambda _: True)
     message = "executor resource or backend failure"

@@ -21,7 +21,7 @@ from tensordev._wordwise.dispatch import (
     ordinary_wordwise_candidate_eligible,
     ordinary_wordwise_device_eligible,
 )
-from tensordev._wordwise.pallas_quotient import PallasQuotientPlanError
+from tensordev._wordwise.kernel import WordwisePlanError
 from tensordev.core.capabilities import _WORDWISE_SIGNATURE_PROTOCOL
 from tensordev.development.free import _prepare_free_development_call
 
@@ -241,8 +241,8 @@ def test_automatic_runner_admits_partial_plans(monkeypatch):
         ordinary, "ordinary_wordwise_device_eligible", lambda call: True
     )
 
-    def execute(call, *, plan):
-        observed.append(plan)
+    def execute(call):
+        observed.append(call.core)
         return sentinel
 
     monkeypatch.setattr(ordinary, "run_ordinary_wordwise", execute)
@@ -270,7 +270,7 @@ def test_automatic_runner_falls_back_on_quotient_plan_error(monkeypatch):
     )
 
     def fail(*args, **kwargs):
-        raise PallasQuotientPlanError("invalid packed plan")
+        raise WordwisePlanError("invalid packed plan")
 
     monkeypatch.setattr(ordinary, "run_ordinary_wordwise", fail)
 
