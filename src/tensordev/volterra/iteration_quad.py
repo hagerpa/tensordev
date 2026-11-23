@@ -425,9 +425,15 @@ def _basis_rhos_multicomp(
 
     # Convert to NumPy before any jnp op: under jit, jnp returns tracers even
     # for constant inputs.
-    beta_vals = np.asarray(
-        jax.lax.stop_gradient(betas) if isinstance(betas, jax.core.Tracer) else betas
-    ).reshape(-1).astype(dtype).astype(float)
+    try:
+        beta_vals = np.asarray(
+            jax.lax.stop_gradient(betas) if isinstance(betas, jax.core.Tracer) else betas
+        ).reshape(-1).astype(dtype).astype(float)
+    except jax.errors.TracerArrayConversionError:
+        raise ValueError(
+            "order > 0 with scheme 'fft' or 'quadratic' needs the value of beta, which sets the "
+            "interpolation basis; under jax.jit close over beta or use scheme='adams'."
+        ) from None
     betas = jnp.asarray(betas).reshape(-1).astype(dtype)
 
     # (value, exponent) pairs; integer exponents come first so they win ties.

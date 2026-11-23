@@ -25,6 +25,7 @@ import jax
 import jax.numpy as jnp
 from jax.scipy.special import gammaln
 
+from tensordev._wordwise.dispatch import _contains_tracer
 from tensordev.core.utils.xp import xp
 from tensordev.util.combinatorics import MultiIndexLayout, build_multiindex_layout
 from tensordev.util.special import betainc
@@ -34,6 +35,12 @@ from tensordev.sss.kernel import FSSK, prepare_coef, eval_psi
 
 
 Array = jax.Array
+
+
+def _check_values(value: Array, valid, message: str) -> None:
+    """Raise ``ValueError(message)`` unless ``valid`` holds for every entry; traced values pass."""
+    if not _contains_tracer(value) and not np.all(valid(np.asarray(value))):
+        raise ValueError(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,8 +365,7 @@ class FractionalKernel(ConvolutionKernel):
                 "fractional beta must have shape (n,), matching A.shape[0]; "
                 f"got beta.shape={tuple(self.beta.shape)} and n={self.q}."
             )
-        if bool(jnp.any(self.beta <= 0)):
-            raise ValueError("fractional beta entries must be positive.")
+        _check_values(self.beta, lambda b: b > 0, "fractional beta entries must be positive.")
 
     def alpha(
         self,
@@ -467,12 +473,9 @@ class GammaKernel(ConvolutionKernel):
             raise ValueError(f"gamma scale must be scalar or shape (1,), got {tuple(scale.shape)}.")
         if rate.shape not in [(), (1,)]:
             raise ValueError(f"gamma rate must be scalar or shape (1,), got {tuple(rate.shape)}.")
-        if bool(jnp.any(self.beta <= 0)):
-            raise ValueError("gamma beta must be positive.")
-        if bool(jnp.any(scale <= 0)):
-            raise ValueError("gamma scale must be positive.")
-        if bool(jnp.any(rate < 0)):
-            raise ValueError("gamma rate must be non-negative.")
+        _check_values(self.beta, lambda b: b > 0, "gamma beta must be positive.")
+        _check_values(scale, lambda c: c > 0, "gamma scale must be positive.")
+        _check_values(rate, lambda r: r >= 0, "gamma rate must be non-negative.")
         if self.quad_order <= 0:
             raise ValueError(f"quad_order must be positive, got {self.quad_order}.")
         object.__setattr__(self, "scale", scale)
@@ -960,8 +963,9 @@ class FSSKConvolutionKernel(ConvolutionKernel):
                 f"got {self.beta.shape}."
             )
 
-        if bool(jnp.any(self.beta != 1)):
-            raise ValueError("FSSKConvolutionKernel requires beta == 1 for all components.")
+        _check_values(
+            self.beta, lambda b: b == 1, "FSSKConvolutionKernel requires beta == 1 for all components."
+        )
 
         if b.ndim != 2:
             raise ValueError(f"b must have shape (q, R), got {b.shape}.")

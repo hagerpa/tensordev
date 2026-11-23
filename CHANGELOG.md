@@ -28,6 +28,10 @@
   and at low orders could be less accurate than no refinement. The boundary
   developments now follow the refined paths, and `dyadic_order` gives the
   result of splitting every interval into `2**dyadic_order` equal parts.
+- Kernel parameters can be traced under `jax.jit`: the constructors of
+  `FractionalKernel`, `GammaKernel` and `FSSKConvolutionKernel` check only
+  concrete values. For `order > 0` with the `"fft"` or `"quadratic"` scheme,
+  a traced `beta` raises a `ValueError` that says it must be concrete.
 
 ## 0.1.1
 

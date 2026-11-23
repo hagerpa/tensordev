@@ -238,10 +238,11 @@ configuration covers the core pair, the truncation, the kernel class and array s
 not recompile, with one exception: for `order > 0` and a scheme other than `"adams"` the solver
 is specialized on the values of `beta`.
 
-`vsig` also runs inside `jax.jit` when the kernel is built outside and closed over. Kernel
-constructors check their values eagerly, so building a kernel inside `jax.jit`, or passing one
-as a traced argument, raises `TracerBoolConversionError`. Under `jax.grad` alone this is
-allowed; see [Gradients](#gradients).
+`vsig` runs inside `jax.jit`, and kernel parameters may be traced: constructors check values
+that are concrete and assume traced ones valid. For `order > 0` and a scheme other than
+`"adams"`, `beta` sets the interpolation basis and must have a value, so under `jax.jit` it is
+closed over rather than passed as an argument; a traced `beta` raises `ValueError` there.
+Under `jax.grad` alone a differentiated `beta` keeps its value; see [Gradients](#gradients).
 
 ## Schemes
 

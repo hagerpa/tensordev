@@ -320,3 +320,26 @@ def test_vsig_parameter_gradients_match_finite_differences(fn, name, params, ord
         )
 
     check_grads_each(f, (jnp.asarray(params, dtype=jnp.float64),), eps=1e-5, rtol=1e-7, atol=1e-9)
+
+
+@pytest.mark.parametrize("name, params, order, scheme", [
+    ("fractional", (0.7,), 0, "auto"), ("fractional", (0.7,), 1, "adams"), ("gamma", (0.7, 1.3, 1.5), 0, "auto"),
+])
+def test_vsig_gradient_with_traced_kernel_parameters(name, params, order, scheme):
+    """Kernel parameters can be ``jax.jit`` arguments; ``jit(grad)`` equals ``grad``."""
+    A = jnp.eye(2, dtype=jnp.float64)[None]
+
+    def f(p):
+        return jnp.sum(vsig(_X, kernel=parameter_kernel(name, p, A), dt=0.25, trunc=2, order=order,
+                            scheme=scheme)[2] ** 2)
+
+    p = jnp.asarray(params, dtype=jnp.float64)
+    np.testing.assert_allclose(jax.jit(jax.grad(f))(p), jax.grad(f)(p), rtol=1e-12)
+
+
+def test_vsig_traced_beta_with_interpolation_basis_raises():
+    kernel = lambda beta: parameter_kernel("fractional", beta, jnp.eye(2, dtype=jnp.float64)[None])
+    with pytest.raises(ValueError, match="needs the value of beta"):
+        jax.jit(lambda beta: vsig(_X, kernel=kernel(beta), dt=0.25, trunc=2, order=1, scheme="fft"))(
+            jnp.array([0.7])
+        )
