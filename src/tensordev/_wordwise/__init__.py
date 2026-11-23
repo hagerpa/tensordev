@@ -1,7 +1,7 @@
 """Private planning and execution support for wordwise computations.
 
 Names are resolved lazily so importing the cheap device dispatcher on a CPU
-does not load plan builders, mathematical references, or Pallas executors.
+does not load plan builders or the Pallas kernel.
 """
 
 from __future__ import annotations
@@ -24,19 +24,8 @@ _LAYOUT_NAMES = frozenset(
     }
 )
 _PLAN_NAMES = frozenset({"PrefixGraphPlan", "PrefixGraphView"})
-_REFERENCE_NAMES = frozenset(
-    {
-        "fssk_q1_readout_reference",
-        "fssk_q1_quotient_graph_state_reference",
-        "fssk_q1_state_reference",
-        "fssk_q1_word_state_reference",
-        "ordinary_signature_reference",
-        "ordinary_word_reference",
-        "quotient_word_reference",
-    }
-)
 
-__all__ = sorted(_LAYOUT_NAMES | _PLAN_NAMES | _REFERENCE_NAMES)
+__all__ = sorted(_LAYOUT_NAMES | _PLAN_NAMES)
 
 
 def __getattr__(name: str):
@@ -44,8 +33,6 @@ def __getattr__(name: str):
         module_name = "tensordev._wordwise.layout"
     elif name in _PLAN_NAMES:
         module_name = "tensordev._wordwise.plans"
-    elif name in _REFERENCE_NAMES:
-        module_name = "tensordev._wordwise.reference"
     else:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     value = getattr(import_module(module_name), name)
