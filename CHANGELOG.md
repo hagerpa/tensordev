@@ -59,6 +59,15 @@
 - `path_signature` and the free developments raised a `ValueError` for NumPy
   increments (`increment_input=True`) with NumPy 2, whose arrays carry a
   `device` attribute that is not a JAX device.
+- On GPUs, FSSK coefficients, `fssk_state` and `fssk_vsig` took about 20
+  times longer since 0.1.1. `expm`, `phi1` and `phi2` of a `DenseLambda`, and
+  `phi1` and `phi2` of a `JordanLambda`, scale `-dt * Lambda` by `2**-s` and
+  square back `s` times, and each of 64 squaring steps was a branch that a GPU
+  decides on the host. A batch now branches once, to a loop of 0, 4, 16 or 64
+  squarings without branches, the shortest that covers it; the values are
+  unchanged to rounding. On an NVIDIA A40 a jitted `fssk_vsig` readout (state
+  dimension 3, 16 steps, float32) takes 0.96 ms instead of 8.2 ms; with 0.1.0
+  it took 0.38 ms.
 
 ## 0.1.1
 

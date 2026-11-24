@@ -61,6 +61,32 @@ def test_dense_lambda_phi1_matches_dense_block_formula(dt):
     _assert_allclose(lam.phi1(dt), expected)
 
 
+def _branches(jaxpr, in_loop=False):
+    """For every branch of ``jaxpr`` and of the jaxprs inside it, whether it lies in a loop."""
+    found = []
+    for eqn in jaxpr.eqns:
+        if eqn.primitive.name == "cond":
+            found.append(in_loop)
+        for param in eqn.params.values():
+            for inner in param if isinstance(param, (tuple, list)) else (param,):
+                inner = getattr(inner, "jaxpr", inner)
+                if hasattr(inner, "eqns"):
+                    found += _branches(inner, in_loop or eqn.primitive.name in ("scan", "while"))
+    return found
+
+
+@pytest.mark.parametrize("method,order", [("expm", 0), ("phi1", 1), ("phi2", 2)])
+@pytest.mark.parametrize("dt", [[0.1], [0.1, 3.0], [0.1, 300.0], [0.1, 1e6]])
+def test_dense_lambda_operators_branch_once_for_any_squaring_count(method, order, dt):
+    """Batches needing 0 and up to 0, 3, 10, 22 squarings; a branch inside a loop would make a
+    GPU wait for the host at every squaring."""
+    matrix = jnp.asarray([[1.0, 0.4], [-0.3, 2.0]])
+    dt = jnp.asarray(dt)
+    operator = lambda h: getattr(DenseLambda(matrix), method)(h)
+    _assert_allclose(jax.jit(operator)(dt), phi(matrix, dt, order), atol=1e-14, rtol=1e-12)
+    assert _branches(jax.make_jaxpr(operator)(dt).jaxpr) == [False]
+
+
 @pytest.mark.parametrize("transpose", [False, True])
 @pytest.mark.parametrize("dt", [0.2, jnp.asarray([0.1, 0.3, 0.7])])
 def test_dense_lambda_shifted_solves_match_direct_linear_solve(dt, transpose):

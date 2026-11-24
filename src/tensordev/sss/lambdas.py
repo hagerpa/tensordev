@@ -238,16 +238,10 @@ def _on_side(apply_left: Callable[[Array], Array], x: Array, side: _SIDE) -> Arr
 # exp, phi_1 and phi_2 of dense matrices
 # ---------------------------------------------------------------------------
 
-# A static bound makes the squaring recurrence differentiable in reverse mode.
-# Inputs needing more squarings return NaNs, as in jax.scipy.linalg.expm.
-_MAX_SQUARINGS = 64
-
-
-@jax.jit
-def _expm_batched(A: Array) -> Array:
-    """Return ``exp(A)`` for a batch of matrices."""
-    with jax.default_matmul_precision("highest"):
-        return jsp_linalg.expm(A, max_squarings=_MAX_SQUARINGS)
+# Lengths of the squaring loop: the shortest that covers every matrix of a batch runs, with no
+# branch inside, so a GPU decides once per evaluation.  Static lengths keep the loop differentiable
+# in reverse mode; inputs needing more squarings than the longest give NaN.
+_SQUARING_LOOPS = (0, 4, 16, 64)
 
 
 # [6/6] Padé coefficients for φ_k(z) = Σ z^j/(j+k)!, computed at import time.
@@ -285,61 +279,57 @@ def _pade_eval(B: Array, B2: Array, B4: Array, B6: Array,
 
 
 @partial(jax.jit, static_argnames=("order",))
-def _phi_pade_ss(A: Array, *, order: int) -> Array:
-    r"""Return :math:`\varphi_k(A)` for a batch of matrices, :math:`k` = ``order`` :math:`\in\{1,2\}`.
+def _phi(A: Array, *, order: int) -> Array:
+    r"""Return :math:`\varphi_k(A)` for a batch of matrices, :math:`k` = ``order`` :math:`\in\{0,1,2\}`.
 
-    With :math:`s=\max(0,\lceil\log_2\|A\|_1\rceil)` and :math:`C=2^{-s}A`, the [6/6] Padé
-    approximants of :math:`\varphi_1(C)` and :math:`\varphi_2(C)` are doubled :math:`s` times by
+    With :math:`\varphi_0=\exp`, :math:`s=\max(0,\lceil\log_2\|A\|_1\rceil)` and
+    :math:`C=2^{-s}A`, the [6/6] Padé approximants of :math:`\varphi_1(C)` and
+    :math:`\varphi_2(C)` and :math:`e^C=I+C\varphi_1(C)` are doubled :math:`s` times by
 
     .. math::
-        \varphi_1(2C)=\tfrac12\varphi_1(C)\bigl(2I+C\varphi_1(C)\bigr),\qquad
+        e^{2C}=\bigl(e^C\bigr)^2,\qquad
+        \varphi_1(2C)=\tfrac12\varphi_1(C)\bigl(e^C+I\bigr),\qquad
         \varphi_2(2C)=\tfrac12\varphi_2(C)+\tfrac14\varphi_1(C)^2.
 
-    Matrices with nonfinite :math:`\|A\|_1` or :math:`s >` ``_MAX_SQUARINGS`` give NaN.
+    Matrices with nonfinite :math:`\|A\|_1` or more squarings than the longest loop give NaN.
     """
     dtype = A.dtype
     eye = jnp.eye(A.shape[-1], dtype=dtype)
     norm1 = jnp.linalg.norm(A, ord=1, axis=(-2, -1))
     scaling = jnp.maximum(0, jnp.ceil(jnp.log2(jnp.maximum(norm1, 1e-30) / _PADE_THETA)))
-    valid = jnp.isfinite(norm1) & (scaling <= _MAX_SQUARINGS)
+    valid = jnp.isfinite(norm1) & (scaling <= _SQUARING_LOOPS[-1])
     s = jnp.where(valid, scaling, 0).astype(jnp.int32)
-
-    def evaluate(_):
-        B = jnp.where(valid[..., None, None], A, 0) * jnp.exp2(-s.astype(norm1.dtype))[..., None, None]
-        B2 = xp.matmul(B, B)
-        B4 = xp.matmul(B2, B2)
-        B6 = xp.matmul(B4, B2)
-        values = (B,) + tuple(
-            _pade_eval(B, B2, B4, B6, jnp.asarray(n, dtype=dtype), jnp.asarray(d, dtype=dtype), eye)
-            for n, d in _PHI_PADE[:order]
-        )
-
-        def double(values):
-            C, p1 = values[:2]
-            doubled = (2.0 * C, 0.5 * xp.matmul(p1, 2.0 * eye + xp.matmul(C, p1)))
-            if order == 2:
-                doubled += (0.5 * values[2] + 0.25 * xp.matmul(p1, p1),)
-            return doubled
-
-        def step(i, values):
-            active = i < s
-
-            def active_step(values):
-                mask = active[..., None, None]
-                doubled = double(tuple(jnp.where(mask, v, 0) for v in values))
-                return tuple(jnp.where(mask, new, old) for new, old in zip(doubled, values))
-
-            # Keep this scalar guard outside per-matrix operations. Mapping
-            # individual conds would compute every inactive matrix product.
-            return jax.lax.cond(jnp.any(active), active_step, lambda values: values, values)
-
-        return jax.lax.fori_loop(0, _MAX_SQUARINGS, step, values)[-1]
-
-    return jnp.where(
-        valid[..., None, None],
-        jax.lax.cond(jnp.any(valid), evaluate, lambda _: jnp.full_like(A, jnp.nan), None),
-        jnp.nan,
+    B = jnp.where(valid[..., None, None], A, 0) * jnp.exp2(-s.astype(norm1.dtype))[..., None, None]
+    B2 = xp.matmul(B, B)
+    B4 = xp.matmul(B2, B2)
+    B6 = xp.matmul(B4, B2)
+    approximants = tuple(
+        _pade_eval(B, B2, B4, B6, jnp.asarray(n, dtype=dtype), jnp.asarray(d, dtype=dtype), eye)
+        for n, d in _PHI_PADE[: max(order, 1)]
     )
+
+    def double(values):
+        exp, *phi = values
+        doubled = [xp.matmul(exp, exp)]
+        if order >= 1:
+            doubled.append(0.5 * xp.matmul(phi[0], exp + eye))
+        if order == 2:
+            doubled.append(0.5 * phi[1] + 0.25 * xp.matmul(phi[0], phi[0]))
+        return tuple(doubled)
+
+    def step(values, i):
+        mask = (i < s)[..., None, None]
+        # Finished matrices enter as zeros, so their overflow cannot reach a gradient.
+        doubled = double(tuple(jnp.where(mask, v, 0) for v in values))
+        return tuple(jnp.where(mask, new, old) for new, old in zip(doubled, values)), None
+
+    def square(length, values):
+        return jax.lax.scan(step, values, jnp.arange(length))[0]
+
+    values = ((eye + xp.matmul(B, approximants[0]),) + approximants)[: order + 1]
+    loop = jnp.sum(jnp.max(s, initial=0) > jnp.asarray(_SQUARING_LOOPS[:-1]))
+    values = jax.lax.switch(loop, [partial(square, length) for length in _SQUARING_LOOPS], values)
+    return jnp.where(valid[..., None, None], values[order], jnp.nan)
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +337,7 @@ def _phi_pade_ss(A: Array, *, order: int) -> Array:
 # ---------------------------------------------------------------------------
 
 _STORED = ("_expm", "_phi1", "_phi2")
-_PHI_ORDER = {"phi1": 1, "phi2": 2}
+_PHI_ORDER = {"expm": 0, "phi1": 1, "phi2": 2}
 
 
 @lru_cache(maxsize=None)
@@ -602,8 +592,7 @@ class DenseLambda(Lambda):
         return m.T if transpose else m
 
     def _operator(self, dt: Array, *, dtype: jnp.dtype, kind: str) -> Array:
-        A = -dt.astype(dtype)[:, None, None] * self._mat(dtype)
-        return _expm_batched(A) if kind == "expm" else _phi_pade_ss(A, order=_PHI_ORDER[kind])
+        return _phi(-dt.astype(dtype)[:, None, None] * self._mat(dtype), order=_PHI_ORDER[kind])
 
     def _action_shared(self, dt: Array, x: Array, *, kind: str) -> Array:
         return _left_multiply(self._operator(dt[None], dtype=x.dtype, kind=kind)[0], x)
@@ -652,7 +641,7 @@ def _phi_chain_coeffs(rate: Array, nmax: int, dt: Array, dtype: jnp.dtype, *, or
     r"""First row of :math:`\varphi_k(-h(\lambda I-N))`, :math:`k` = ``order``; shape ``(m, n)``."""
     rdtype = jnp.finfo(dtype).dtype
     A = _real_jordan_A(rate.astype(rdtype), nmax, dt.astype(rdtype), rdtype)
-    return _phi_pade_ss(A, order=order).astype(dtype)[:, 0, :]
+    return _phi(A, order=order).astype(dtype)[:, 0, :]
 
 
 def _shifted_coeffs(rate: Array, nmax: int, zeta: Array, dt: Array, dtype: jnp.dtype) -> Array:
@@ -692,7 +681,7 @@ def _osc_phi_coeffs(
     r"""Chain coefficients of :math:`\varphi_k(-hJ)`, :math:`k` = ``order``; ``(m, n, 2, 2)``."""
     rdtype = jnp.finfo(dtype).dtype
     A = _osc_jordan_A(decay.astype(rdtype), freq.astype(rdtype), nmax, dt.astype(rdtype), rdtype)
-    phi = _phi_pade_ss(A, order=order)
+    phi = _phi(A, order=order)
     return phi[:, :2, :].reshape(dt.shape[0], 2, nmax, 2).transpose(0, 2, 1, 3).astype(dtype)
 
 
