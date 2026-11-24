@@ -59,8 +59,8 @@ _MAX_DEGREE = 32
 _MAX_TILE = 1024
 _MAX_LETTER_GROUP = 32
 # State values of the tree of a total-degree lane, and the lanes that a deeper tree must leave.
-_TREE_VALUES = 64
-_TREE_LANES = 1 << 15
+_TREE_VALUES = 128
+_TREE_LANES = 1 << 11
 # Tile operations of one time step, and entries of the tables of one launch.
 _MAX_STEP_OPERATIONS = 1 << 16
 _MAX_TABLE_ELEMENTS = 1 << 24

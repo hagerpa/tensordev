@@ -12,7 +12,14 @@
   kernels to rounding. An FSSK step of more than `2**16` tile operations is
   refused: for two letters a state dimension above 76 at truncation 4 and
   above 28 at truncation 12, where the previous kernels accepted state
-  dimensions up to 128.
+  dimensions up to 128. On an NVIDIA A40 (200 steps, batch 1 and 32, 141
+  cases) the median speedup over the previous kernels is 5.9: partially
+  symmetrized FSSK states with dims `(4, 2)`, truncation `(4, 2)` and state
+  dimension 3 take 6.0 ms instead of 3.0 s in float32 at batch 32, float64
+  signatures of two letters at truncation 12 take 2.4 ms instead of 98 ms.
+  Compile times are at most 51 s instead of 163 s. Calls below 0.6 ms take
+  up to 0.14 ms longer, and float64 FSSK states of dimension 8 at truncation
+  4 take 6.0 ms instead of 4.2 ms.
 
 ### Fixed
 
