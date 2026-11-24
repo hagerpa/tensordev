@@ -3,23 +3,23 @@ Warm calls: medians of 30 timed calls after 5 warm-up calls, in milliseconds, fo
 
 | Workload | Core | dtype | Blocks | Wordwise | JAX | Automatic | Wordwise / JAX | Error | Gate |
 |---|---|---|---|--:|--:|--:|--:|--:|---|
-| Signature | total-standard 3 | float32 | terminal | 0.186 | 0.553 | 3.04 | 0.34 (0.31–0.36) | 0.0e+00 | passed |
-| Signature | bidegree-partial-standard (2, 1) | float32 | terminal | 0.273 | 0.617 | 4.16 | 0.44 (0.44–0.45) | 0.0e+00 | passed |
-| FSSK state | total-standard 3 | float32 | terminal | 0.225 | 0.443 | 1.12 | 0.51 (0.46–0.57) | 1.9e-09 | passed |
-| FSSK readout | total-standard 3 | float32 | terminal | 0.259 | 0.460 | 1.04 | 0.56 (0.54–0.58) | 7.5e-09 | passed |
-| FSSK state | bidegree-partial-standard (2, 1) | float32 | terminal | 0.292 | 0.551 | 1.10 | 0.53 (0.49–0.54) | 1.9e-09 | passed |
-| FSSK readout | bidegree-partial-standard (2, 1) | float32 | terminal | 0.318 | 0.563 | 1.20 | 0.56 (0.54–0.58) | 7.5e-09 | passed |
+| Signature | total-standard 3 | float32 | terminal | 0.167 | 0.499 | 2.93 | 0.34 (0.31–0.37) | 0.0e+00 | passed |
+| Signature | bidegree-partial-standard (2, 1) | float32 | terminal | 0.260 | 0.657 | 4.38 | 0.40 (0.39–0.40) | 0.0e+00 | passed |
+| FSSK state | total-standard 3 | float32 | terminal | 0.181 | 0.377 | 1.00 | 0.48 (0.42–0.50) | 1.2e-10 | passed |
+| FSSK readout | total-standard 3 | float32 | terminal | 0.653 | 0.832 | 1.69 | 0.78 (0.76–0.80) | 2.3e-10 | passed |
+| FSSK state | bidegree-partial-standard (2, 1) | float32 | terminal | 0.259 | 0.546 | 1.16 | 0.47 (0.45–0.48) | 1.2e-10 | passed |
+| FSSK readout | bidegree-partial-standard (2, 1) | float32 | terminal | 0.731 | 0.941 | 1.91 | 0.78 (0.77–0.79) | 2.3e-10 | passed |
 
 Lowering and compilation of the jitted calls, and the first automatic call, which includes its compilation, in milliseconds.
 
 | Workload | Core | dtype | Blocks | Wordwise: lowering | compilation | JAX: lowering | compilation | Automatic: first call |
 |---|---|---|---|--:|--:|--:|--:|--:|
-| Signature | total-standard 3 | float32 | terminal | 680 | 209 | 50.3 | 193 | 680 |
-| Signature | bidegree-partial-standard (2, 1) | float32 | terminal | 577 | 1,311 | 77.9 | 261 | 710 |
-| FSSK state | total-standard 3 | float32 | terminal | 362 | 643 | 308 | 412 | 603 |
-| FSSK readout | total-standard 3 | float32 | terminal | 499 | 1,392 | 325 | 980 | 1,815 |
-| FSSK state | bidegree-partial-standard (2, 1) | float32 | terminal | 900 | 2,659 | 261 | 709 | 1,151 |
-| FSSK readout | bidegree-partial-standard (2, 1) | float32 | terminal | 1,044 | 2,848 | 592 | 1,330 | 2,097 |
+| Signature | total-standard 3 | float32 | terminal | 800 | 229 | 51.5 | 195 | 675 |
+| Signature | bidegree-partial-standard (2, 1) | float32 | terminal | 198 | 218 | 78.2 | 252 | 668 |
+| FSSK state | total-standard 3 | float32 | terminal | 625 | 589 | 307 | 426 | 605 |
+| FSSK readout | total-standard 3 | float32 | terminal | 1,086 | 1,410 | 535 | 1,286 | 2,385 |
+| FSSK state | bidegree-partial-standard (2, 1) | float32 | terminal | 680 | 525 | 301 | 721 | 1,198 |
+| FSSK readout | bidegree-partial-standard (2, 1) | float32 | terminal | 883 | 1,376 | 713 | 1,715 | 3,235 |
 
 Device: NVIDIA A40 (compute capability 8.6, PJRT C API
-cuda 12090); host Linux-3.10.0-1160.el7.x86_64-x86_64-with-glibc2.36; Python 3.12.12, tensordev source checkout, JAX 0.10.0, jaxlib 0.10.0, NumPy 2.5.4; recorded 2026-11-15.
+cuda 12090); host Linux-3.10.0-1160.el7.x86_64-x86_64-with-glibc2.36; Python 3.12.12, tensordev source checkout, JAX 0.10.0, jaxlib 0.10.0, NumPy 2.5.4; recorded 2026-11-24.
