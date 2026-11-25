@@ -25,7 +25,7 @@ from tensordev._wordwise.fssk import (
     run_fssk_q1_wordwise,
     run_fssk_q1_wordwise_readout,
 )
-from tensordev._wordwise.kernel import WordwiseUnavailableError, _load_pallas, wordwise_blocks
+from tensordev._wordwise.kernel import WordwiseUnavailableError, _load_pallas, launches, wordwise_blocks
 from tensordev._wordwise.layout import build_layout_plan
 from tensordev._wordwise.ordinary import run_ordinary_wordwise
 from tensordev.development.free import _prepare_free_development_call
@@ -226,6 +226,28 @@ def test_tree_levels_lower_for_cuda(cuda_export, triton_modules, tree):
     exported = _export_cuda(
         lambda increments: wordwise_blocks(increments, plan=plan, tree=tree),
         jax.ShapeDtypeStruct((_BATCH, _STEPS, 2), "float32"),
+    )
+
+    assert exported.platforms == ("cuda",)
+    _assert_lowered(triton_modules)
+
+
+@pytest.mark.parametrize("state_dim", (0, _STATE_DIM))
+def test_wide_quotient_graph_lowers_for_cuda(cuda_export, triton_modules, state_dim):
+    """A partially symmetrized lattice with several slots per level and several edges into a slot."""
+    core = td.make_core(dims=(1, 4), max_trunc=(1, 4), partially_symmetrized=True)
+    plan = build_layout_plan(core, core.max_truncation)
+    assert max(max(launch.levels) for launch in launches(plan)) > 1
+    N = plan.blocks[-1].total_degree
+    shapes = [(_BATCH, _STEPS, plan.alphabet_dim)]
+    if state_dim:
+        shapes += [(1, 1, state_dim, state_dim), (1, 1, N, state_dim), (1, 1, N - 1, state_dim, state_dim)]
+
+    exported = _export_cuda(
+        lambda increments, *coefficients: wordwise_blocks(
+            increments, plan=plan, coefficients=coefficients or None
+        ),
+        *(jax.ShapeDtypeStruct(shape, "float32") for shape in shapes),
     )
 
     assert exported.platforms == ("cuda",)
