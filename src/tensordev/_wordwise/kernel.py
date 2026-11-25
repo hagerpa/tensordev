@@ -362,6 +362,11 @@ def _tree_levels(d: int, N: int, state_dim: int, batch: int) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _at(ref: Any, *index: Any) -> Any:
+    """``ref`` at ``index``, integers as int32 scalars: interpret mode cannot discharge Python integer indices."""
+    return ref.at[tuple(jnp.int32(i) if isinstance(i, (int, np.integer)) else i for i in index)]
+
+
 @lru_cache(maxsize=128)
 def _call(
         shape: tuple[int, int, int],
@@ -414,7 +419,7 @@ def _call(
             present = True
             if level == N:
                 present, slot = shift + slot < top, jnp.minimum(shift + slot, top - 1)
-            return present, lambda field: pltriton.load(nodes_ref.at[row, columns[level - 1] + slot, field])
+            return present, lambda field: pltriton.load(_at(nodes_ref, row, columns[level - 1] + slot, field))
 
         def node(level, slot):
             """Existence, coordinate and store mask of a slot."""
@@ -433,7 +438,7 @@ def _call(
             level, slot, _, static, partial = pairs[pair]
             if static is not None:
                 return static + (jnp.minimum(shift, top - 1 - slot) if level == N else 0), {}
-            code = pltriton.load(edges_ref.at[row, edge_columns[pair]])
+            code = pltriton.load(_at(edges_ref, row, edge_columns[pair]))
             _, field = record(level, slot)
             inner = div(prime_word, field(1)) % d_prime
             if doubleprime_width > 1:
@@ -445,7 +450,7 @@ def _call(
         letters = tuple(map(letter, range(len(pairs))))
 
         def coefficient(ref, axes, t, *index):
-            return pltriton.load(ref.at[(0 if axes[0] == 1 else b, 0 if axes[1] == 1 else t) + index])
+            return pltriton.load(_at(ref, 0 if axes[0] == 1 else b, 0 if axes[1] == 1 else t, *index))
 
         def coefficients(t):
             if not R:
@@ -469,7 +474,7 @@ def _call(
 
         def step(t, P):
             E, psi, phi = coefficients(t)
-            D = tuple(pltriton.load(y_ref.at[b, t, index], **mask) for index, mask in letters)
+            D = tuple(pltriton.load(_at(y_ref, b, t, index), **mask) for index, mask in letters)
             sources = {}
 
             def source(s, level, slot):
@@ -503,7 +508,7 @@ def _call(
         def seed(level, slot):
             exists, index, _ = node(level, slot)
             return tuple(
-                pltriton.load(initial_ref.at[0 if seed_batch == 1 else b, index, r], mask=exists, other=0)
+                pltriton.load(_at(initial_ref, 0 if seed_batch == 1 else b, index, r), mask=exists, other=0)
                 for r in range(R)
             )
 
@@ -514,7 +519,7 @@ def _call(
         )
         if readout_batch:
             weights = tuple(
-                pltriton.load(weights_ref.at[0 if readout_batch == 1 else b, r]) for r in range(R)
+                pltriton.load(_at(weights_ref, 0 if readout_batch == 1 else b, r)) for r in range(R)
             )
 
         def emit(block, P):
@@ -529,7 +534,7 @@ def _call(
                         state = (reduce(add, (x * w for x, w in zip(state, weights))),)
                     for r, value in enumerate(state):
                         coordinate = lead + ((r,) if components else ()) + (index,)
-                        pltriton.store(output_ref.at[coordinate], value, mask=stores)
+                        pltriton.store(_at(output_ref, *coordinate), value, mask=stores)
 
         if emission is None:
             emit(None, jax.lax.fori_loop(0, steps, step, initial))
