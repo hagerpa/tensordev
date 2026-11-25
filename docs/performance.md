@@ -119,7 +119,7 @@ Requirements of `execution="wordwise"`:
 | Core | A JAX core of any type: total degree (including the default core), bidegree, shear, partially symmetrized. |
 | Call | Eager: not inside `jax.jit`, `jax.grad` or `jax.vmap`. |
 | Options | For signatures, `parallel=False` and `accumulate_in_tree=False`, the defaults. |
-| Input | `float32` or `float64`, on one NVIDIA GPU with CUDA compute capability 8.0 or newer. |
+| Input | A JAX array of `float32` or `float64` on one NVIDIA GPU with CUDA compute capability 8.0 or newer. |
 | Derivatives | Not supported. For gradients use `"auto"` or `"jax"`, which differentiate the JAX implementation. |
 
 On a CPU, a wordwise request raises, and `"auto"` agrees with `"jax"`:

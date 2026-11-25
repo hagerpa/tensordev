@@ -68,6 +68,14 @@
   unchanged to rounding. On an NVIDIA A40 a jitted `fssk_vsig` readout (state
   dimension 3, 16 steps, float32) takes 0.96 ms instead of 8.2 ms; with 0.1.0
   it took 0.38 ms.
+- Eager calls with `execution="wordwise"` (`path_signature`, `Signature`,
+  `fssk_state`, `fssk_vsig`, `StateSpaceSignature`) prepared the inputs and
+  assembled the output in many small operations, which on a GPU cost more
+  than the kernel. Each call now runs as one compiled program. On an NVIDIA
+  A40 a float32 signature (200 steps, batch 1, alphabets of 2 to 20 letters)
+  takes 0.6-0.7 ms instead of 6-16 ms. A NumPy path no longer counts as GPU
+  input for `path_signature`, as for the FSSK functions; place it on the GPU
+  with `jax.device_put`.
 
 ## 0.1.1
 
