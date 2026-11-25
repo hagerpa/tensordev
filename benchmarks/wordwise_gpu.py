@@ -40,6 +40,7 @@ import argparse
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 import importlib.metadata
 import json
 import platform as platform_module
@@ -63,6 +64,7 @@ import jaxlib
 import numpy as np
 
 import tensordev as td
+from tensordev._backend import _resolve_core_pair
 from tensordev._wordwise.dispatch import (
     _automatic_wordwise_release_eligible,
     _normalized_compute_capability,
@@ -540,44 +542,27 @@ def _fssk_runners(
     def automatic(projected):
         return fssk_state_from_coef(projected, **state_kwargs)
 
-    def forced_native(projected):
-        call = _prepare_fssk(
-            projected,
-            coefficients=coefficients,
-            core=core,
-            seq_core=seq_core,
-            truncation=truncation,
-            block_size=block_size,
-            accumulate=accumulate,
-            initial_state=initial_state,
+    def forced(projected, execution):
+        return fssk_state_update._execute_prepared_fssk_state(
+            _prepare_fssk(
+                projected,
+                coefficients=coefficients,
+                core=core,
+                seq_core=seq_core,
+                truncation=truncation,
+                block_size=block_size,
+                accumulate=accumulate,
+                initial_state=initial_state,
+            ),
+            execution,
         )
-        states = fssk_state_update._try_fssk_q1_wordwise(call)
-        if states is None:
-            raise RuntimeError(
-                "the private native FSSK runner rejected a supported case"
-            )
-        return fssk_state_update._finalize_wordwise_prepared_fssk_state(
-            call,
-            states,
-        )
-
-    def forced_portable(projected):
-        call = _prepare_fssk(
-            projected,
-            coefficients=coefficients,
-            core=core,
-            seq_core=seq_core,
-            truncation=truncation,
-            block_size=block_size,
-            accumulate=accumulate,
-            initial_state=initial_state,
-        )
-        return fssk_state_update._execute_portable_prepared_fssk_state(call)
 
     state_runners = {
         "automatic-public-eager": _Runner(automatic, eager=True),
-        "forced-private-native-jit": _Runner(forced_native),
-        "forced-portable-jit": _Runner(forced_portable),
+        "forced-private-native-jit": _Runner(
+            partial(forced, execution="wordwise")
+        ),
+        "forced-portable-jit": _Runner(partial(forced, execution="jax")),
     }
     if output_kind == "state":
         return state_runners
@@ -624,31 +609,22 @@ def _fssk_runners(
                 raise RuntimeError(
                     "the fused native FSSK readout rejected terminal output"
                 )
-            signature = fssk_state_update._try_fssk_q1_wordwise_readout(
-                call,
-                weights,
-            )
-            if signature is None:
-                raise RuntimeError(
-                    "the private native FSSK readout rejected a supported "
-                    "case"
-                )
             return (
                 fssk_state_update._finalize_wordwise_prepared_fssk_readout(
                     call,
-                    signature,
+                    fssk_state_update._run_fssk_q1_wordwise(
+                        call,
+                        "wordwise",
+                        weights,
+                    ),
                 )
             )
-        states = fssk_state_update._try_fssk_q1_wordwise(call)
-        if states is None:
-            raise RuntimeError(
-                "the private native FSSK runner rejected a supported case"
-            )
-        return fssk_state_update._finalize_wordwise_prepared_fssk_vsig(
-            call,
-            states,
-            kernel,
-            0.0,
+        return fssk_state_update._fssk_readout_impl(
+            fssk_state_update._execute_prepared_fssk_state(call, "wordwise"),
+            kernel=kernel,
+            tau_dt=0.0,
+            core=call.core,
+            trunc=call.trunc,
         )
 
     return {
@@ -1145,6 +1121,7 @@ def _measure_ordinary_case(
 ) -> dict[str, Any]:
     dtype = np.dtype(dtype_name)
     core, truncation = _case(family)
+    core, seq_core = _resolve_core_pair(core, None)
     block_size, accumulate = _block_options(block_mode, args.block_size)
     increments = _make_input(
         batch=args.batch,
@@ -1154,14 +1131,14 @@ def _measure_ordinary_case(
         device=device,
     )
 
-    probe = _prepare(
-        increments,
+    if not ordinary_wordwise_candidate_eligible(
+        parallel=False,
+        accumulate_in_tree=False,
         core=core,
-        truncation=truncation,
-        block_size=block_size,
-        accumulate=accumulate,
-    )
-    if not ordinary_wordwise_candidate_eligible(probe):
+        seq_core=seq_core,
+        reference=increments,
+        differentiable_inputs=(increments,),
+    ):
         raise RuntimeError(
             f"native wordwise execution is unexpectedly ineligible for "
             f"{family}, {dtype_name}, {block_mode}"
@@ -1270,7 +1247,7 @@ def _measure_fssk_case(
 ) -> dict[str, Any]:
     dtype = np.dtype(dtype_name)
     core, truncation = _case(family)
-    core, seq_core = fssk_state_update._resolve_fssk_core_pair(core, None)
+    core, seq_core = _resolve_core_pair(core, None)
     block_size, accumulate = _block_options(block_mode, args.block_size)
     projected = _make_input(
         batch=args.batch,

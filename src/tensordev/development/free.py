@@ -13,12 +13,7 @@ from tensordev.core.utils.pytrees import (
     tree_prepend,
     tree_stack,
 )
-from tensordev._backend import (
-    _resolve_seq_core,
-    get_default_core,
-    get_default_core_pair,
-    get_default_seq_core,
-)
+from tensordev._backend import _resolve_core_pair
 
 
 TensorElement = DenseElem | BigradedTensor
@@ -82,16 +77,7 @@ def _prepare_free_development_call(
         colocate_with_input: bool = False,
 ) -> _PreparedFreeDevelopmentCall:
     """Resolve and normalize one free-development call without executing it."""
-    if core is None:
-        default_core, default_seq_core = get_default_core_pair()
-        core = default_core
-        if seq_core is None:
-            seq_core = default_seq_core
-    elif seq_core is None:
-        if core is get_default_core():
-            seq_core = get_default_seq_core()
-        else:
-            seq_core = _resolve_seq_core(core, None)
+    core, seq_core = _resolve_core_pair(core, seq_core)
 
     trunc = core.normalize_truncation(trunc)
     axis = seq_core.default_time_axis if axis is None else axis
@@ -364,20 +350,10 @@ class FreeDevelopment:
     seq_core: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.core is None:
-            object.__setattr__(self, "core", get_default_core())
-        object.__setattr__(
-            self, "trunc", self.core.normalize_truncation(self.trunc)
-        )
-        if self.seq_core is None:
-            default_core, default_seq_core = get_default_core_pair()
-            object.__setattr__(
-                self,
-                "seq_core",
-                default_seq_core
-                if self.core is default_core
-                else _resolve_seq_core(self.core, None),
-            )
+        core, seq_core = _resolve_core_pair(self.core, self.seq_core)
+        object.__setattr__(self, "core", core)
+        object.__setattr__(self, "seq_core", seq_core)
+        object.__setattr__(self, "trunc", core.normalize_truncation(self.trunc))
 
     def __call__(
             self,

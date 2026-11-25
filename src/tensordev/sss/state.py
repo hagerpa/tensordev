@@ -7,10 +7,10 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
+from tensordev._backend import _resolve_core_pair
 from tensordev.sss.kernel import FSSK
 from tensordev.sss.state_update import (
     _maximum_order,
-    _resolve_fssk_core_pair,
     _validate_fssk_core,
     _validate_state,
     _zero_state,
@@ -53,7 +53,7 @@ class StateSpaceSignature:
     seq_core: Any = field(default=None, repr=False, metadata={"static": True})
 
     def __post_init__(self) -> None:
-        core, seq_core = _resolve_fssk_core_pair(self.core, self.seq_core)
+        core, seq_core = _resolve_core_pair(self.core, self.seq_core)
         trunc = core.normalize_truncation(self.trunc)
         _validate_fssk_core(
             core,

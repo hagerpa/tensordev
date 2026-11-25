@@ -17,10 +17,7 @@ from tensordev.sss import state as state_module
 from tensordev.sss import state_update
 
 
-@pytest.fixture(autouse=True)
-def clear_compilation_caches():
-    yield
-    jax.clear_caches()
+pytestmark = pytest.mark.usefixtures("fresh_jit_caches")
 
 
 def _kernel(q=1):
@@ -143,7 +140,7 @@ def test_jax_execution_bypasses_wordwise_even_when_auto_enabled(api, monkeypatch
     def fail(*args, **kwargs):
         raise AssertionError("forced JAX execution entered the wordwise runner")
 
-    monkeypatch.setattr(state_update, "_dispatch_fssk_q1_wordwise", fail)
+    monkeypatch.setattr(state_update, "_run_fssk_q1_wordwise", fail)
     actual = _call(api, execution="jax")
     _assert_tree_close(actual, expected)
 
@@ -160,8 +157,7 @@ def test_explicit_wordwise_propagates_resource_failure(api, monkeypatch):
 
     monkeypatch.setattr(fssk_assembly, "run_fssk_q1_wordwise", unavailable)
     monkeypatch.setattr(fssk_assembly, "run_fssk_q1_wordwise_readout", unavailable)
-    monkeypatch.setattr(state_update, "_execute_portable_prepared_fssk_state", portable)
-    monkeypatch.setattr(state_update, "_execute_portable_prepared_fssk_vsig", portable)
+    monkeypatch.setattr(state_update, "_run_portable_prepared_fssk_state", portable)
     with pytest.raises(WordwiseResourceError, match="local state"):
         _call(api, execution="wordwise")
 

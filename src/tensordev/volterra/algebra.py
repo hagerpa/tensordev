@@ -14,7 +14,7 @@ from numbers import Integral
 from types import MappingProxyType
 from typing import Any, Callable, Hashable, Mapping, Sequence
 
-from tensordev._backend import _resolve_seq_core, get_default_core_pair
+from tensordev._backend import _resolve_core_pair
 
 
 Grade = Hashable
@@ -31,17 +31,7 @@ def resolve_volterra_core_pair(
     sequential core is never discarded and no inner numerical routine reads
     the mutable process default again.
     """
-    default_core, default_seq_core = get_default_core_pair()
-    if core is None:
-        core = default_core
-        if seq_core is None:
-            seq_core = default_seq_core
-    elif seq_core is None:
-        seq_core = (
-            default_seq_core
-            if core is default_core
-            else _resolve_seq_core(core, None)
-        )
+    core, seq_core = _resolve_core_pair(core, seq_core)
 
     core_backend = getattr(core, "backend", None)
     seq_backend = getattr(seq_core, "backend", None)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import builtins
-from types import SimpleNamespace
 
 import jax
 
@@ -18,9 +17,13 @@ from tensordev._wordwise.dispatch import (
     fssk_q1_wordwise_candidate_eligible,
     fssk_q1_wordwise_device_eligible,
 )
+from tensordev._wordwise.kernel import WordwiseResourceError
 from tensordev.core.jax import JaxSequentialCore
 from tensordev.sss import FSSK
 from tensordev.sss import state_update as state_update_module
+
+
+pytestmark = pytest.mark.usefixtures("fresh_jit_caches")
 
 
 class _FakeDevice:
@@ -133,13 +136,16 @@ def test_resource_fallback_reuses_the_single_preparation(monkeypatch):
         path, kernel=kernel, dt=0.1, trunc=2
     )
     original_prepare = state_update_module._prepare_fssk_state_call
-    preparations = []
+    events = []
 
     def observed_prepare(*args, **kwargs):
-        preparations.append(None)
+        events.append("prepare")
         return original_prepare(*args, **kwargs)
 
-    state_update_module._prepare_fssk_state_for_wordwise.clear_cache()
+    def unavailable(call):
+        events.append("wordwise")
+        raise WordwiseResourceError("local state exceeds the configured limit")
+
     monkeypatch.setattr(
         state_update_module,
         "_fssk_q1_wordwise_eligible",
@@ -150,17 +156,13 @@ def test_resource_fallback_reuses_the_single_preparation(monkeypatch):
         "_prepare_fssk_state_call",
         observed_prepare,
     )
-    monkeypatch.setattr(
-        state_update_module,
-        "_try_fssk_q1_wordwise",
-        lambda call: None,
-    )
+    monkeypatch.setattr(fssk_assembly, "run_fssk_q1_wordwise", unavailable)
 
     actual = state_update_module.fssk_state(
         path, kernel=kernel, dt=0.1, trunc=2
     )
 
-    assert len(preparations) == 1
+    assert events == ["prepare", "wordwise"]
     _assert_tree_close(actual, expected)
 
 
@@ -174,7 +176,7 @@ def test_unexpected_native_errors_propagate(monkeypatch):
     def fail(call):
         raise RuntimeError("native execution failed")
 
-    monkeypatch.setattr(state_update_module, "_try_fssk_q1_wordwise", fail)
+    monkeypatch.setattr(fssk_assembly, "run_fssk_q1_wordwise", fail)
     with pytest.raises(RuntimeError, match="native execution failed"):
         state_update_module.fssk_state(
             _path(), kernel=_kernel(), dt=0.1, trunc=2
@@ -198,8 +200,8 @@ def test_path_gradient_stays_on_the_portable_route(monkeypatch):
     )
     monkeypatch.setattr(
         state_update_module,
-        "_try_fssk_q1_wordwise",
-        lambda call: (_ for _ in ()).throw(
+        "_run_fssk_q1_wordwise",
+        lambda *args: (_ for _ in ()).throw(
             AssertionError("gradient entered the native executor")
         ),
     )
@@ -219,19 +221,22 @@ def test_captured_concrete_inputs_stay_portable_inside_outer_trace(monkeypatch):
     path = _path()
     kernel = _kernel()
     monkeypatch.setattr(
-        state_update_module,
-        "_fssk_q1_wordwise_eligible",
-        lambda **kwargs: True,
+        dispatch_module, "_automatic_wordwise_release_eligible", lambda: True
+    )
+    monkeypatch.setattr(
+        dispatch_module, "_supported_cuda_device", lambda device: True
     )
 
-    def unexpected_adapter(call):
-        raise AssertionError("a traced prepared call built a native adapter")
+    def reject_adapter(call):
+        raise AssertionError("the call built a native adapter")
 
     monkeypatch.setattr(
         state_update_module,
         "_fssk_q1_wordwise_adapter",
-        unexpected_adapter,
+        reject_adapter,
     )
+    with pytest.raises(AssertionError, match="native adapter"):
+        state_update_module.fssk_state(path, kernel=kernel, dt=0.1, trunc=2)
 
     def traced(dummy):
         state = state_update_module.fssk_state(

@@ -20,6 +20,9 @@ from tensordev.core.capabilities import _WORDWISE_SIGNATURE_PROTOCOL
 _SUPPORTED_DTYPES = frozenset((np.dtype("float32"), np.dtype("float64")))
 
 
+_constant = jax.jit(lambda: jnp.zeros((), bool))
+
+
 def _validate_execution(execution: str) -> str:
     """Validate the execution policy shared by signature entry points."""
     if not isinstance(execution, str) or execution not in (
@@ -32,7 +35,6 @@ def _validate_execution(execution: str) -> str:
 def _select_wordwise_execution(
         execution: str,
         unsupported_reason: Callable[..., str | None],
-        *args: Any,
         **kwargs: Any,
 ) -> bool:
     """Apply selection policy without checking candidates on portable calls."""
@@ -41,7 +43,7 @@ def _select_wordwise_execution(
         execution == "auto" and not _automatic_wordwise_release_eligible()
     ):
         return False
-    reason = unsupported_reason(*args, **kwargs)
+    reason = unsupported_reason(**kwargs)
     if reason is not None and execution == "wordwise":
         raise ValueError(
             f"execution='wordwise' {reason} "
@@ -158,7 +160,10 @@ def _wordwise_input_unsupported_reason(
         differentiable_inputs: Any,
 ) -> str | None:
     """Check the core, transform, dtype, and device contract before planning."""
-    if _contains_tracer((reference, differentiable_inputs)):
+    # A jitted constant is a tracer inside jax.jit, even if all operands are captured.
+    if _contains_tracer((reference, differentiable_inputs)) or isinstance(
+        _constant(), jax.core.Tracer
+    ):
         return "does not support calls under jax.jit, jax.grad, or jax.vmap."
     if (
         type(core).__dict__.get("_wordwise_signature_protocol")
@@ -190,32 +195,30 @@ def _wordwise_input_unsupported_reason(
     return None
 
 
-def _ordinary_wordwise_unsupported_reason(call: Any) -> str | None:
-    if call.parallel or call.accumulate_in_tree:
+def _ordinary_wordwise_unsupported_reason(
+        *,
+        parallel: bool,
+        accumulate_in_tree: bool,
+        **inputs: Any,
+) -> str | None:
+    if parallel or accumulate_in_tree:
         return "requires parallel=False and accumulate_in_tree=False."
-    if len(call.increments) != 1:
-        return "requires a single level-1 path."
-    return _wordwise_input_unsupported_reason(
-        core=call.core,
-        seq_core=call.seq_core,
-        reference=call.increments[0],
-        differentiable_inputs=(
-            call.increments, call.neutral, call.seed_policy.canonical_start
-        ),
-    )
+    return _wordwise_input_unsupported_reason(**inputs)
 
 
-def ordinary_wordwise_candidate_eligible(call: Any) -> bool:
-    """Whether an ordinary call satisfies the wordwise execution contract."""
-    return _ordinary_wordwise_unsupported_reason(call) is None
+def ordinary_wordwise_candidate_eligible(**inputs: Any) -> bool:
+    """Whether a signature call satisfies the wordwise execution contract.
+
+    ``inputs`` are ``parallel``, ``accumulate_in_tree``, ``core``, ``seq_core``, the path
+    as ``reference``, and the path with the starting point as ``differentiable_inputs``.
+    """
+    return _ordinary_wordwise_unsupported_reason(**inputs) is None
 
 
-def ordinary_wordwise_device_eligible(
-        call: Any, *, execution: str = "auto"
-) -> bool:
-    """Select ordinary wordwise execution, rejecting unsupported explicit use."""
+def ordinary_wordwise_device_eligible(*, execution: str = "auto", **inputs: Any) -> bool:
+    """Select signature wordwise execution, rejecting unsupported explicit use."""
     return _select_wordwise_execution(
-        execution, _ordinary_wordwise_unsupported_reason, call
+        execution, _ordinary_wordwise_unsupported_reason, **inputs
     )
 
 

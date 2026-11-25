@@ -59,16 +59,16 @@ class _CompatibleSequentialCore:
     backend = "jax"
 
 
-def _call(increment, *, parallel=False, accumulate_in_tree=False):
-    return SimpleNamespace(
-        increments=(increment,),
-        neutral=(),
-        seed_policy=SimpleNamespace(canonical_start=()),
-        parallel=parallel,
-        accumulate_in_tree=accumulate_in_tree,
-        core=_CompatibleCore(),
-        seq_core=_CompatibleSequentialCore(),
-    )
+def _inputs(increment, **overrides):
+    return {
+        "parallel": False,
+        "accumulate_in_tree": False,
+        "core": _CompatibleCore(),
+        "seq_core": _CompatibleSequentialCore(),
+        "reference": increment,
+        "differentiable_inputs": (increment, None),
+        **overrides,
+    }
 
 
 def _assert_dense_close(actual, expected):
@@ -101,6 +101,7 @@ def test_cpu_automatic_fallback_does_not_build_a_layout_plan(monkeypatch):
         raise AssertionError("CPU fallback constructed a wordwise layout plan")
 
     monkeypatch.setattr(ordinary, "build_layout_plan", unexpected_plan)
+    ordinary.wordwise_path_signature.clear_cache()
     actual = td.path_signature(
         path,
         trunc=3,
@@ -116,7 +117,7 @@ def test_candidate_eligibility_rejects_traced_increments():
     observed = []
 
     def trace(increment):
-        observed.append(ordinary_wordwise_candidate_eligible(_call(increment)))
+        observed.append(ordinary_wordwise_candidate_eligible(**_inputs(increment)))
         return increment
 
     jax.make_jaxpr(trace)(jnp.ones((1, 2, 2), dtype=jnp.float32))
@@ -126,12 +127,12 @@ def test_candidate_eligibility_rejects_traced_increments():
 def test_candidate_eligibility_rejects_tree_modes():
     increment = _FakeArray(_FakeDevice())
 
-    assert ordinary_wordwise_candidate_eligible(_call(increment))
+    assert ordinary_wordwise_candidate_eligible(**_inputs(increment))
     assert not ordinary_wordwise_candidate_eligible(
-        _call(increment, parallel=True)
+        **_inputs(increment, parallel=True)
     )
     assert not ordinary_wordwise_candidate_eligible(
-        _call(increment, accumulate_in_tree=True)
+        **_inputs(increment, accumulate_in_tree=True)
     )
 
 
@@ -151,45 +152,44 @@ def test_candidate_eligibility_rejects_unsupported_devices_and_dtypes():
         sharded,
         low_precision,
     ):
-        assert not ordinary_wordwise_candidate_eligible(_call(increment))
+        assert not ordinary_wordwise_candidate_eligible(**_inputs(increment))
 
 
 def test_candidate_eligibility_rejects_cores_without_a_supported_plan():
     increment = _FakeArray(_FakeDevice())
-    unsupported = _call(increment)
-    unsupported.core = SimpleNamespace(backend="jax", grading="custom")
-    unplanned_bidegree = _call(increment)
 
     class UnplannedBidegree:
         _wordwise_signature_protocol = _WORDWISE_SIGNATURE_PROTOCOL
         backend = "jax"
         grading = "bidegree"
 
-    unplanned_bidegree.core = UnplannedBidegree()
-
-    assert not ordinary_wordwise_candidate_eligible(unsupported)
-    assert not ordinary_wordwise_candidate_eligible(unplanned_bidegree)
+    assert not ordinary_wordwise_candidate_eligible(
+        **_inputs(increment, core=SimpleNamespace(backend="jax", grading="custom"))
+    )
+    assert not ordinary_wordwise_candidate_eligible(
+        **_inputs(increment, core=UnplannedBidegree())
+    )
 
 
 def test_candidate_eligibility_requires_an_explicit_core_contract():
     increment = _FakeArray(_FakeDevice())
-    call = _call(increment)
-    call.core = SimpleNamespace(backend="jax", grading="total_degree")
-    assert not ordinary_wordwise_candidate_eligible(call)
+    assert not ordinary_wordwise_candidate_eligible(
+        **_inputs(increment, core=SimpleNamespace(backend="jax", grading="total_degree"))
+    )
 
     class InheritedOnly(_CompatibleCore):
         pass
 
-    call = _call(increment)
-    call.core = InheritedOnly()
-    assert not ordinary_wordwise_candidate_eligible(call)
+    assert not ordinary_wordwise_candidate_eligible(
+        **_inputs(increment, core=InheritedOnly())
+    )
 
 
 def test_automatic_native_release_gate_defaults_closed():
     increment = _FakeArray(_FakeDevice())
 
-    assert ordinary_wordwise_candidate_eligible(_call(increment))
-    assert not ordinary_wordwise_device_eligible(_call(increment))
+    assert ordinary_wordwise_candidate_eligible(**_inputs(increment))
+    assert not ordinary_wordwise_device_eligible(**_inputs(increment))
 
 
 def test_every_public_jax_core_family_declares_the_wordwise_contract():
@@ -237,10 +237,6 @@ def test_automatic_runner_admits_partial_plans(monkeypatch):
     sentinel = object()
     observed = []
 
-    monkeypatch.setattr(
-        ordinary, "ordinary_wordwise_device_eligible", lambda call: True
-    )
-
     def execute(call):
         observed.append(call.core)
         return sentinel
@@ -263,10 +259,6 @@ def test_automatic_runner_falls_back_on_quotient_plan_error(monkeypatch):
         trunc=(1, 1),
         increment_input=True,
         core=core,
-    )
-
-    monkeypatch.setattr(
-        ordinary, "ordinary_wordwise_device_eligible", lambda call: True
     )
 
     def fail(*args, **kwargs):
@@ -324,10 +316,9 @@ def test_captured_concrete_path_stays_portable_under_jax_transforms(
     def unexpected_native(*args, **kwargs):
         raise AssertionError("a transformed call attempted wordwise execution")
 
-    monkeypatch.setattr(ordinary, "try_ordinary_wordwise", unexpected_native)
+    monkeypatch.setattr(ordinary, "wordwise_path_signature", unexpected_native)
 
-    def transformed(scale):
-        seed = tuple(level * scale for level in starting_point)
+    def signature(seed):
         return td.path_signature(
             captured,
             trunc=2,
@@ -336,14 +327,19 @@ def test_captured_concrete_path_stays_portable_under_jax_transforms(
             core=core,
         )
 
+    def transformed(scale):
+        return signature(tuple(level * scale for level in starting_point))
+
     jax.make_jaxpr(transformed)(jnp.asarray(1.0, dtype=captured.dtype))
     compiled = jax.jit(transformed)(jnp.asarray(1.0, dtype=captured.dtype))
+    constant = jax.jit(lambda: signature(starting_point))()
     mapped = jax.vmap(transformed)(jnp.asarray([0.8, 1.2], dtype=captured.dtype))
     gradient = jax.grad(
         lambda scale: sum(jnp.sum(level) for level in transformed(scale))
     )(jnp.asarray(1.0, dtype=captured.dtype))
 
     assert all(jnp.all(jnp.isfinite(level)) for level in compiled)
+    assert all(jnp.all(jnp.isfinite(level)) for level in constant)
     assert all(jnp.all(jnp.isfinite(level)) for level in mapped)
     assert jnp.isfinite(gradient)
 

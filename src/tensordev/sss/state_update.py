@@ -8,12 +8,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
-from tensordev._backend import (
-    _resolve_seq_core,
-    get_default_core,
-    get_default_core_pair,
-    get_default_seq_core,
-)
+from tensordev._backend import _resolve_core_pair
 from tensordev._wordwise.dispatch import _validate_execution
 from tensordev.core.bigraded.jax import JaxBigraded
 from tensordev.core.bigraded.symmetrized.jax import (
@@ -34,7 +29,6 @@ Array = jax.Array
 _TOTAL_DEGREE_CORE = Jax()
 
 
-@jax.tree_util.register_dataclass
 @dataclass(frozen=True, slots=True)
 class _PreparedFSSKStateCall:
     """Canonical state inputs shared by portable and wordwise executors."""
@@ -42,30 +36,17 @@ class _PreparedFSSKStateCall:
     y_time: Any
     coef: FSSKCoefficients
     seed: Any
-    core: Any = field(metadata={"static": True})
-    execution_core: Any = field(metadata={"static": True})
-    seq_core: Any = field(metadata={"static": True})
-    trunc: Any = field(metadata={"static": True})
-    batch_shape: tuple[int, ...] = field(metadata={"static": True})
-    axis: int = field(metadata={"static": True})
-    block_size: int | None = field(metadata={"static": True})
-    steps_per_block: int = field(metadata={"static": True})
-    n_blocks: int = field(metadata={"static": True})
-    accumulate: bool = field(metadata={"static": True})
-    output_starting_state: bool = field(metadata={"static": True})
-
-
-def _resolve_fssk_core_pair(core: Any, seq_core: Any) -> tuple[Any, Any]:
-    if core is None:
-        default_core, default_seq_core = get_default_core_pair()
-        return default_core, default_seq_core if seq_core is None else seq_core
-    if seq_core is None:
-        seq_core = (
-            get_default_seq_core()
-            if core is get_default_core()
-            else _resolve_seq_core(core, None)
-        )
-    return core, seq_core
+    core: Any
+    execution_core: Any
+    seq_core: Any
+    trunc: Any
+    batch_shape: tuple[int, ...]
+    axis: int
+    block_size: int | None
+    steps_per_block: int
+    n_blocks: int
+    accumulate: bool
+    output_starting_state: bool
 
 
 def _maximum_order(trunc: Any) -> int:
@@ -602,72 +583,6 @@ def _finalize_prepared_fssk_state(
     )
 
 
-@jax.jit
-def _execute_portable_prepared_fssk_state(
-        call: _PreparedFSSKStateCall,
-) -> Any:
-    """Execute and finalize a prepared FSSK call with portable JAX."""
-    return _finalize_prepared_fssk_state(
-        call,
-        _run_portable_prepared_fssk_state(call),
-        flattened_batch=False,
-    )
-
-
-@jax.jit
-def _finalize_wordwise_prepared_fssk_state(
-        call: _PreparedFSSKStateCall,
-        states: Any,
-) -> Any:
-    return _finalize_prepared_fssk_state(
-        call,
-        states,
-        flattened_batch=True,
-    )
-
-
-@jax.jit
-def _execute_portable_prepared_fssk_vsig(
-        call: _PreparedFSSKStateCall,
-        kernel: FSSK,
-        tau_dt: Array | float,
-) -> Any:
-    state = _finalize_prepared_fssk_state(
-        call,
-        _run_portable_prepared_fssk_state(call),
-        flattened_batch=False,
-    )
-    return _fssk_readout_impl(
-        state,
-        kernel=kernel,
-        tau_dt=tau_dt,
-        core=call.core,
-        trunc=call.trunc,
-    )
-
-
-@jax.jit
-def _finalize_wordwise_prepared_fssk_vsig(
-        call: _PreparedFSSKStateCall,
-        states: Any,
-        kernel: FSSK,
-        tau_dt: Array | float,
-) -> Any:
-    state = _finalize_prepared_fssk_state(
-        call,
-        states,
-        flattened_batch=True,
-    )
-    return _fssk_readout_impl(
-        state,
-        kernel=kernel,
-        tau_dt=tau_dt,
-        core=call.core,
-        trunc=call.trunc,
-    )
-
-
-@jax.jit
 def _finalize_wordwise_prepared_fssk_readout(
         call: _PreparedFSSKStateCall,
         standard_signature: Any,
@@ -684,7 +599,6 @@ def _finalize_wordwise_prepared_fssk_readout(
     )
 
 
-@jax.jit
 def _canonicalize_fssk_q1_wordwise_inputs(
         call: _PreparedFSSKStateCall,
 ) -> tuple[Array, FSSKCoefficients, Any]:
@@ -727,70 +641,50 @@ def _fssk_q1_wordwise_adapter(call: _PreparedFSSKStateCall) -> Any:
     )
 
 
-def _try_fssk_q1_wordwise(call: _PreparedFSSKStateCall) -> Any | None:
-    """Adapt shared preparation to the lazily imported state executor."""
-    from tensordev._wordwise.fssk import try_fssk_q1_wordwise
-
-    return try_fssk_q1_wordwise(_fssk_q1_wordwise_adapter(call))
-
-
-def _try_fssk_q1_wordwise_readout(
+def _run_fssk_q1_wordwise(
         call: _PreparedFSSKStateCall,
-        weights: Array,
-) -> Any | None:
-    """Run the fused terminal readout through the same native recurrence."""
-    from tensordev._wordwise.fssk import try_fssk_q1_wordwise_readout
-
-    return try_fssk_q1_wordwise_readout(
-        _fssk_q1_wordwise_adapter(call),
-        weights,
-    )
-
-
-def _prepared_fssk_q1_wordwise_eligible(
-        call: _PreparedFSSKStateCall,
-) -> bool:
-    """Reject an outer JAX transform before loading plans or executors."""
-    from tensordev._wordwise.dispatch import _contains_tracer
-
-    return not _contains_tracer((call.y_time, call.coef, call.seed))
-
-
-def _dispatch_fssk_q1_wordwise(
-        call: _PreparedFSSKStateCall,
-        *,
         execution: str,
         weights: Array | None = None,
 ) -> Any | None:
-    """Execute an eligible call, allowing portable fallback only in auto mode."""
-    if not _prepared_fssk_q1_wordwise_eligible(call):
-        if execution == "wordwise":
-            raise ValueError(
-                "execution='wordwise' requires eager inputs outside JAX "
-                "transformations (jit, grad, and vmap)."
-            )
-        return None
-    if execution != "wordwise":
-        if weights is None:
-            return _try_fssk_q1_wordwise(call)
-        return _try_fssk_q1_wordwise_readout(call, weights)
+    """Standard-coordinate states of the wordwise kernel, or with ``weights`` its readout.
 
-    from tensordev._wordwise.fssk import (
-        run_fssk_q1_wordwise,
-        run_fssk_q1_wordwise_readout,
-    )
+    ``None`` under ``execution="auto"`` when the plan or the kernel declines the call.
+    """
+    from tensordev._wordwise import fssk
 
     adapted = _fssk_q1_wordwise_adapter(call)
+    wordwise = execution == "wordwise"
     if weights is None:
-        result = run_fssk_q1_wordwise(adapted)
+        result = (
+            fssk.run_fssk_q1_wordwise if wordwise else fssk.try_fssk_q1_wordwise
+        )(adapted)
     else:
-        result = run_fssk_q1_wordwise_readout(adapted, weights)
-    if result is None:
+        result = (
+            fssk.run_fssk_q1_wordwise_readout
+            if wordwise
+            else fssk.try_fssk_q1_wordwise_readout
+        )(adapted, weights)
+    if result is None and wordwise:
         raise RuntimeError("execution='wordwise' did not produce an FSSK result.")
     return result
 
 
-@partial(jax.jit, static_argnames=("batch_shape", "dtype"))
+def _execute_prepared_fssk_state(
+        call: _PreparedFSSKStateCall,
+        execution: str,
+) -> Any:
+    """Finalized states, from the wordwise kernel or the portable recursion.
+
+    The portable recursion runs for ``execution="jax"`` and when the kernel declines.
+    """
+    states = None if execution == "jax" else _run_fssk_q1_wordwise(call, execution)
+    if states is None:
+        return _finalize_prepared_fssk_state(
+            call, _run_portable_prepared_fssk_state(call), flattened_batch=False
+        )
+    return _finalize_prepared_fssk_state(call, states, flattened_batch=True)
+
+
 def _canonicalize_fssk_q1_readout_weights(
         kernel: FSSK,
         tau_dt: Array | float,
@@ -834,92 +728,6 @@ def _prepare_fssk_q1_wordwise_readout_weights(
         tau_dt,
         batch_shape=call.batch_shape,
         dtype=call.y_time.dtype,
-    )
-
-
-@partial(
-    jax.jit,
-    static_argnames=(
-        "trunc",
-        "maximum_order",
-        "axis",
-        "block_size",
-        "accumulate",
-        "output_starting_state",
-        "increment_input",
-        "core",
-        "seq_core",
-    ),
-)
-def _prepare_fssk_state_for_wordwise(
-        X: Array,
-        *,
-        kernel: FSSK,
-        dt: Array | float,
-        trunc: Any,
-        maximum_order: int,
-        axis: int,
-        block_size: int | None,
-        accumulate: bool,
-        initial_state: Any,
-        output_starting_state: bool,
-        increment_input: bool,
-        core: Any,
-        seq_core: Any,
-) -> _PreparedFSSKStateCall:
-    return _prepare_fssk_state_call(
-        X,
-        kernel=kernel,
-        dt=dt,
-        trunc=trunc,
-        maximum_order=maximum_order,
-        axis=axis,
-        block_size=block_size,
-        accumulate=accumulate,
-        initial_state=initial_state,
-        output_starting_state=output_starting_state,
-        increment_input=increment_input,
-        core=core,
-        seq_core=seq_core,
-    )
-
-
-@partial(
-    jax.jit,
-    static_argnames=(
-        "trunc",
-        "axis",
-        "block_size",
-        "accumulate",
-        "output_starting_state",
-        "core",
-        "seq_core",
-    ),
-)
-def _prepare_fssk_state_from_coef_for_wordwise(
-        y: Array,
-        *,
-        coef: FSSKCoefficients,
-        trunc: Any,
-        axis: int,
-        block_size: int | None,
-        accumulate: bool,
-        initial_state: Any,
-        output_starting_state: bool,
-        core: Any,
-        seq_core: Any,
-) -> _PreparedFSSKStateCall:
-    return _prepare_fssk_state_from_coef_call(
-        y,
-        coef=coef,
-        trunc=trunc,
-        axis=axis,
-        block_size=block_size,
-        accumulate=accumulate,
-        initial_state=initial_state,
-        output_starting_state=output_starting_state,
-        core=core,
-        seq_core=seq_core,
     )
 
 
@@ -1012,7 +820,7 @@ def fssk_state(
         8.0 or newer, outside ``jit``, ``grad``, and ``vmap``.
     """
     execution = _validate_execution(execution)
-    core, seq_core = _resolve_fssk_core_pair(core, seq_core)
+    core, seq_core = _resolve_core_pair(core, seq_core)
     X, dt, block_size, increment_input = _split_steps_for_coefficients(
         X,
         kernel=kernel,
@@ -1050,26 +858,6 @@ def fssk_state(
             dt,
             initial_state,
         )
-    if wordwise_eligible:
-        call = _prepare_fssk_state_for_wordwise(
-            X,
-            kernel=kernel,
-            dt=dt,
-            trunc=active,
-            maximum_order=maximum_order,
-            axis=axis,
-            block_size=block_size,
-            accumulate=accumulate,
-            initial_state=initial_state,
-            output_starting_state=output_starting_state,
-            increment_input=increment_input,
-            core=core,
-            seq_core=seq_core,
-        )
-        states = _dispatch_fssk_q1_wordwise(call, execution=execution)
-        if states is None:
-            return _execute_portable_prepared_fssk_state(call)
-        return _finalize_wordwise_prepared_fssk_state(call, states)
     return _fssk_state_impl(
         X,
         kernel=kernel,
@@ -1084,6 +872,7 @@ def fssk_state(
         increment_input=increment_input,
         core=core,
         seq_core=seq_core,
+        execution=execution if wordwise_eligible else "jax",
     )
 
 
@@ -1099,6 +888,7 @@ def fssk_state(
         "increment_input",
         "core",
         "seq_core",
+        "execution",
     ),
 )
 def _fssk_state_impl(
@@ -1116,6 +906,7 @@ def _fssk_state_impl(
         increment_input: bool,
         core: Any,
         seq_core: Any,
+        execution: str,
 ) -> Any:
     call = _prepare_fssk_state_call(
         X,
@@ -1132,11 +923,7 @@ def _fssk_state_impl(
         core=core,
         seq_core=seq_core,
     )
-    return _finalize_prepared_fssk_state(
-        call,
-        _run_portable_prepared_fssk_state(call),
-        flattened_batch=False,
-    )
+    return _execute_prepared_fssk_state(call, execution)
 
 
 def fssk_state_from_coef(
@@ -1184,7 +971,7 @@ def fssk_state_from_coef(
         ``"auto"``, ``"jax"``, or ``"wordwise"``; see :func:`fssk_state`.
     """
     execution = _validate_execution(execution)
-    core, seq_core = _resolve_fssk_core_pair(core, seq_core)
+    core, seq_core = _resolve_core_pair(core, seq_core)
     if trunc is None and getattr(core, "grading", None) == "total_degree":
         trunc = coef.trunc
     active = core.normalize_truncation(trunc)
@@ -1216,23 +1003,6 @@ def fssk_state_from_coef(
             initial_state,
         )
     coef = _truncate_scalar_coefficients(coef, maximum_order)
-    if wordwise_eligible:
-        call = _prepare_fssk_state_from_coef_for_wordwise(
-            y,
-            coef=coef,
-            trunc=active,
-            axis=axis,
-            block_size=block_size,
-            accumulate=accumulate,
-            initial_state=initial_state,
-            output_starting_state=output_starting_state,
-            core=core,
-            seq_core=seq_core,
-        )
-        states = _dispatch_fssk_q1_wordwise(call, execution=execution)
-        if states is None:
-            return _execute_portable_prepared_fssk_state(call)
-        return _finalize_wordwise_prepared_fssk_state(call, states)
     return _fssk_state_from_coef_impl(
         y,
         coef=coef,
@@ -1244,6 +1014,7 @@ def fssk_state_from_coef(
         output_starting_state=output_starting_state,
         core=core,
         seq_core=seq_core,
+        execution=execution if wordwise_eligible else "jax",
     )
 
 
@@ -1257,6 +1028,7 @@ def fssk_state_from_coef(
         "output_starting_state",
         "core",
         "seq_core",
+        "execution",
     ),
 )
 def _fssk_state_from_coef_impl(
@@ -1271,6 +1043,7 @@ def _fssk_state_from_coef_impl(
         output_starting_state: bool,
         core: Any,
         seq_core: Any,
+        execution: str,
 ) -> Any:
     call = _prepare_fssk_state_from_coef_call(
         y,
@@ -1284,11 +1057,7 @@ def _fssk_state_from_coef_impl(
         core=core,
         seq_core=seq_core,
     )
-    return _finalize_prepared_fssk_state(
-        call,
-        _run_portable_prepared_fssk_state(call),
-        flattened_batch=False,
-    )
+    return _execute_prepared_fssk_state(call, execution)
 
 
 def _update_state(
@@ -1371,7 +1140,7 @@ def fssk_vsig(
         coordinates. With blocking, an emitted block axis appears at ``axis``.
     """
     execution = _validate_execution(execution)
-    core, seq_core = _resolve_fssk_core_pair(core, seq_core)
+    core, seq_core = _resolve_core_pair(core, seq_core)
     X, dt, block_size, increment_input = _split_steps_for_coefficients(
         X,
         kernel=kernel,
@@ -1416,54 +1185,6 @@ def fssk_vsig(
             initial_state,
             tau_dt,
         )
-    if wordwise_eligible:
-        call = _prepare_fssk_state_for_wordwise(
-            X,
-            kernel=kernel,
-            dt=dt,
-            trunc=active,
-            maximum_order=maximum_order,
-            axis=axis,
-            block_size=block_size,
-            accumulate=accumulate,
-            initial_state=initial_state,
-            output_starting_state=output_starting_state,
-            increment_input=increment_input,
-            core=core,
-            seq_core=seq_core,
-        )
-        weights = _prepare_fssk_q1_wordwise_readout_weights(
-            call,
-            kernel,
-            tau_dt,
-        )
-        if weights is not None:
-            signature = _dispatch_fssk_q1_wordwise(
-                call, execution=execution, weights=weights
-            )
-            if signature is None:
-                return _execute_portable_prepared_fssk_vsig(
-                    call,
-                    kernel,
-                    tau_dt,
-                )
-            return _finalize_wordwise_prepared_fssk_readout(
-                call,
-                signature,
-            )
-        states = _dispatch_fssk_q1_wordwise(call, execution=execution)
-        if states is None:
-            return _execute_portable_prepared_fssk_vsig(
-                call,
-                kernel,
-                tau_dt,
-            )
-        return _finalize_wordwise_prepared_fssk_vsig(
-            call,
-            states,
-            kernel,
-            tau_dt,
-        )
     return _fssk_vsig_impl(
         X,
         kernel=kernel,
@@ -1479,6 +1200,7 @@ def fssk_vsig(
         increment_input=increment_input,
         core=core,
         seq_core=seq_core,
+        execution=execution if wordwise_eligible else "jax",
     )
 
 
@@ -1494,6 +1216,7 @@ def fssk_vsig(
         "increment_input",
         "core",
         "seq_core",
+        "execution",
     ),
 )
 def _fssk_vsig_impl(
@@ -1512,8 +1235,9 @@ def _fssk_vsig_impl(
         increment_input: bool,
         core: Any,
         seq_core: Any,
+        execution: str,
 ) -> Any:
-    hidden = _fssk_state_impl(
+    call = _prepare_fssk_state_call(
         X,
         kernel=kernel,
         dt=dt,
@@ -1528,8 +1252,15 @@ def _fssk_vsig_impl(
         core=core,
         seq_core=seq_core,
     )
+    if execution != "jax":
+        weights = _prepare_fssk_q1_wordwise_readout_weights(call, kernel, tau_dt)
+        if weights is not None:
+            signature = _run_fssk_q1_wordwise(call, execution, weights)
+            if signature is not None:
+                return _finalize_wordwise_prepared_fssk_readout(call, signature)
+            execution = "jax"
     return _fssk_readout_impl(
-        hidden,
+        _execute_prepared_fssk_state(call, execution),
         kernel=kernel,
         tau_dt=tau_dt,
         core=core,

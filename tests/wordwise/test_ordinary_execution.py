@@ -16,6 +16,9 @@ from tensordev._wordwise.kernel import WordwiseError
 from tensordev.development import sig as signature_module
 
 
+pytestmark = pytest.mark.usefixtures("fresh_jit_caches")
+
+
 def _increments():
     return jnp.asarray(
         [
@@ -69,8 +72,7 @@ def interpreted_wordwise(monkeypatch):
         return run(call, interpret=True, **kwargs)
 
     monkeypatch.setattr(ordinary, "run_ordinary_wordwise", interpreted)
-    yield calls
-    jax.clear_caches()
+    return calls
 
 
 @pytest.mark.parametrize("execution", [None, "gpu", "WORDWISE", True, 1, [], {}])
@@ -131,9 +133,7 @@ def test_explicit_wordwise_propagates_executor_errors(monkeypatch, error_type):
         raise error
 
     monkeypatch.setattr(ordinary, "run_ordinary_wordwise", fail)
-    monkeypatch.setattr(
-        signature_module, "_execute_portable_free_development_call", _unexpected
-    )
+    monkeypatch.setattr(ordinary, "_execute_portable_free_development_call", _unexpected)
 
     with pytest.raises(error_type) as caught:
         td.path_signature(

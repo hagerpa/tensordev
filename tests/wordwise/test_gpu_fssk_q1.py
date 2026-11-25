@@ -36,10 +36,10 @@ def _supported_devices():
 
 GPU_DEVICES = _supported_devices()
 CPU_DEVICE = jax.devices("cpu")[0]
-pytestmark = pytest.mark.skipif(
-    not GPU_DEVICES,
-    reason="requires a supported NVIDIA JAX device",
-)
+pytestmark = [
+    pytest.mark.skipif(not GPU_DEVICES, reason="requires a supported NVIDIA JAX device"),
+    pytest.mark.usefixtures("fresh_jit_caches"),
+]
 
 
 def _case(name):
@@ -355,67 +355,38 @@ def test_outer_jit_vmap_and_grad_remain_on_the_portable_route(monkeypatch):
     gpu = GPU_DEVICES[0]
     core = td.make_core(dims=2, max_trunc=2)
 
+    def unexpected_native(*args, **kwargs):
+        raise AssertionError("a transformed FSSK call attempted native execution")
+
+    monkeypatch.setattr(
+        state_update_module,
+        "_run_fssk_q1_wordwise",
+        unexpected_native,
+    )
     with jax.default_device(CPU_DEVICE):
         y = _increments(dtype, device=gpu)
         kernel = _q1_kernel(dtype, device=gpu)
         dt = _put(np.asarray(0.07, dtype=dtype), gpu)
         coef = kernel.coef(dt, trunc=2, dtype=jnp.float32)
 
-        monkeypatch.setattr(
-            state_update_module,
-            "_try_fssk_q1_wordwise",
-            lambda *args, **kwargs: None,
-        )
-
-        def portable(value):
+        def state(value, *, axis=1, execution="auto"):
             return fssk_state_from_coef(
                 value,
                 coef=coef,
                 trunc=2,
-                axis=1,
+                axis=axis,
                 core=core,
+                execution=execution,
             )
 
-        expected = portable(y)
+        def objective(value, execution):
+            return _tree_square_norm(state(value, execution=execution))
 
-        def portable_objective(value):
-            return _tree_square_norm(portable(value))
-
-        expected_gradient = jax.grad(portable_objective)(y)
-
-        def unexpected_native(*args, **kwargs):
-            raise AssertionError("a transformed FSSK call attempted native execution")
-
-        monkeypatch.setattr(
-            state_update_module,
-            "_try_fssk_q1_wordwise",
-            unexpected_native,
-        )
-
-        def transformed(value):
-            return fssk_state_from_coef(
-                value,
-                coef=coef,
-                trunc=2,
-                axis=1,
-                core=core,
-            )
-
-        compiled = jax.jit(transformed)(y)
-        vmapped = jax.vmap(
-            lambda value: fssk_state_from_coef(
-                value,
-                coef=coef,
-                trunc=2,
-                axis=0,
-                core=core,
-            )
-        )(y)
-
-        def transformed_objective(value):
-            return _tree_square_norm(transformed(value))
-
-        gradient = jax.grad(transformed_objective)(y)
+        expected = state(y, execution="jax")
+        expected_gradient = jax.grad(objective)(y, "jax")
+        compiled = jax.jit(state)(y)
+        vmapped = jax.vmap(lambda value: state(value, axis=0))(y)
+        gradient = jax.grad(objective)(y, "auto")
 
     _assert_tensors_close(compiled, expected, dtype=dtype)
     _assert_tensors_close(vmapped, expected, dtype=dtype)
@@ -458,7 +429,7 @@ def test_q_greater_than_one_stays_portable_and_matches_public_forms(monkeypatch)
 
     monkeypatch.setattr(
         state_update_module,
-        "_try_fssk_q1_wordwise",
+        "_run_fssk_q1_wordwise",
         unexpected_native,
     )
     with jax.default_device(CPU_DEVICE):

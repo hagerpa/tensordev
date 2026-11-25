@@ -105,6 +105,18 @@ def _resolve_seq_core(core: Any, seq_core: Any | None) -> Any:
     )
 
 
+def _resolve_core_pair(core: Any, seq_core: Any) -> tuple[Any, Any]:
+    """The algebra and sequential core of a call.
+
+    ``core=None`` is the default core; ``seq_core=None`` is the default sequential core
+    for the default core, and otherwise the one ``core`` provides.
+    """
+    default_core, default_seq_core = get_default_core_pair()
+    if core is None or core is default_core:
+        return default_core, default_seq_core if seq_core is None else seq_core
+    return core, _resolve_seq_core(core, seq_core)
+
+
 def _grading_from_dims(dims: Any) -> str:
     """Infer the core grading family from the public ``dims`` convention."""
     if isinstance(dims, bool):

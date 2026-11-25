@@ -3,19 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+import jax
+
 from tensordev.core.bigraded.types import BigradedTensor
 from tensordev.core.sequential import DenseElem, SequentialCore
 from tensordev.core.universal import _Array
-from tensordev._backend import (
-    _resolve_seq_core,
-    get_default_core,
-    get_default_core_pair,
-)
+from tensordev._backend import _resolve_core_pair
 from .free import (
     _execute_portable_free_development_call,
-    _finalize_free_development_call,
     _prepare_free_development_call,
-    free_development,
 )
 
 
@@ -91,50 +87,57 @@ def path_signature(
         its arrays carry a block axis at ``axis``.
     """
     from tensordev._wordwise.dispatch import (
+        _colocate_pytree,
+        _concrete_single_device,
         _validate_execution,
         ordinary_wordwise_device_eligible,
     )
 
     _validate_execution(execution)
-    call = _prepare_free_development_call(
-        (x,),
-        increment_input=increment_input,
-        seq_core=seq_core,
-        trunc=trunc,
-        axis=axis,
-        block_size=block_size,
-        accumulate=accumulate,
-        starting_point=starting_point,
-        output_starting_point=output_starting_point,
+    core, seq_core = _resolve_core_pair(core, seq_core)
+    trunc = core.normalize_truncation(trunc)
+    # Decided from the inputs, before an executor is imported or a plan is built.
+    if ordinary_wordwise_device_eligible(
+        execution=execution,
         parallel=parallel,
         accumulate_in_tree=accumulate_in_tree,
         core=core,
-        colocate_with_input=True,
-    )
+        seq_core=seq_core,
+        reference=x,
+        differentiable_inputs=(x, starting_point),
+    ):
+        from tensordev._wordwise.ordinary import wordwise_path_signature
 
-    # Check concrete device placement before importing an executor or
-    # constructing a wordwise plan.
-    if not ordinary_wordwise_device_eligible(call, execution=execution):
-        return _execute_portable_free_development_call(call)
-    from tensordev._wordwise.ordinary import (
-        run_ordinary_wordwise,
-        try_ordinary_wordwise,
-    )
-
-    result = (
-        run_ordinary_wordwise(call)
-        if execution == "wordwise"
-        else try_ordinary_wordwise(call)
-    )
-    if result is None:
-        if execution == "wordwise":
-            raise RuntimeError("Wordwise signature execution produced no result.")
-        return _execute_portable_free_development_call(call)
-    return _finalize_free_development_call(
-        call,
-        result,
-        runner_applied_seed=False,
-        runner_emitted_starting_point=False,
+        # Committed to the checked device, which therefore runs the program.
+        return wordwise_path_signature(
+            jax.device_put(x, _concrete_single_device(x)),
+            _colocate_pytree(starting_point, x),
+            trunc=trunc,
+            increment_input=increment_input,
+            axis=axis,
+            block_size=block_size,
+            output_starting_point=output_starting_point,
+            accumulate=accumulate,
+            core=core,
+            seq_core=seq_core,
+            execution=execution,
+        )
+    return _execute_portable_free_development_call(
+        _prepare_free_development_call(
+            (x,),
+            increment_input=increment_input,
+            seq_core=seq_core,
+            trunc=trunc,
+            axis=axis,
+            block_size=block_size,
+            accumulate=accumulate,
+            starting_point=starting_point,
+            output_starting_point=output_starting_point,
+            parallel=parallel,
+            accumulate_in_tree=accumulate_in_tree,
+            core=core,
+            colocate_with_input=True,
+        )
     )
 
 
@@ -164,20 +167,10 @@ class Signature:
     seq_core: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.core is None:
-            object.__setattr__(self, "core", get_default_core())
-        object.__setattr__(
-            self, "trunc", self.core.normalize_truncation(self.trunc)
-        )
-        if self.seq_core is None:
-            default_core, default_seq_core = get_default_core_pair()
-            object.__setattr__(
-                self,
-                "seq_core",
-                default_seq_core
-                if self.core is default_core
-                else _resolve_seq_core(self.core, None),
-            )
+        core, seq_core = _resolve_core_pair(self.core, self.seq_core)
+        object.__setattr__(self, "core", core)
+        object.__setattr__(self, "seq_core", seq_core)
+        object.__setattr__(self, "trunc", core.normalize_truncation(self.trunc))
 
     def __call__(
             self,
